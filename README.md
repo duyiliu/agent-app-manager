@@ -39,7 +39,7 @@ docs/design.md                   # 跨项目管理 v2，非已交付功能
 从 [duyiliu/agent-skills](https://github.com/duyiliu/agent-skills) 的 `skills/engineering/jrebel-start/` 和 `work/任务/JRebel跨项目统一运行管理/design.md` 迁移，基础能力来自 [PR #5](https://github.com/duyiliu/agent-skills/pull/5)，设计来自 [PR #6](https://github.com/duyiliu/agent-skills/pull/6)。
 
 - 新 Skill 名称 `project-runner`；保留原项目日志命名 `jrebel-local-*.log` 和 Viewer 行为，不要求改业务仓库。
-- **未来运行数据目录沿用设计中的 `~/.jrebel-start/`**，避免后续实现破坏已有约定；目前并无已实现的跨项目数据迁移器。
+- 运行数据目录为 `~/.project-runner/`（2026-10-17 由设计初稿的 `~/.jrebel-start/` 更名：管理器已覆盖非 JRebel 的纯 Java 应用，且更名时尚无真实数据，无迁移问题）。
 - 项目启动、构建、许可证配置及服务停止都遵循 Skill 中的授权边界；安装 Skill 不等于获得修改业务项目的授权。
 
 ## 开发边界

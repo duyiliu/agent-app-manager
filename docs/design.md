@@ -38,13 +38,13 @@ Codex / Pi / Claude Code
                               ├─ 自有 JVM 的受管启停与身份核验
                               └─ 运行状态/日志定位
                                         │
-                               ~/.jrebel-start/
+                               ~/.project-runner/
 ~~~
 
 Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下的同一个数据目录。不得把注册表写入 Git 仓库、Skill 安装目录或业务项目。
 
 ~~~text
-~/.jrebel-start/
+~/.project-runner/
 ├── registry.json                   # 已由 Skill 启动的应用及可重用启动描述
 ├── runtime/<appId>.json           # 最近/当前运行实例及验证证据
 └── logs/<appId>/<runId>.*.log     # 管理器直接启动 JVM 的分批日志

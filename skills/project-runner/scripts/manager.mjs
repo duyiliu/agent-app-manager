@@ -4,7 +4,7 @@
 // - 只管理本 Skill 启动并记录的 Java 应用；外部进程绝不接管或终止。
 // - 受管启停依赖 ps/proc.ps1 的"同句柄身份核验 + 终止"，防 PID 复用误杀。
 // - 启动前先持久化意图（runId/STARTING），中断保留证据并拒绝自动重试。
-// - 数据目录 ~/.jrebel-start/（或 --home 绝对路径）；注册表/运行记录带 schemaVersion，
+// - 数据目录 ~/.project-runner/（或 --home 绝对路径）；注册表/运行记录带 schemaVersion，
 //   损坏或不兼容版本拒绝覆盖并保留原件；写入均为临时文件 + 原子替换。
 // - stdout 只输出管理结果，不混入被启动应用的日志（--follow 是用户显式要求的例外）。
 
@@ -66,7 +66,7 @@ function parseArgv(argv) {
 }
 
 function resolveHome(argHome) {
-  const raw = argHome || path.join(os.homedir(), '.jrebel-start');
+  const raw = argHome || path.join(os.homedir(), '.project-runner');
   if (!path.isAbsolute(raw)) throw usageError(`--home 需要绝对路径：${raw}`);
   fs.mkdirSync(raw, { recursive: true });
   const home = fs.realpathSync.native(raw);

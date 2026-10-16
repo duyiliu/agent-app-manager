@@ -1,11 +1,11 @@
 ---
 name: project-runner
-description: Agent 驱动的本地 Java 项目启动助手：读取 Maven/Gradle 或现有启动脚本，初始化/使用 standalone JRebel，启动、查看日志并验证热更新。用户要求启动 Java/Spring Boot 服务、配置或排查 JRebel 时使用；跨项目统一托管仅有设计，暂未实现。
+description: Agent 驱动的本地 Java 项目启动助手：读取 Maven/Gradle 或现有启动脚本，初始化/使用 standalone JRebel，启动、查看日志并验证热更新。用户要求启动 Java/Spring Boot 服务、配置或排查 JRebel 时使用；跨项目运行管理（manager.mjs）已实现，用法见第 8 章。
 ---
 
 # Project Runner · Java / Standalone JRebel 启动流程
 
-本 Skill 现阶段只实现 Java / JRebel 专项能力；跨项目运行管理参见仓库 `docs/design.md`，**尚未实现 `manager.mjs`**，不可声称能执行全局启停。本 Skill 的目标不是提供一条适用于所有项目的固定命令，而是让 AI 先从当前仓库识别项目，再匹配最合适的启动方式。**不要要求用户手工提供可从项目中可靠识别的构建工具、主类、模块 classpath、端口或插件信息。**
+本 Skill 覆盖两部分能力：Java / JRebel 单项目专项流程（第 1–7 节）与跨项目运行管理 `manager.mjs`（第 8 节，已实现）。跨项目管理只操作**由本 Skill 启动并登记**的 Java 应用，不接管外部进程，不声称全机启停能力。本 Skill 的目标不是提供一条适用于所有项目的固定命令，而是让 AI 先从当前仓库识别项目，再匹配最合适的启动方式。**不要要求用户手工提供可从项目中可靠识别的构建工具、主类、模块 classpath、端口或插件信息。**
 
 Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环境变量 `REBEL_HOME` 或 `JREBEL_HOME` 解析；两者均未设置时，检查用户指定路径和平台常见安装目录，不将某台机器的绝对路径当作通用默认值。`REBEL_HOME`/`JREBEL_HOME` 指向安装根目录，`REBEL_BASE`/`-Drebel.base` 指向用户配置、许可和日志目录，两者不可混淆。
 
@@ -123,7 +123,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ## 8. 跨项目管理（manager.mjs，多项目/跨会话）
 
-定位：全局安装一次本 Skill 后，在任意业务目录用同一数据目录（默认 `~/.jrebel-start/`）查看与管理**由本 Skill 启动并记录**的 Java 应用。不是全机进程管理器；IDEA/手工 Maven/手工 `java -jar`/Docker 启动的进程一律不接管、不停止，只可在端口冲突诊断时查看。统一入口（路径按实际安装位置解析，无需 cd 到业务目录）：
+定位：全局安装一次本 Skill 后，在任意业务目录用同一数据目录（默认 `~/.project-runner/`）查看与管理**由本 Skill 启动并记录**的 Java 应用。不是全机进程管理器；IDEA/手工 Maven/手工 `java -jar`/Docker 启动的进程一律不接管、不停止，只可在端口冲突诊断时查看。统一入口（路径按实际安装位置解析，无需 cd 到业务目录）：
 
 ```bash
 node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json] <命令>
@@ -139,5 +139,5 @@ Agent 使用规程：
 3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
 4. **停止/重启**：仅受管实例可用。语义是**有界强制终止**（Windows 同句柄核验后 TerminateProcess，退出码 137，不杀进程树、无优雅关机），执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
 5. **状态解读**：`RUNNING`=进程存活（不等于业务就绪）；`STOPPED` 有退出证据；`STARTING`=启动进行中；`UNKNOWN`=中断/身份不可核验/非受管记录。PID/端口仅有证据才填写；JRebel 是否验证、业务是否就绪与本状态分开表述，不互相冒充。
-6. **数据与安全**：注册表/运行记录在 `~/.jrebel-start/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样，viewer 仍是单项目工具，全局查日志用 `manager logs`。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
+6. **数据与安全**：注册表/运行记录在 `~/.project-runner/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样，viewer 仍是单项目工具，全局查日志用 `manager logs`。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
 7. **退出码**：0 成功；1 用法；2 未找到；3 状态冲突（已运行/别名占用/身份不明/配置失效等）；4 环境依赖（缺 pwsh 7）；5 数据损坏。`--json` 输出单一稳定对象（`schemaVersion/ok/command/data|error`），脚本化调用优先用它。
