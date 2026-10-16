@@ -4,8 +4,326 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JRebel 项目工作台</title>
 <style>
-*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;background:#171b22;color:#cbd5e1;font:13px Consolas,"Microsoft YaHei",monospace}button,input,select{font:inherit;color:inherit;background:#252d39;border:1px solid #354052;border-radius:5px;padding:5px 9px}button{cursor:pointer}button:hover{background:#344254}button.on{background:#285b62;color:#a9f2dd}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #79bfe9}.workspace{display:grid;grid-template-columns:var(--sidebar,330px) 6px minmax(0,1fr);height:100vh}aside{height:100vh;min-height:0;display:grid;grid-template-rows:minmax(140px,42%) minmax(0,1fr);min-width:0;background:#1b2029}.panel{display:flex;flex-direction:column;min-height:0;overflow:hidden}.panel-title{padding:12px;border-bottom:1px solid #313b49;display:flex;gap:8px;align-items:center}.panel-title strong{flex:1}.badge{font-size:11px;color:#90a0b5}#projectLabel{padding:8px 12px;color:#90a0b5;font-size:11px;overflow-wrap:anywhere}#tree{overflow:auto;flex:1;padding:4px 8px}.tree-group{padding-left:14px}.tree-item{display:block;width:100%;border:0;background:none;text-align:left;white-space:nowrap;padding:5px 8px;color:#b8c8db}.tree-item.selected{background:#27475e;color:#a3ddff}.hint{padding:12px;color:#93a3b8;line-height:1.7}.error{color:#ff9f9f}#previewPath{padding:10px 12px 0;overflow-wrap:anywhere;color:#bddcf4;font-size:12px}#previewMeta{padding:6px 12px;color:#90a0b5;font-size:11px}#previewBody{overflow:auto;flex:1;background:#151920;padding:8px 0}.code-line{display:flex;min-width:max-content;line-height:1.65}.number{min-width:46px;text-align:right;padding:0 12px 0 6px;color:#697b94;user-select:none}.code-text{white-space:pre;padding-right:14px}#splitter{background:#303c4b;cursor:col-resize;touch-action:none}#splitter:hover{background:#60b7bb}main{display:flex;flex-direction:column;min-width:0;min-height:0}header{padding:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#202733;border-bottom:1px solid #313b49}header strong{color:#8bd9ca}#fileSel{max-width:100%;min-width:0}#kw{width:190px}label{display:flex;align-items:center;gap:4px}#status{width:100%;color:#91abc9;font-size:11px;overflow-wrap:anywhere}#status.bad{color:#ff9f9f}#log{flex:1;overflow:auto;padding:10px 0 30px;white-space:pre-wrap;word-break:break-all;background:#181d25}.line{padding:0 12px;line-height:1.55}.line.jr{color:#8bd9ca;background:#22413b33}.line.err{color:#ffa1a1;background:#6f30302b}.line.warn{color:#e2cc87}.line.sql{color:#8492a7}@media(max-width:720px){.workspace{display:flex;flex-direction:column}aside{height:45vh;flex:none;grid-template-columns:40% 60%;grid-template-rows:1fr}#splitter{display:none}main{flex:1}.panel-title{padding:8px}.badge{font-size:10px}}
-.workspace.files-collapsed{grid-template-columns:minmax(0,1fr)}.workspace.files-collapsed>aside,.workspace.files-collapsed>#splitter{display:none}
+* {
+  box-sizing:border-box}
+body {
+  margin:0;
+  height:100vh;
+  overflow:hidden;
+  background:#171b22;
+  color:#cbd5e1;
+  font:13px Consolas,"Microsoft YaHei",monospace}
+button,input,select {
+  font:inherit;
+  color:inherit;
+  background:#252d39;
+  border:1px solid #354052;
+  border-radius:5px;
+  padding:5px 9px}
+button {
+  cursor:pointer}
+button:hover {
+  background:#344254}
+button.on {
+  background:#285b62;
+  color:#a9f2dd}
+button:focus-visible,input:focus-visible,select:focus-visible {
+  outline:2px solid #79bfe9}
+.workspace {
+  display:grid;
+  grid-template-columns:var(--sidebar,330px) 6px minmax(0,1fr);
+  height:100vh}
+aside {
+  height:100vh;
+  min-height:0;
+  display:grid;
+  grid-template-rows:minmax(140px,42%) minmax(0,1fr);
+  min-width:0;
+  background:#1b2029}
+.panel {
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+  overflow:hidden}
+.panel-title {
+  padding:12px;
+  border-bottom:1px solid #313b49;
+  display:flex;
+  gap:8px;
+  align-items:center}
+.panel-title strong {
+  flex:1}
+.badge {
+  font-size:11px;
+  color:#90a0b5}
+#projectLabel {
+  padding:8px 12px;
+  color:#90a0b5;
+  font-size:11px;
+  overflow-wrap:anywhere}
+#tree {
+  overflow:auto;
+  flex:1;
+  padding:4px 8px}
+.tree-group {
+  padding-left:14px}
+.tree-item {
+  display:block;
+  width:100%;
+  border:0;
+  background:none;
+  text-align:left;
+  white-space:nowrap;
+  padding:5px 8px;
+  color:#b8c8db}
+.tree-item.selected {
+  background:#27475e;
+  color:#a3ddff}
+.hint {
+  padding:12px;
+  color:#93a3b8;
+  line-height:1.7}
+.error {
+  color:#ff9f9f}
+#previewPath {
+  padding:10px 12px 0;
+  overflow-wrap:anywhere;
+  color:#bddcf4;
+  font-size:12px}
+#previewMeta {
+  padding:6px 12px;
+  color:#90a0b5;
+  font-size:11px}
+#previewBody {
+  overflow:auto;
+  flex:1;
+  background:#151920;
+  padding:8px 0}
+.code-line {
+  display:flex;
+  min-width:max-content;
+  line-height:1.65}
+.number {
+  min-width:46px;
+  text-align:right;
+  padding:0 12px 0 6px;
+  color:#697b94;
+  user-select:none}
+.code-text {
+  white-space:pre;
+  padding-right:14px}
+#splitter {
+  background:#303c4b;
+  cursor:col-resize;
+  touch-action:none}
+#splitter:hover {
+  background:#60b7bb}
+main {
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  min-height:0}
+header {
+  padding:12px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  background:#202733;
+  border-bottom:1px solid #313b49}
+header strong {
+  color:#8bd9ca}
+#fileSel {
+  max-width:100%;
+  min-width:0}
+#kw {
+  width:190px}
+label {
+  display:flex;
+  align-items:center;
+  gap:4px}
+#status {
+  width:100%;
+  color:#91abc9;
+  font-size:11px;
+  overflow-wrap:anywhere}
+#status.bad {
+  color:#ff9f9f}
+#log {
+  flex:1;
+  overflow:auto;
+  padding:10px 0 30px;
+  white-space:pre-wrap;
+  word-break:break-all;
+  background:#181d25}
+.line {
+  padding:0 12px;
+  line-height:1.55}
+.line.jr {
+  color:#8bd9ca;
+  background:#22413b33}
+.line.err {
+  color:#ffa1a1;
+  background:#6f30302b}
+.line.warn {
+  color:#e2cc87}
+.line.sql {
+  color:#8492a7}
+@media(max-width:720px) {
+  .workspace {
+  display:flex;
+  flex-direction:column}
+aside {
+  height:45vh;
+  flex:none;
+  grid-template-columns:40% 60%;
+  grid-template-rows:1fr}
+#splitter {
+  display:none}
+main {
+  flex:1}
+.panel-title {
+  padding:8px}
+.badge {
+  font-size:10px}
+}
+
+.workspace.files-collapsed {
+  grid-template-columns:minmax(0,1fr)}
+.workspace.files-collapsed>aside,.workspace.files-collapsed>#splitter {
+  display:none}
+
+
+header  {
+   display:block;
+   padding:10px 12px;
+   }
+
+.toolbar,.searchbar,.diagnosticbar  {
+   display:flex;
+   gap:6px;
+   align-items:center;
+   min-width:0;
+   margin-bottom:7px;
+   flex-wrap:wrap;
+   }
+
+.toolbar strong  {
+   flex:1;
+   overflow:hidden;
+   white-space:nowrap;
+   text-overflow:ellipsis;
+   min-width:70px;
+   }
+
+#fileSel  {
+   flex:1 1 230px;
+   width:230px;
+   }
+ #kw  {
+   flex:1;
+   width:auto;
+   min-width:100px;
+   }
+
+#matchCount  {
+   color:#93a3b8;
+   font-size:11px;
+   }
+ #exceptionSelect  {
+   flex:1;
+   min-width:80px;
+   max-width:420px;
+   }
+
+#boundaries  {
+   color:#d9bd83;
+   font-size:11px;
+   margin-top:4px;
+   }
+ #copyFeedback  {
+   font-size:11px;
+   color:#8bd9ca;
+   }
+
+.quick-tools { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.log-container  {
+   flex:1;
+   min-height:0;
+   position:relative;
+   display:flex;
+   }
+ #log  {
+   position:relative;
+   width:100%;
+   }
+
+#newLines  {
+   position:absolute;
+   bottom:14px;
+   right:20px;
+   background:#285b62;
+   box-shadow:0 3px 12px #0008;
+   }
+
+mark  {
+   background:#80651c;
+   color:#fff4c8;
+   border-radius:2px;
+   }
+ .search-current  {
+   border-left:3px solid #f0c66b;
+   background:#55451f66;
+   }
+
+dialog  {
+   background:#202733;
+   color:#cbd5e1;
+   border:1px solid #53657b;
+   border-radius:8px;
+   max-width:90vw;
+   width:760px;
+   }
+ dialog::backdrop  {
+   background:#0009;
+   }
+ textarea  {
+   width:100%;
+   height:45vh;
+   background:#151920;
+   color:#d4e0f0;
+   }
+ button:disabled  {
+   opacity:.45;
+   cursor:default;
+   }
+
+@media(max-width:720px)  {
+   header  {
+   padding:8px;
+   }
+ #projName  {
+   display:none;
+   }
+ #fileSel  {
+   flex:1;
+   width:130px;
+   }
+ .diagnosticbar button  {
+   font-size:11px;
+   padding:4px;
+   }
+ #status  {
+   display:block;
+   max-height:30px;
+   overflow:hidden;
+   }
+ .quick-tools  {
+   min-width:0;
+   flex-wrap:wrap;
+   }
+ }
+
 </style>
 </head>
 <body><div class="workspace files-collapsed">
@@ -13,10 +331,18 @@
 <section class="panel" aria-label="文件浏览器"><div class="panel-title"><strong>项目文件</strong><span class="badge">只读</span><button id="refreshTree" aria-label="刷新文件树">↻</button></div><div id="projectLabel"></div><div id="tree" aria-label="项目文件树"></div></section>
 <section class="panel" aria-label="文件预览"><div class="panel-title"><strong>文件预览</strong><span class="badge">UTF-8 · 256 KB</span></div><div id="previewPath">尚未选择文件</div><div id="previewMeta"></div><div id="previewBody"><div class="hint">点击上方文件查看内容。<br>仅浏览当前项目，不支持编辑或删除。</div></div></section>
 </aside><div id="splitter" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" tabindex="0"></div>
-<main aria-label="实时日志"><header><button id="toggleFiles" aria-expanded="false" aria-controls="filesPanel">展开文件区</button><strong id="projName">JRebel 日志</strong><select id="fileSel" aria-label="启动日志"></select><button class="mode on" data-mode="">全部</button><button class="mode" data-mode="jr">JRebel/错误</button><button class="mode" data-mode="err">仅错误</button><input id="kw" placeholder="关键词过滤（回车生效）" aria-label="关键词过滤"><button id="pauseBtn">暂停</button><label><input type="checkbox" id="autoScroll" checked>自动滚动</label><button id="clearBtn">清屏</button><span id="status">连接中…</span></header><div id="log"></div></main></div>
+<main aria-label="实时日志">
+<header>
+  <div class="toolbar"><button id="toggleFiles" aria-expanded="false" aria-controls="filesPanel">文件</button><strong id="projName">JRebel</strong><select id="fileSel" aria-label="启动日志"></select><button id="followBtn" aria-pressed="true">跟随中</button></div>
+  <div class="searchbar"><input id="kw" placeholder="搜索日志，Enter 下一处" aria-label="搜索日志"><span id="matchCount"></span><button id="previousMatch" aria-label="上一处">↑</button><button id="nextMatch" aria-label="下一处">↓</button><button id="exitContext" hidden>退出上下文</button><div class="quick-tools"><select id="level" aria-label="级别过滤"><option value="">全部日志</option><option value="jr">JRebel / 错误</option><option value="err">仅错误</option></select><button id="pauseBtn">暂停读取</button><button id="clearBtn">清屏</button></div></div>
+  <div class="diagnosticbar"><select id="exceptionSelect" aria-label="选择异常块"><option value="">异常块（0）</option></select><button id="copyException" disabled>复制异常</button><button id="copySummary" disabled>诊断摘要</button><span id="copyFeedback" role="status"></span></div>
+  <span id="status">连接中…</span><div id="boundaries"></div>
+</header><div class="log-container"><div id="log" tabindex="0" aria-label="日志内容"></div><button id="newLines" hidden>回到底部</button></div>
+</main></div>
+<dialog id="copyFallback"><h3>手动复制诊断内容</h3><p>请检查敏感信息后再分享。选中文本后使用 Ctrl+C。</p><textarea id="copyText" aria-label="待复制诊断内容" readonly></textarea><button id="closeCopy">关闭</button></dialog>
 <script>
 const $=s=>document.querySelector(s), treeEl=$('#tree'), logEl=$('#log');
-$('#toggleFiles').addEventListener('click',()=>{const collapsed=document.querySelector('.workspace').classList.toggle('files-collapsed');$('#toggleFiles').textContent=collapsed?'展开文件区':'收起文件区';$('#toggleFiles').setAttribute('aria-expanded',String(!collapsed));});
+$('#toggleFiles').addEventListener('click',()=>{const collapsed=document.querySelector('.workspace').classList.toggle('files-collapsed');$('#toggleFiles').textContent=collapsed?'文件':'收起文件区';$('#toggleFiles').setAttribute('aria-expanded',String(!collapsed));});
 const fmtSize=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.ceil(n/1024)+' KB';
 function hint(target,text,error=false){const el=document.createElement('div');el.className='hint'+(error?' error':'');el.textContent=text;target.replaceChildren(el);}
 async function request(url,signal){const r=await fetch(url,{signal});const j=await r.json();if(!r.ok)throw new Error(j.error||'读取失败');return j;}
@@ -48,28 +374,201 @@ $('#refreshTree').addEventListener('click',()=>directory('',treeEl,++treeVersion
 const splitter=$('#splitter');
 function resize(width){document.documentElement.style.setProperty('--sidebar',Math.max(260,Math.min(width,640,window.innerWidth-360))+'px');}
 splitter.addEventListener('pointerdown',e=>splitter.setPointerCapture(e.pointerId));splitter.addEventListener('pointermove',e=>{if(splitter.hasPointerCapture(e.pointerId))resize(e.clientX);});splitter.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();resize(splitter.getBoundingClientRect().left+(e.key==='ArrowLeft'?-20:20));}});
-let file='',offset=-1,pending='',decoder=new TextDecoder('utf-8'),generation=0,inFlight=null,controller,paused=false,mode='',keyword='',refreshing=false;
-const modes={jr:/JRebel:|ERROR|Exception|Caused by:/,err:/ERROR|Exception|Caused by:/};
-function classify(text){return /ERROR|Exception|Caused by:/.test(text)?'err':text.includes('JRebel:')?'jr':/\bWARN\b/.test(text)?'warn':/Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(text)?'sql':'';}
-function passes(text){return (!modes[mode]||modes[mode].test(text))&&(!keyword||text.toLowerCase().includes(keyword));}
-function refilter(){for(const el of logEl.children)el.hidden=!passes(el.textContent);}
-function addLine(text){const el=document.createElement('div');el.className='line '+classify(text);el.textContent=text||' ';el.hidden=!passes(text);logEl.appendChild(el);if(logEl.childElementCount>8000){for(let i=0;i<2000;i++)logEl.firstElementChild?.remove();}}
-function status(text,bad=false){$('#status').textContent=text;$('#status').className=bad?'bad':'';}
-async function poll(){
-  if(paused||!file||inFlight===generation)return;
-  const epoch=generation,selected=file,start=offset;inFlight=epoch;const own=new AbortController();controller=own;
-  try{
-    const j=await request('/api/tail?name='+encodeURIComponent(selected)+'&offset='+start,own.signal);if(epoch!==generation||paused)return;
-    if(j.start!==start){pending='';decoder=new TextDecoder('utf-8');}
-    if(j.b64){const bytes=Uint8Array.from(atob(j.b64),c=>c.charCodeAt(0));const parts=(pending+decoder.decode(bytes,{stream:true})).split('\n');pending=parts.pop();for(const p of parts)addLine(p);if($('#autoScroll').checked)logEl.scrollTop=logEl.scrollHeight;}
-    offset=j.offset;status(selected+' · '+fmtSize(j.size)+' · '+logEl.childElementCount+' 行 · '+new Date().toLocaleTimeString());
-  }catch(e){if(epoch===generation&&e.name!=='AbortError')status(e.message+'，稍后重试',true);}finally{if(inFlight===epoch)inFlight=null;}
+let file = '', project = '', offset = -1, pending = '';
+let decoder = new TextDecoder('utf-8');
+let generation = 0, inFlight = null, controller, refreshing = false;
+let paused = false, following = true, unread = 0, mode = '';
+let lines = [], nextId = 1, removed = 0, boundary = '', search = '', matches = [], matchIndex = -1;
+let context = null, exceptions = [], selectedException = null;
+const MAX_LINES = 8000;
+const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:/;
+const continuationPattern = /^\s*(?:at\s+|\.\.\. \d+ (?:more|common)|Caused by:|Suppressed:|[\^~])/;
+
+function classify(text) {
+  return errorPattern.test(text) ? 'err' : text.includes('JRebel:') ? 'jr'
+    : /\bWARN\b/.test(text) ? 'warn'
+    : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(text) ? 'sql' : '';
 }
-function switchTo(name){generation++;controller?.abort();file=name;offset=-1;pending='';decoder=new TextDecoder('utf-8');logEl.replaceChildren();if(!name)status('暂无启动日志');poll();}
-async function refreshLogs(){
-  if(refreshing)return;refreshing=true;
-  try{const j=await request('/api/logs');$('#projName').textContent=j.project+' · 日志';document.title=j.project+' · JRebel 工作台';const selected=file;const select=$('#fileSel');select.replaceChildren();for(const item of j.logs){const option=document.createElement('option');option.value=item.name;option.textContent=item.name.replace('jrebel-local-','').replace('.stdout.log','')+' · '+fmtSize(item.size);select.appendChild(option);}if(j.logs.some(l=>l.name===selected))select.value=selected;if(select.value!==file)switchTo(select.value);}catch(e){status(e.message,true);}finally{refreshing=false;}
+function visible(line, index) {
+  if (context) return index >= context.from && index <= context.to;
+  return !mode || (mode === 'jr' ? ['jr', 'err'].includes(classify(line.text)) : classify(line.text) === 'err');
 }
-$('#fileSel').addEventListener('change',()=>switchTo($('#fileSel').value));$('#pauseBtn').addEventListener('click',()=>{paused=!paused;$('#pauseBtn').textContent=paused?'继续':'暂停';if(paused)controller?.abort();else poll();});$('#clearBtn').addEventListener('click',()=>{logEl.replaceChildren();pending='';});$('#kw').addEventListener('keydown',e=>{if(e.key==='Enter'){keyword=e.target.value.trim().toLowerCase();refilter();}});document.querySelectorAll('.mode').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('.mode').forEach(b=>b.classList.remove('on'));btn.classList.add('on');mode=btn.dataset.mode;refilter();}));
-directory('',treeEl,++treeVersion);refreshLogs();setInterval(poll,1000);setInterval(refreshLogs,5000);
+function scanExceptions() {
+  const blocks = [];
+  let active = null;
+  lines.forEach((line, index) => {
+    const continuation = continuationPattern.test(line.text);
+    if (errorPattern.test(line.text) && !continuation) {
+      active = { id: line.id, from: index, to: index, title: line.text.trim() };
+      blocks.push(active);
+    } else if (active && (continuation || !line.text.trim())) active.to = index;
+    else if (errorPattern.test(line.text)) {
+      active = { id: line.id, from: index, to: index, title: line.text.trim() };
+      blocks.push(active);
+    } else active = null;
+  });
+  return blocks;
+}
+function refreshModel() {
+  matches = [];
+  if (search) lines.forEach((line, index) => { if (line.text.toLowerCase().includes(search)) matches.push(index); });
+  matchIndex = Math.min(matchIndex, matches.length - 1);
+  exceptions = scanExceptions();
+  if (!exceptions.some(b => b.id === selectedException)) selectedException = null;
+}
+function highlighted(text) {
+  const fragment = document.createDocumentFragment();
+  if (!search) { fragment.appendChild(document.createTextNode(text || ' ')); return fragment; }
+  let start = 0, at;
+  const lower = text.toLowerCase();
+  while ((at = lower.indexOf(search, start)) !== -1) {
+    fragment.appendChild(document.createTextNode(text.slice(start, at)));
+    const mark = document.createElement('mark'); mark.textContent = text.slice(at, at + search.length); fragment.appendChild(mark);
+    start = at + search.length;
+  }
+  fragment.appendChild(document.createTextNode(text.slice(start) || (text ? '' : ' ')));
+  return fragment;
+}
+function render() {
+  refreshModel();
+  const oldScroll = logEl.scrollTop;
+  const firstVisible = Array.from(logEl.children).find(el => el.offsetTop + el.offsetHeight >= oldScroll);
+  const anchorId = firstVisible?.dataset.id;
+  const anchorDelta = firstVisible ? firstVisible.offsetTop - oldScroll : 0;
+  const fragment = document.createDocumentFragment();
+  lines.forEach((line, index) => {
+    if (!visible(line, index)) return;
+    const el = document.createElement('div'); el.className = 'line ' + classify(line.text); el.dataset.id = line.id;
+    if (matches[matchIndex] === index) el.classList.add('search-current');
+    el.appendChild(highlighted(line.text)); fragment.appendChild(el);
+  });
+  if (!lines.length) { const empty = document.createElement('div'); empty.className = 'hint'; empty.textContent = file ? '等待日志输出…' : '暂无启动日志'; fragment.appendChild(empty); }
+  logEl.replaceChildren(fragment);
+  if (following) logEl.scrollTop = logEl.scrollHeight;
+  else {
+    const anchor = Array.from(logEl.children).find(el => el.dataset.id === anchorId);
+    logEl.scrollTop = anchor ? anchor.offsetTop - anchorDelta : oldScroll;
+  }
+  $('#matchCount').textContent = search ? (matches.length ? (matchIndex + 1) + '/' + matches.length + ' 行' : '无匹配') : '搜索保留上下文';
+  $('#previousMatch').disabled = $('#nextMatch').disabled = !matches.length;
+  const select = $('#exceptionSelect'), previous = String(selectedException || '');
+  select.replaceChildren(new Option('异常块（' + exceptions.length + '）', ''));
+  for (const block of exceptions) select.appendChild(new Option(block.title.slice(0, 100), String(block.id)));
+  select.value = previous;
+  $('#copyException').disabled = $('#copySummary').disabled = !selectedException;
+  $('#exitContext').hidden = !context;
+  $('#boundaries').textContent = [boundary, removed ? '已移除较早的 ' + removed + ' 行' : '', context ? '正在显示定位点前后上下文（临时覆盖级别过滤）' : ''].filter(Boolean).join(' · ');
+  updateFollow();
+}
+function updateFollow() {
+  $('#followBtn').textContent = following ? '跟随中' : '恢复跟随';
+  $('#followBtn').setAttribute('aria-pressed', String(following));
+  $('#newLines').hidden = following;
+  $('#newLines').textContent = (unread ? '新增 ' + unread + ' 行 · ' : '') + '回到底部';
+}
+function resumeFollow() {
+  following = true; unread = 0; context = null; render();
+}
+function locate(index) {
+  following = false;
+  context = { from: Math.max(0, index - 5), to: Math.min(lines.length - 1, index + 12) };
+  render();
+  const el = Array.from(logEl.children).find(el => el.dataset.id === String(lines[index]?.id));
+  if (el) logEl.scrollTop = Math.max(0, el.offsetTop - logEl.offsetTop - 60);
+}
+function navigateMatch(delta) {
+  if (!matches.length) return;
+  matchIndex = matchIndex < 0 ? (delta < 0 ? matches.length - 1 : 0) : (matchIndex + delta + matches.length) % matches.length;
+  locate(matches[matchIndex]);
+}
+function status(text, bad = false) { $('#status').textContent = text; $('#status').className = bad ? 'bad' : ''; }
+async function poll() {
+  if (paused || !file || inFlight === generation) return;
+  const epoch = generation, selected = file, start = offset;
+  inFlight = epoch; const own = new AbortController(); controller = own;
+  try {
+    const j = await request('/api/tail?name=' + encodeURIComponent(selected) + '&offset=' + start, own.signal);
+    if (epoch !== generation || paused) return;
+    if (j.start !== start) {
+      pending = ''; decoder = new TextDecoder('utf-8');
+      if (start >= 0) { lines = []; context = null; selectedException = null; removed = 0; unread = 0; boundary = '日志已截断，读取位置已重置'; }
+      else boundary = j.start > 0 ? '已加载尾部 256 KB，更早内容未加载' : '从文件起始读取';
+    }
+    if (j.b64) {
+      const bytes = Uint8Array.from(atob(j.b64), c => c.charCodeAt(0));
+      const parts = (pending + decoder.decode(bytes, { stream: true })).split('\n'); pending = parts.pop();
+      for (const text of parts) lines.push({ id: nextId++, text: text.replace(/\r$/, '') });
+      if (!following) unread += parts.length;
+      if (lines.length > MAX_LINES) {
+        const count = lines.length - MAX_LINES; lines.splice(0, count); removed += count;
+        if (context) { context.from = Math.max(0, context.from - count); context.to = Math.max(0, context.to - count); }
+      }
+      render();
+    }
+    offset = j.offset;
+    status(selected + ' · ' + fmtSize(j.size) + ' · 缓存 ' + lines.length + ' 行 · ' + new Date().toLocaleTimeString());
+  } catch (e) { if (epoch === generation && e.name !== 'AbortError') status(e.message + '，稍后重试', true); }
+  finally { if (inFlight === epoch) inFlight = null; }
+}
+function switchTo(name) {
+  generation++; controller?.abort(); file = name; offset = -1; pending = ''; decoder = new TextDecoder('utf-8');
+  lines = []; nextId = 1; removed = 0; boundary = ''; unread = 0; following = true; context = null; matchIndex = -1; selectedException = null;
+  render(); if (!name) status('暂无启动日志'); poll();
+}
+async function refreshLogs() {
+  if (refreshing) return; refreshing = true;
+  try {
+    const j = await request('/api/logs'); project = j.project;
+    $('#projName').textContent = project; document.title = project + ' · JRebel 工作台';
+    const selected = file, select = $('#fileSel'); select.replaceChildren();
+    for (const item of j.logs) select.appendChild(new Option(item.name.replace('jrebel-local-', '').replace('.log', '') + ' · ' + fmtSize(item.size), item.name));
+    if (j.logs.some(l => l.name === selected)) select.value = selected;
+    else {
+      if (j.logs.length) select.value = j.logs[0].name;
+    }
+    if (select.value !== file) switchTo(select.value);
+  } catch (e) { status(e.message, true); } finally { refreshing = false; }
+}
+async function copyDiagnostic(summary) {
+  const block = exceptions.find(b => b.id === selectedException); if (!block) return;
+  const from = Math.max(0, block.from - 3), to = Math.min(lines.length, block.to + 4, from + 180);
+  const body = lines.slice(from, to).map(l => l.text).join('\n');
+  const heading = '项目：' + project + '\n日志：' + file + '\n异常及上下文（最多 180 行）：\n';
+  const text = (summary ? '诊断摘要\n筛选：' + (mode || '全部') + '\n搜索：' + (search || '无') + '\n' : '') + heading + body;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+    await navigator.clipboard.writeText(text); $('#copyFeedback').textContent = '已复制；请检查敏感内容后再分享';
+  } catch {
+    $('#copyText').value = text; $('#copyFallback').showModal(); $('#copyText').select();
+    $('#copyFeedback').textContent = '剪贴板不可用，请在窗口内手动复制';
+  }
+}
+$('#fileSel').addEventListener('change', () => switchTo($('#fileSel').value));
+$('#pauseBtn').addEventListener('click', () => {
+  paused = !paused; $('#pauseBtn').textContent = paused ? '继续读取' : '暂停读取';
+  if (paused) controller?.abort(); else poll();
+});
+$('#followBtn').addEventListener('click', () => { if (following) { following = false; updateFollow(); } else resumeFollow(); });
+$('#newLines').addEventListener('click', resumeFollow);
+logEl.addEventListener('wheel', e => { if (e.deltaY < 0) { following = false; updateFollow(); } }, { passive: true });
+logEl.addEventListener('scroll', () => {
+  if (logEl.scrollTop + logEl.clientHeight < logEl.scrollHeight - 40 && following) { following = false; updateFollow(); }
+}, { passive: true });
+$('#clearBtn').addEventListener('click', () => { lines = []; pending = ''; context = null; unread = 0; removed = 0; selectedException = null; boundary = '显示已清空，后续读取继续'; render(); });
+$('#kw').addEventListener('input', e => { search = e.target.value.trim().toLowerCase(); matchIndex = -1; context = null; render(); });
+$('#kw').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); navigateMatch(e.shiftKey ? -1 : 1); } });
+$('#previousMatch').addEventListener('click', () => navigateMatch(-1));
+$('#nextMatch').addEventListener('click', () => navigateMatch(1));
+$('#level').addEventListener('change', e => { mode = e.target.value; context = null; render(); });
+$('#exitContext').addEventListener('click', () => { context = null; render(); });
+$('#exceptionSelect').addEventListener('change', e => {
+  selectedException = Number(e.target.value) || null;
+  const block = exceptions.find(b => b.id === selectedException); if (block) locate(block.from); else render();
+});
+$('#copyException').addEventListener('click', () => copyDiagnostic(false));
+$('#copySummary').addEventListener('click', () => copyDiagnostic(true));
+$('#closeCopy').addEventListener('click', () => $('#copyFallback').close());
+directory('', treeEl, ++treeVersion); refreshLogs(); render();
+setInterval(poll, 1000); setInterval(refreshLogs, 5000);
+
 </script></body></html>
