@@ -118,3 +118,24 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 ## 7. AI 输出要求
 
 用户要求实际启动时，按顺序报告：项目识别结果 → 启动前检查/是否复用或被端口阻塞 → 启动命令或脚本 → JRebel banner 与应用就绪证据 → 用户要求的业务验证结果。失败要引用日志证据并说清是否有进程/文件/数据副作用；没有执行的步骤不要声称完成。
+
+## 8. 跨项目管理（manager.mjs，多项目/跨会话）
+
+定位：全局安装一次本 Skill 后，在任意业务目录用同一数据目录（默认 `~/.jrebel-start/`）查看与管理**由本 Skill 启动并记录**的 Java 应用。不是全机进程管理器；IDEA/手工 Maven/手工 `java -jar`/Docker 启动的进程一律不接管、不停止，只可在端口冲突诊断时查看。统一入口（路径按实际安装位置解析，无需 cd 到业务目录）：
+
+```bash
+node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json] <命令>
+# list | status <别名|appId> | start <别名|appId> | stop <别名|appId> | restart <别名|appId>
+# logs <别名|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]
+# 内部入口（Agent 用）：start-new --desc <file> | record-unmanaged --desc <file> [--log-hints p1,p2]
+```
+
+Agent 使用规程：
+
+1. **首次启动（受管登记）**：按第 1 节完成项目识别、第 3/4 节完成命令匹配与启动前检查后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`）、`exe`（**必须指向真实 JDK bin 的 java.exe**，如 `%JAVA_HOME%\bin\java.exe`；裸名 `java` 会先取 `JAVA_HOME` 再查 PATH，解析到 Oracle javapath 转发 shim 会被拒绝——shim 会让真实 JVM 变成子进程，日志句柄不落地、终止错位）、`args`（字符串数组，直接 JVM 形态：`-cp`/`-jar` + 主类/参数，含 JRebel agent 参数）、`envRefs`（仅环境变量**名称**数组，启动时从当前环境解析，值不落注册表）、`expectedPort`。manager 按“持久化意图 → detached 启动 → 同句柄身份采集 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定。
+2. **非受管启动**：项目只有启动脚本且无法安全定位目标 JVM（包装进程、多 JVM、远端拉起）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
+3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
+4. **停止/重启**：仅受管实例可用。语义是**有界强制终止**（Windows 同句柄核验后 TerminateProcess，退出码 137，不杀进程树、无优雅关机），执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
+5. **状态解读**：`RUNNING`=进程存活（不等于业务就绪）；`STOPPED` 有退出证据；`STARTING`=启动进行中；`UNKNOWN`=中断/身份不可核验/非受管记录。PID/端口仅有证据才填写；JRebel 是否验证、业务是否就绪与本状态分开表述，不互相冒充。
+6. **数据与安全**：注册表/运行记录在 `~/.jrebel-start/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样，viewer 仍是单项目工具，全局查日志用 `manager logs`。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
+7. **退出码**：0 成功；1 用法；2 未找到；3 状态冲突（已运行/别名占用/身份不明/配置失效等）；4 环境依赖（缺 pwsh 7）；5 数据损坏。`--json` 输出单一稳定对象（`schemaVersion/ok/command/data|error`），脚本化调用优先用它。
