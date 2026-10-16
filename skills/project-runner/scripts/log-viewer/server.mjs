@@ -8,7 +8,7 @@ const ROOT = fs.realpathSync(process.cwd());
 const LOG_DIR = path.join(ROOT, '.tmp');
 const PROJECT = path.basename(ROOT);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const NAME_RE = /^jrebel-local-[^/\\]+\.stdout\.log$/;
+const NAME_RE = /^jrebel-local-[^/\\]+\.(stdout|stderr)\.log$/;
 const CHUNK = 256 * 1024;
 const blocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
   || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
@@ -89,7 +89,11 @@ const server = http.createServer((req, res) => {
           } catch { /* 文件可能在列举后被清理。 */ }
         }
       }
-      logs.sort((a, b) => b.name.localeCompare(a.name));
+      logs.sort((a, b) => {
+        const batchA = a.name.replace(/\.(stdout|stderr)\.log$/, '');
+        const batchB = b.name.replace(/\.(stdout|stderr)\.log$/, '');
+        return batchB.localeCompare(batchA) || Number(b.name.endsWith('.stdout.log')) - Number(a.name.endsWith('.stdout.log'));
+      });
       return json(res, 200, { logs, project: PROJECT });
     }
     if (u.pathname === '/api/tail') {
