@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JRebel 项目工作台</title>
+<style>
+*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;background:#171b22;color:#cbd5e1;font:13px Consolas,"Microsoft YaHei",monospace}button,input,select{font:inherit;color:inherit;background:#252d39;border:1px solid #354052;border-radius:5px;padding:5px 9px}button{cursor:pointer}button:hover{background:#344254}button.on{background:#285b62;color:#a9f2dd}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #79bfe9}.workspace{display:grid;grid-template-columns:var(--sidebar,330px) 6px minmax(0,1fr);height:100vh}aside{height:100vh;min-height:0;display:grid;grid-template-rows:minmax(140px,42%) minmax(0,1fr);min-width:0;background:#1b2029}.panel{display:flex;flex-direction:column;min-height:0;overflow:hidden}.panel-title{padding:12px;border-bottom:1px solid #313b49;display:flex;gap:8px;align-items:center}.panel-title strong{flex:1}.badge{font-size:11px;color:#90a0b5}#projectLabel{padding:8px 12px;color:#90a0b5;font-size:11px;overflow-wrap:anywhere}#tree{overflow:auto;flex:1;padding:4px 8px}.tree-group{padding-left:14px}.tree-item{display:block;width:100%;border:0;background:none;text-align:left;white-space:nowrap;padding:5px 8px;color:#b8c8db}.tree-item.selected{background:#27475e;color:#a3ddff}.hint{padding:12px;color:#93a3b8;line-height:1.7}.error{color:#ff9f9f}#previewPath{padding:10px 12px 0;overflow-wrap:anywhere;color:#bddcf4;font-size:12px}#previewMeta{padding:6px 12px;color:#90a0b5;font-size:11px}#previewBody{overflow:auto;flex:1;background:#151920;padding:8px 0}.code-line{display:flex;min-width:max-content;line-height:1.65}.number{min-width:46px;text-align:right;padding:0 12px 0 6px;color:#697b94;user-select:none}.code-text{white-space:pre;padding-right:14px}#splitter{background:#303c4b;cursor:col-resize;touch-action:none}#splitter:hover{background:#60b7bb}main{display:flex;flex-direction:column;min-width:0;min-height:0}header{padding:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#202733;border-bottom:1px solid #313b49}header strong{color:#8bd9ca}#fileSel{max-width:100%;min-width:0}#kw{width:190px}label{display:flex;align-items:center;gap:4px}#status{width:100%;color:#91abc9;font-size:11px;overflow-wrap:anywhere}#status.bad{color:#ff9f9f}#log{flex:1;overflow:auto;padding:10px 0 30px;white-space:pre-wrap;word-break:break-all;background:#181d25}.line{padding:0 12px;line-height:1.55}.line.jr{color:#8bd9ca;background:#22413b33}.line.err{color:#ffa1a1;background:#6f30302b}.line.warn{color:#e2cc87}.line.sql{color:#8492a7}@media(max-width:720px){.workspace{display:flex;flex-direction:column}aside{height:45vh;flex:none;grid-template-columns:40% 60%;grid-template-rows:1fr}#splitter{display:none}main{flex:1}.panel-title{padding:8px}.badge{font-size:10px}}
+.workspace.files-collapsed{grid-template-columns:minmax(0,1fr)}.workspace.files-collapsed>aside,.workspace.files-collapsed>#splitter{display:none}
+</style>
+</head>
+<body><div class="workspace files-collapsed">
+<aside id="filesPanel" aria-label="项目文件工作区">
+<section class="panel" aria-label="文件浏览器"><div class="panel-title"><strong>项目文件</strong><span class="badge">只读</span><button id="refreshTree" aria-label="刷新文件树">↻</button></div><div id="projectLabel"></div><div id="tree" aria-label="项目文件树"></div></section>
+<section class="panel" aria-label="文件预览"><div class="panel-title"><strong>文件预览</strong><span class="badge">UTF-8 · 256 KB</span></div><div id="previewPath">尚未选择文件</div><div id="previewMeta"></div><div id="previewBody"><div class="hint">点击上方文件查看内容。<br>仅浏览当前项目，不支持编辑或删除。</div></div></section>
+</aside><div id="splitter" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" tabindex="0"></div>
+<main aria-label="实时日志"><header><button id="toggleFiles" aria-expanded="false" aria-controls="filesPanel">展开文件区</button><strong id="projName">JRebel 日志</strong><select id="fileSel" aria-label="启动日志"></select><button class="mode on" data-mode="">全部</button><button class="mode" data-mode="jr">JRebel/错误</button><button class="mode" data-mode="err">仅错误</button><input id="kw" placeholder="关键词过滤（回车生效）" aria-label="关键词过滤"><button id="pauseBtn">暂停</button><label><input type="checkbox" id="autoScroll" checked>自动滚动</label><button id="clearBtn">清屏</button><span id="status">连接中…</span></header><div id="log"></div></main></div>
+<script>
+const $=s=>document.querySelector(s), treeEl=$('#tree'), logEl=$('#log');
+$('#toggleFiles').addEventListener('click',()=>{const collapsed=document.querySelector('.workspace').classList.toggle('files-collapsed');$('#toggleFiles').textContent=collapsed?'展开文件区':'收起文件区';$('#toggleFiles').setAttribute('aria-expanded',String(!collapsed));});
+const fmtSize=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.ceil(n/1024)+' KB';
+function hint(target,text,error=false){const el=document.createElement('div');el.className='hint'+(error?' error':'');el.textContent=text;target.replaceChildren(el);}
+async function request(url,signal){const r=await fetch(url,{signal});const j=await r.json();if(!r.ok)throw new Error(j.error||'读取失败');return j;}
+let treeVersion=0,previewVersion=0,previewController;
+async function directory(rel,target,version){
+  hint(target,'加载中…');
+  try{
+    const j=await request('/api/tree?path='+encodeURIComponent(rel));if(version!==treeVersion)return;
+    $('#projectLabel').textContent=j.project+' /';target.replaceChildren();if(!j.entries.length)hint(target,'空目录');
+    for(const item of j.entries){
+      const row=document.createElement('button');row.className='tree-item';row.textContent=(item.directory?'▸  ':'·  ')+item.name;row.title=item.path;row.setAttribute('aria-label',(item.directory?'目录 ':'文件 ')+item.path);target.appendChild(row);
+      if(item.directory){
+        row.setAttribute('aria-expanded','false');const children=document.createElement('div');children.className='tree-group';children.hidden=true;target.appendChild(children);let loaded=false,loading=false;
+        row.addEventListener('click',async()=>{children.hidden=!children.hidden;row.setAttribute('aria-expanded',String(!children.hidden));row.textContent=(children.hidden?'▸  ':'▾  ')+item.name;if(!children.hidden&&!loaded&&!loading){loading=true;await directory(item.path,children,version);loading=false;loaded=children.childElementCount>0&&!children.querySelector('.error');}});
+      }else row.addEventListener('click',()=>{treeEl.querySelectorAll('.selected').forEach(e=>e.classList.remove('selected'));row.classList.add('selected');preview(item.path);});
+    }
+  }catch(e){if(version===treeVersion)hint(target,e.message,true);}
+}
+async function preview(rel){
+  const version=++previewVersion;previewController?.abort();previewController=new AbortController();$('#previewPath').textContent=rel;$('#previewMeta').textContent='读取中…';hint($('#previewBody'),'加载中…');
+  try{
+    const j=await request('/api/file?path='+encodeURIComponent(rel),previewController.signal);if(version!==previewVersion)return;
+    $('#previewMeta').textContent=fmtSize(j.size)+(j.truncated?' · 仅显示前 256 KB':' · 完整文件');const body=$('#previewBody');body.replaceChildren();body.scrollTop=0;body.scrollLeft=0;
+    if(j.binary){hint(body,'不支持文本预览：二进制或非 UTF-8 文件');return;}if(!j.text){hint(body,'空文件');return;}
+    const fragment=document.createDocumentFragment();j.text.split('\n').forEach((text,i)=>{const line=document.createElement('div');line.className='code-line';const number=document.createElement('span');number.className='number';number.textContent=i+1;const content=document.createElement('span');content.className='code-text';content.textContent=text||' ';line.append(number,content);fragment.appendChild(line);});body.appendChild(fragment);
+  }catch(e){if(version===previewVersion&&e.name!=='AbortError'){$('#previewMeta').textContent='预览失败';hint($('#previewBody'),e.message,true);}}
+}
+$('#refreshTree').addEventListener('click',()=>directory('',treeEl,++treeVersion));
+const splitter=$('#splitter');
+function resize(width){document.documentElement.style.setProperty('--sidebar',Math.max(260,Math.min(width,640,window.innerWidth-360))+'px');}
+splitter.addEventListener('pointerdown',e=>splitter.setPointerCapture(e.pointerId));splitter.addEventListener('pointermove',e=>{if(splitter.hasPointerCapture(e.pointerId))resize(e.clientX);});splitter.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();resize(splitter.getBoundingClientRect().left+(e.key==='ArrowLeft'?-20:20));}});
+let file='',offset=-1,pending='',decoder=new TextDecoder('utf-8'),generation=0,inFlight=null,controller,paused=false,mode='',keyword='',refreshing=false;
+const modes={jr:/JRebel:|ERROR|Exception|Caused by:/,err:/ERROR|Exception|Caused by:/};
+function classify(text){return /ERROR|Exception|Caused by:/.test(text)?'err':text.includes('JRebel:')?'jr':/\bWARN\b/.test(text)?'warn':/Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(text)?'sql':'';}
+function passes(text){return (!modes[mode]||modes[mode].test(text))&&(!keyword||text.toLowerCase().includes(keyword));}
+function refilter(){for(const el of logEl.children)el.hidden=!passes(el.textContent);}
+function addLine(text){const el=document.createElement('div');el.className='line '+classify(text);el.textContent=text||' ';el.hidden=!passes(text);logEl.appendChild(el);if(logEl.childElementCount>8000){for(let i=0;i<2000;i++)logEl.firstElementChild?.remove();}}
+function status(text,bad=false){$('#status').textContent=text;$('#status').className=bad?'bad':'';}
+async function poll(){
+  if(paused||!file||inFlight===generation)return;
+  const epoch=generation,selected=file,start=offset;inFlight=epoch;const own=new AbortController();controller=own;
+  try{
+    const j=await request('/api/tail?name='+encodeURIComponent(selected)+'&offset='+start,own.signal);if(epoch!==generation||paused)return;
+    if(j.start!==start){pending='';decoder=new TextDecoder('utf-8');}
+    if(j.b64){const bytes=Uint8Array.from(atob(j.b64),c=>c.charCodeAt(0));const parts=(pending+decoder.decode(bytes,{stream:true})).split('\n');pending=parts.pop();for(const p of parts)addLine(p);if($('#autoScroll').checked)logEl.scrollTop=logEl.scrollHeight;}
+    offset=j.offset;status(selected+' · '+fmtSize(j.size)+' · '+logEl.childElementCount+' 行 · '+new Date().toLocaleTimeString());
+  }catch(e){if(epoch===generation&&e.name!=='AbortError')status(e.message+'，稍后重试',true);}finally{if(inFlight===epoch)inFlight=null;}
+}
+function switchTo(name){generation++;controller?.abort();file=name;offset=-1;pending='';decoder=new TextDecoder('utf-8');logEl.replaceChildren();if(!name)status('暂无启动日志');poll();}
+async function refreshLogs(){
+  if(refreshing)return;refreshing=true;
+  try{const j=await request('/api/logs');$('#projName').textContent=j.project+' · 日志';document.title=j.project+' · JRebel 工作台';const selected=file;const select=$('#fileSel');select.replaceChildren();for(const item of j.logs){const option=document.createElement('option');option.value=item.name;option.textContent=item.name.replace('jrebel-local-','').replace('.stdout.log','')+' · '+fmtSize(item.size);select.appendChild(option);}if(j.logs.some(l=>l.name===selected))select.value=selected;if(select.value!==file)switchTo(select.value);}catch(e){status(e.message,true);}finally{refreshing=false;}
+}
+$('#fileSel').addEventListener('change',()=>switchTo($('#fileSel').value));$('#pauseBtn').addEventListener('click',()=>{paused=!paused;$('#pauseBtn').textContent=paused?'继续':'暂停';if(paused)controller?.abort();else poll();});$('#clearBtn').addEventListener('click',()=>{logEl.replaceChildren();pending='';});$('#kw').addEventListener('keydown',e=>{if(e.key==='Enter'){keyword=e.target.value.trim().toLowerCase();refilter();}});document.querySelectorAll('.mode').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('.mode').forEach(b=>b.classList.remove('on'));btn.classList.add('on');mode=btn.dataset.mode;refilter();}));
+directory('',treeEl,++treeVersion);refreshLogs();setInterval(poll,1000);setInterval(refreshLogs,5000);
+</script></body></html>
