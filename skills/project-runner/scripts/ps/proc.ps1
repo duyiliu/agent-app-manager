@@ -1,6 +1,6 @@
 # project-runner 进程身份核验与终止适配（PowerShell 7）。
 # 设计基线：docs/design.md v2 —— 身份核验与终止必须针对同一进程句柄，防止"先查 PID 再按 PID 杀"的复用竞态。
-# 输出：单行 JSON。result ∈ ok | mismatch | notfound | terminated | terminateTimeout | error。
+# 输出：单行 JSON。result ∈ ok | mismatch | exited | notfound | terminated | terminateTimeout | error。
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
@@ -44,6 +44,7 @@ public static class ProcUtil {
   static string IdentityOnHandle(IntPtr h) {
     long c, e, k, u;
     if (!GetProcessTimes(h, out c, out e, out k, out u)) return Err("timesFailed", Marshal.GetLastWin32Error());
+    if (e != 0) return "EXITED\t" + c.ToString(); // 已退出但仍有句柄引用：映像查询会失败，明确报告已退出
     var sb = new StringBuilder(2048); uint sz = (uint)sb.Capacity;
     if (!QueryFullProcessImageName(h, 0, sb, ref sz)) return Err("imageFailed", Marshal.GetLastWin32Error());
     return "OK\t" + c.ToString() + "\t" + sb.ToString();

@@ -1,7 +1,7 @@
 # Project Runner 跨项目运行管理
 
 > 设计版本：v2（收敛版，替代 v1）
-> 状态：原 PR #6 v2 设计迁入独立仓库；**跨项目管理尚未实现或通过运行验收**
+> 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过，AC03 真实会话退出终验保持开放
 > 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill 与日志 Viewer
 > 评审说明：v1 的 same-context PASS 不继承为 v2 的代码审查或运行验证结论；实施后须按本文件验收。
 
@@ -150,4 +150,4 @@ logs <alias|appId> [--lines N] [--follow] [--json]
 
 ## 8. 决策记录
 
-本 v2 来源于 `duyiliu/agent-skills` PR #6，按“只管理本 Skill 启动的项目、跨项目可见、避免另造 CLI 产品”收敛；删除全机发现、手动注册 CRUD、IDEA 接管与复杂通用恢复设计。本仓库为今后设计与实现的唯一维护源，现阶段只迁移文档与原 Java/JRebel Skill；管理器实现与运行验收另行进行。
+本 v2 来源于 `duyiliu/agent-skills` PR #6，按“只管理本 Skill 启动的项目、跨项目可见、避免另造 CLI 产品”收敛；删除全机发现、手动注册 CRUD、IDEA 接管与复杂通用恢复设计。本仓库为设计与实现的唯一维护源。管理器已按本设计实现并于 2026-10-17 完成合并后验收；后续修订以本文件为基线。

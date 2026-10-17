@@ -5,7 +5,7 @@ description: Agent 驱动的本地 Java 项目启动助手：读取 Maven/Gradle
 
 # Project Runner · Java / Standalone JRebel 启动流程
 
-本 Skill 覆盖两部分能力：Java / JRebel 单项目专项流程（第 1–7 节）与跨项目运行管理 `manager.mjs`（第 8 节，已实现）。跨项目管理只操作**由本 Skill 启动并登记**的 Java 应用，不接管外部进程，不声称全机启停能力。本 Skill 的目标不是提供一条适用于所有项目的固定命令，而是让 AI 先从当前仓库识别项目，再匹配最合适的启动方式。**不要要求用户手工提供可从项目中可靠识别的构建工具、主类、模块 classpath、端口或插件信息。**
+本 Skill 覆盖两部分能力：Java / JRebel 单项目专项流程（第 0–7 节）与跨项目运行管理 `manager.mjs`（第 8 节，已实现）。跨项目管理只操作**由本 Skill 启动并登记**的 Java 应用，不接管外部进程，不声称全机启停能力。本 Skill 的目标不是提供一条适用于所有项目的固定命令，而是让 AI 先从当前仓库识别项目，再匹配最合适的启动方式。**不要要求用户手工提供可从项目中可靠识别的构建工具、主类、模块 classpath、端口或插件信息。**
 
 Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环境变量 `REBEL_HOME` 或 `JREBEL_HOME` 解析；两者均未设置时，检查用户指定路径和平台常见安装目录，不将某台机器的绝对路径当作通用默认值。`REBEL_HOME`/`JREBEL_HOME` 指向安装根目录，`REBEL_BASE`/`-Drebel.base` 指向用户配置、许可和日志目录，两者不可混淆。
 

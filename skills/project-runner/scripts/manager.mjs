@@ -189,7 +189,8 @@ function holderAlive(holder) {
     throw dataError('LOCK_CORRUPT', `锁文件信息不完整，拒绝静默处理；人工核验后删除：${lockPath(holder ? holder.name : '')}`);
   }
   const r = psProc('capture', { id: holder.pid });
-  if (r.result !== 'ok') return false; // 不存在 → 持有者已死
+  if (r.result === 'notfound' || r.result === 'exited') return false; // 明确已退出 → 持有者已死
+  if (r.result !== 'ok') return true; // 权限不足等未知情形：保守视为存活，拒绝回收
   return String(r.creationFileTime) === String(holder.creationFileTime); // 复用 → 视为死锁可回收
 }
 
