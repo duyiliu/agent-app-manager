@@ -1,7 +1,7 @@
 # Project Runner 跨项目运行管理
 
 > 设计版本：v2（收敛版，替代 v1）
-> 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过，AC03 真实会话退出终验保持开放
+> 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过。**AC03 分层结论（2026-10-19 隔离环境实测）**：L1（manager 进程退出后受管 JVM 存活）与 L2（全新 node 进程核验现状/读日志/停止/再启动）已通过；**L3（真实 pi/Agent 会话退出后的存活）仍为开放项**，需在 run 结束后的宿主/后续会话中按 §7.1 的判据补验，未补验前不得宣称 AC03 全量通过。实测命令与原始输出见 `docs/verification/ac03-l1-l2-evidence.md`。
 > 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill 与日志 Viewer
 > 评审说明：v1 的 same-context PASS 不继承为 v2 的代码审查或运行验证结论；实施后须按本文件验收。
 
@@ -147,6 +147,20 @@ logs <alias|appId> [--lines N] [--follow] [--json]
 | AC07 | 不改业务项目；普通 Java 模式无需 JRebel 配置；PR #5 单项目启动、JRebel 验证、viewer、原 `.tmp` 日志继续可用 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
+
+### 7.1 AC03 分层验证方法与当前结论
+
+AC03 按三层递进取证，结论必须分层表述，不得用低层级证据冒充高层级：
+
+| 层级 | 判据 | 当前结论 |
+| --- | --- | --- |
+| L1 父子脱离 | `start-new` 的 manager 进程退出后，`Get-Process -Id <pid>` 仍可查到受管 JVM，且其父 PID 已不存在 | **通过**（2026-10-19 实测） |
+| L2 新会话核验 | manager 已退出时，用全新 node 进程执行 `status`（RUNNING + 创建时间/映像核验）、`logs`（读到本批次日志）、`stop`（进程消失、再查为 STOPPED）、`start`（重新起实例） | **通过**（2026-10-19 实测） |
+| L3 真实会话退出 | 真实 pi/Agent 会话（run）结束后，受管 JVM 仍存活，且后续会话可核验/看日志/控制 | **未验证（开放）**：本次运行内无法观察 run 结束后的进程状态 |
+
+L3 补验由宿主/后续会话执行，判据与命令见 `docs/verification/ac03-l1-l2-evidence.md` §4。若实测发现该运行器用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 包裹命令导致受管 JVM 一并被回收，应结论为「该运行器不具备 AC03 能力」，并按 §5 阻塞 Managed 启动，不得假报兼容。
+
+已观测到的旁证（不构成 L3 通过）：本次运行的 pi 运行器（shell 侧）所在 Job 的 `LimitFlags=0x800`（仅 `BREAKAWAY_OK`，无 `KILL_ON_JOB_CLOSE`），且受管 JVM 不是该 Job 成员。但受管 JVM 仍归属于**另一个尚未识别**的 Job（`IsProcessInJob(any job)=yes`），本次未能取得该 Job 的 `LimitFlags`；因此该旁证只能说明「当前 shell 所在 Job 不会连带回收后代」，仍需 run 结束后实测确认。
 
 ## 8. 决策记录
 
