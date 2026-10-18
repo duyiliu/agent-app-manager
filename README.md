@@ -30,7 +30,7 @@ npx skills add duyiliu/project-runner --skill project-runner -g
 
 ```text
 README.md
-docs/design.md                   # 跨项目管理设计与验收基线（v2 已实现）
+docs/design.md                   # 跨项目管理设计与验收基线（P0 已实现）
 skills/project-runner/
 ├── SKILL.md
 └── scripts/
