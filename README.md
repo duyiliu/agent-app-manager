@@ -2,7 +2,7 @@
 
 **Agent-native 本地开发项目启动与运行管理 Skill**
 
-> 当前可用：Java / Spring Boot 项目识别、Standalone JRebel 环境初始化、按项目启动和热加载验证、单项目只读日志 Viewer，以及 `manager.mjs` 跨项目运行管理 P0。
+> 当前可用：Java / Spring Boot 项目识别、Standalone JRebel 环境初始化、按项目启动和热加载验证、单项目只读日志 Viewer，以及 `manager.mjs` 跨项目运行管理 P0（依据 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节与 [design.md](docs/design.md)）。
 >
 > 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管 JVM 跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的 Java 应用，**不接管 IDEA / 手工启动的外部进程**。
 >
