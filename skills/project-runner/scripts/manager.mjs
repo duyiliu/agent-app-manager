@@ -21,7 +21,9 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
 const MAX_LOG_LINES = 5000;              // --lines 上限
 const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
 const PREV_RUNS_KEEP = 20;
-const UNRESOLVED_PHASES = new Set(['STARTING', 'UNKNOWN']); // 未结记录：启动中断/身份不明，禁止自动重起
+// 未结记录：STARTING（启动中断，pid 未采集）、UNKNOWN（身份不明，进程可能仍存活）
+// 以及任何无法识别的 phase，一律禁止自动重起。只有 RUNNING/STOPPED 可在核验后继续启动。
+const RESUMABLE_PHASES = new Set(['RUNNING', 'STOPPED']);
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PS_PROC = path.join(SCRIPT_DIR, 'ps', 'proc.ps1');
@@ -79,7 +81,7 @@ function resolveHome(argHome) {
 
 let selfIdentity = null;
 
-function psProc(action, params = {}) {
+function psProcOnce(action, params) {
   const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', action];
   if (params.id != null) args.push('-Id', String(params.id));
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
@@ -90,13 +92,38 @@ function psProc(action, params = {}) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
     throw dependencyError(`pwsh 调用失败：${r.error.message}`);
   }
-  if (r.status !== 0) throw dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+  if (r.status !== 0) {
+    const e = dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+    // 标记可重试：proc.ps1 每次都在进程内用 Add-Type 编译 C#，偶发 Roslyn 栈溢出崩溃
+    // （退出码 0xC00000FD / “type initializer ... threw an exception”），与进程状态无关。
+    e.psTransient = true;
+    throw e;
+  }
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
-  if (!line) throw dependencyError('proc.ps1 无输出');
+  if (!line) {
+    const e = dependencyError('proc.ps1 无输出');
+    e.psTransient = true;
+    throw e;
+  }
   try {
     return JSON.parse(line);
   } catch {
-    throw dependencyError(`proc.ps1 输出无法解析：${line}`);
+    const e = dependencyError(`proc.ps1 输出无法解析：${line}`);
+    e.psTransient = true;
+    throw e;
+  }
+}
+
+const PS_PROBE_ATTEMPTS = 3; // 仅针对 pwsh/Add-Type 编译的瞬时崩溃，不重试语义性失败
+
+function psProc(action, params = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return psProcOnce(action, params);
+    } catch (e) {
+      // terminate 不重试：避免“已终止但响应丢失”后重试带来歧义（重试只会看到 notfound/exited）
+      if (!e.psTransient || action === 'terminate' || attempt >= PS_PROBE_ATTEMPTS) throw e;
+    }
   }
 }
 
@@ -254,7 +281,7 @@ function verifyAbandonable(home, appId, cur) {
 // managed=false 的登记记录不表示受管实例，不构成受管启动的未结记录。
 function resolveUnresolvedRun(home, appId, rt, ackRunId) {
   const cur = rt && rt.current;
-  const unresolved = !!(cur && cur.managed !== false && UNRESOLVED_PHASES.has(cur.phase));
+  const unresolved = !!(cur && cur.managed !== false && isUnresolvedPhase(cur.phase));
   if (!unresolved) {
     if (ackRunId) {
       throw conflictError('ACK_MISMATCH',
@@ -271,6 +298,12 @@ function resolveUnresolvedRun(home, appId, rt, ackRunId) {
   }
   verifyAbandonable(home, appId, cur);
   return { runId: cur.runId, evidence: runEvidence(home, appId, cur) };
+}
+
+// 未结判定：STARTING/UNKNOWN 明确是未结记录；无法识别的 phase（例如记录被外部改坏）
+// 同样按未结处理并保留证据，避免“先归档旧账再起”造成旧进程永久失管。
+function isUnresolvedPhase(phase) {
+  return !RESUMABLE_PHASES.has(phase);
 }
 
 function parseAckRunId(value) {
@@ -321,11 +354,18 @@ function acquireLock(home, name, op) {
       }
       continue;
     }
+    let wrote = false;
     try {
       const me = selfIdentityCapture();
       fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 'utf8');
+      wrote = true;
     } finally {
-      fs.closeSync(fd);
+      try { fs.closeSync(fd); } catch { /* 忽略 */ }
+      if (!wrote) {
+        // 持有者信息未写入（如 pwsh 不可用）时必须删掉刚创建的空锁，
+        // 否则残留空文件会让后续每次调用都报 LOCK_CORRUPT 而永久卡死该应用。
+        try { fs.unlinkSync(file); } catch { /* 已被删/回收则忽略 */ }
+      }
     }
     return () => {
       try { fs.unlinkSync(file); } catch { /* 已被回收则忽略 */ }
@@ -509,7 +549,7 @@ function launchManaged(home, appId, app, opts = {}) {
   const errPath = path.join(logDir, `${runId}.stderr.log`);
   const rt = readRuntimeStrict(home, appId) ?? { schemaVersion: SCHEMA_VERSION, appId, prevRuns: [] };
   if (opts.abandonRunId && rt.current && rt.current.runId === opts.abandonRunId
-      && rt.current.managed !== false && UNRESOLVED_PHASES.has(rt.current.phase)) {
+      && rt.current.managed !== false && isUnresolvedPhase(rt.current.phase)) {
     archiveCurrent(rt, { reason: 'abandoned-by-ack' }); // 显式 ack 的未结旧账：保留证据并注明原因
   } else {
     archiveCurrent(rt); // 旧运行证据归档保留，绝不删账
@@ -1067,6 +1107,7 @@ function renderHuman(command, data) {
         data.run?.logPaths?.stderr ? `stderr=${data.run.logPaths.stderr}` : null,
         data.run?.logHints?.length ? `logHints=${data.run.logHints.join(', ')}` : null,
         data.runtimeFile ? `证据: ${data.runtimeFile}` : null,
+        ...(data.prevRuns ?? []).map((p) => `prev=${p.runId} phase=${p.phase}${p.archiveReason ? ` archiveReason=${p.archiveReason}` : ''}${p.pid != null ? ` pid=${p.pid}` : ''} archivedAt=${p.archivedAt}`),
         data.readinessUntested ? '就绪未检测：进程存活不等于业务就绪' : null,
         data.note ? `note: ${data.note}` : null,
       ].filter(Boolean).join('\n');

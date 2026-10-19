@@ -138,7 +138,7 @@ Agent 使用规程：
 2. **非受管启动**：项目只有启动脚本且无法安全定位目标 JVM（包装进程、多 JVM、远端拉起）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
 3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
 4. **停止/重启**：仅受管实例可用。语义是**有界强制终止**（Windows 同句柄核验后 TerminateProcess，退出码 137，不杀进程树、无优雅关机），执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
-4.1 **未结记录与恢复（AC04，不得删账后再起）**：`current` 存在且 `phase` 为 `STARTING`（启动中断/pid 未采集）或 `UNKNOWN`（如 `identity_capture_failed`，进程实际可能存活）时，`start`/`start-new` **默认拒绝**，退出码 3、错误码 `UNRESOLVED_RUN`，**不产生任何新进程**；错误信息给出 `runId`、证据文件（`--home` 下 `runtime/<appId>.json`）与日志路径，以及恢复指引。此时 `status` 仍展示未结记录全量证据（pid/创建时间/映像/日志/`lastError`），`logs --run <旧runId>` 仍可查；**不要删除 runtime 记录或日志来绕过**。
+4.1 **未结记录与恢复（AC04，不得删账后再起）**：`current` 存在且 `phase` 为 `STARTING`（启动中断/pid 未采集）、`UNKNOWN`（如 `identity_capture_failed`，进程实际可能存活），或任何无法识别的 `phase`（记录被外部改坏等）时，`start`/`start-new` **默认拒绝**，退出码 3、错误码 `UNRESOLVED_RUN`，**不产生任何新进程**（runtime/registry 文件也不被改写）；错误信息给出 `runId`、证据文件（`--home` 下 `runtime/<appId>.json`）与日志路径，以及恢复指引。此时 `status` 仍展示未结记录全量证据（pid/创建时间/映像/日志/`lastError`），文本模式还会列出 `prevRuns` 及 `archiveReason`；`logs --run <旧runId>` 仍可查；**不要删除 runtime 记录或日志来绕过**。
 4.2 **显式人工核验后的恢复**：先由用户/AI 用 `status`、`logs --run <runId>` 及系统进程工具核验旧进程；确认已退出后执行 `start <别名> --ack-unresolved <runId>` 或 `start-new --desc <file> --ack-unresolved <runId>`。仅当 `runId` 与未结记录一致时生效，否则 `ACK_MISMATCH`；manager 会二次核验：
    - 未结记录有完整身份证据（pid + 创建时间 + 映像）且进程**仍存活** → 仍然拒绝（`UNRESOLVED_RUN`），禁止第二份实例；
    - PID 存在但缺完整身份证据、无法确认是否原实例 → 拒绝；
