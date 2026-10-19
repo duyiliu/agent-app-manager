@@ -21,6 +21,9 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
 const MAX_LOG_LINES = 5000;              // --lines 上限
 const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
 const PREV_RUNS_KEEP = 20;
+// 未结记录：STARTING（启动中断，pid 未采集）、UNKNOWN（身份不明，进程可能仍存活）
+// 以及任何无法识别的 phase，一律禁止自动重起。只有 RUNNING/STOPPED 可在核验后继续启动。
+const RESUMABLE_PHASES = new Set(['RUNNING', 'STOPPED']);
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PS_PROC = path.join(SCRIPT_DIR, 'ps', 'proc.ps1');
@@ -78,7 +81,7 @@ function resolveHome(argHome) {
 
 let selfIdentity = null;
 
-function psProc(action, params = {}) {
+function psProcOnce(action, params) {
   const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', action];
   if (params.id != null) args.push('-Id', String(params.id));
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
@@ -89,13 +92,38 @@ function psProc(action, params = {}) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
     throw dependencyError(`pwsh 调用失败：${r.error.message}`);
   }
-  if (r.status !== 0) throw dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+  if (r.status !== 0) {
+    const e = dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+    // 标记可重试：proc.ps1 每次都在进程内用 Add-Type 编译 C#，偶发 Roslyn 栈溢出崩溃
+    // （退出码 0xC00000FD / “type initializer ... threw an exception”），与进程状态无关。
+    e.psTransient = true;
+    throw e;
+  }
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
-  if (!line) throw dependencyError('proc.ps1 无输出');
+  if (!line) {
+    const e = dependencyError('proc.ps1 无输出');
+    e.psTransient = true;
+    throw e;
+  }
   try {
     return JSON.parse(line);
   } catch {
-    throw dependencyError(`proc.ps1 输出无法解析：${line}`);
+    const e = dependencyError(`proc.ps1 输出无法解析：${line}`);
+    e.psTransient = true;
+    throw e;
+  }
+}
+
+const PS_PROBE_ATTEMPTS = 3; // 仅针对 pwsh/Add-Type 编译的瞬时崩溃，不重试语义性失败
+
+function psProc(action, params = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return psProcOnce(action, params);
+    } catch (e) {
+      // terminate 不重试：避免“已终止但响应丢失”后重试带来歧义（重试只会看到 notfound/exited）
+      if (!e.psTransient || action === 'terminate' || attempt >= PS_PROBE_ATTEMPTS) throw e;
+    }
   }
 }
 
@@ -173,13 +201,115 @@ function atomicWriteJson(file, obj) {
   }
 }
 
-function archiveCurrent(rt) {
+function archiveCurrent(rt, opts = {}) {
   if (rt.current) {
+    const cur = rt.current;
+    const entry = {
+      runId: cur.runId, phase: cur.phase, managed: cur.managed,
+      startedAt: cur.startedAt, endedAt: cur.endedAt ?? null,
+      lastError: cur.lastError ?? null, archivedAt: new Date().toISOString(),
+    };
+    if (opts.reason) {
+      // 显式 ack 放弃的未结记录：保留完整身份与日志证据，注明归档原因
+      entry.archiveReason = opts.reason;
+      entry.intentAt = cur.intentAt ?? null;
+      entry.pid = cur.pid ?? null;
+      entry.creationFileTime = cur.creationFileTime ?? null;
+      entry.image = cur.image ?? null;
+      entry.logPaths = cur.logPaths ?? null;
+      entry.exitNote = cur.exitNote ?? null;
+      entry.envResolved = cur.envResolved ?? [];
+    }
     rt.prevRuns = rt.prevRuns ?? [];
-    rt.prevRuns.unshift({ runId: rt.current.runId, phase: rt.current.phase, managed: rt.current.managed, startedAt: rt.current.startedAt, endedAt: rt.current.endedAt ?? null, lastError: rt.current.lastError ?? null, archivedAt: new Date().toISOString() });
+    rt.prevRuns.unshift(entry);
     rt.prevRuns = rt.prevRuns.slice(0, PREV_RUNS_KEEP);
     rt.current = null;
   }
+}
+
+// ---------- 未结记录（STARTING/UNKNOWN）防护与显式 ack 恢复 ----------
+
+function runEvidence(home, appId, cur) {
+  return {
+    runId: cur.runId,
+    phase: cur.phase,
+    managed: cur.managed,
+    pid: cur.pid ?? null,
+    intentAt: cur.intentAt ?? null,
+    startedAt: cur.startedAt ?? null,
+    lastError: cur.lastError ?? null,
+    runtimeFile: runtimePath(home, appId),
+    logPaths: cur.logPaths ?? null,
+  };
+}
+
+function unresolvedRunError(home, appId, rt) {
+  const cur = rt.current;
+  const ev = runEvidence(home, appId, cur);
+  const logHint = cur.logPaths?.stdout ? `，日志：${cur.logPaths.stdout}` : '';
+  return conflictError('UNRESOLVED_RUN',
+    `存在未结运行记录 runId=${cur.runId}（phase=${cur.phase}${cur.pid != null ? `，pid=${cur.pid}` : ''}），拒绝自动重复启动，未产生新进程；证据：${ev.runtimeFile}${logHint}。请先人工核验该进程是否仍存活（status/logs 可查），确认已退出后再用 --ack-unresolved ${cur.runId} 显式恢复`,
+    ev);
+}
+
+// ack 前复核：旧进程仍存活则拒绝；已退出/无 pid 可核验才允许放弃旧账。
+function verifyAbandonable(home, appId, cur) {
+  const ev = runEvidence(home, appId, cur);
+  if (cur.pid == null) return; // 无 pid 可核验：显式 ack 即人工核验结论
+  if (cur.creationFileTime && cur.image) {
+    const v = verifyRun(cur); // 核验失败抛 IDENTITY_UNKNOWN，保守拒绝
+    if (v.alive) {
+      throw conflictError('UNRESOLVED_RUN',
+        `--ack-unresolved=${cur.runId} 被拒绝：旧进程仍存活（pid=${cur.pid}），禁止启动第二份受管实例`,
+        { ...ev, verification: 'alive' });
+    }
+    return; // 已退出或 PID 已复用
+  }
+  const r = psProc('capture', { id: cur.pid });
+  if (r.result === 'notfound' || r.result === 'exited') return;
+  if (r.result === 'ok') {
+    throw conflictError('UNRESOLVED_RUN',
+      `--ack-unresolved=${cur.runId} 被拒绝：pid=${cur.pid} 仍存在但记录缺少完整身份证据（creationFileTime/image），无法确认是否为原实例；请人工核验并处理该进程后重试`,
+      { ...ev, verification: 'identity-incomplete-pid-present' });
+  }
+  throw conflictError('IDENTITY_UNKNOWN',
+    `--ack-unresolved=${cur.runId} 无法核验 pid=${cur.pid} 当前状态（${r.code ?? r.result}），拒绝`,
+    { ...ev, capture: r });
+}
+
+// 返回 null（无未结记录）或 {runId}（已验证可放弃，launchManaged 归档时注明 abandoned-by-ack）。
+// managed=false 的登记记录不表示受管实例，不构成受管启动的未结记录。
+function resolveUnresolvedRun(home, appId, rt, ackRunId) {
+  const cur = rt && rt.current;
+  const unresolved = !!(cur && cur.managed !== false && isUnresolvedPhase(cur.phase));
+  if (!unresolved) {
+    if (ackRunId) {
+      throw conflictError('ACK_MISMATCH',
+        `当前没有 STARTING/UNKNOWN 未结记录，--ack-unresolved=${ackRunId} 不适用；请去掉该参数`,
+        { ackRunId, current: cur ? { runId: cur.runId, phase: cur.phase, managed: cur.managed } : null });
+    }
+    return null;
+  }
+  if (!ackRunId) throw unresolvedRunError(home, appId, rt);
+  if (ackRunId !== cur.runId) {
+    throw conflictError('ACK_MISMATCH',
+      `--ack-unresolved=${ackRunId} 与未结记录 runId=${cur.runId} 不一致，拒绝`,
+      { ackRunId, ...runEvidence(home, appId, cur) });
+  }
+  verifyAbandonable(home, appId, cur);
+  return { runId: cur.runId, evidence: runEvidence(home, appId, cur) };
+}
+
+// 未结判定：STARTING/UNKNOWN 明确是未结记录；无法识别的 phase（例如记录被外部改坏）
+// 同样按未结处理并保留证据，避免“先归档旧账再起”造成旧进程永久失管。
+function isUnresolvedPhase(phase) {
+  return !RESUMABLE_PHASES.has(phase);
+}
+
+function parseAckRunId(value) {
+  if (value == null) return null;
+  if (!ID_RE.test(value)) throw usageError(`--ack-unresolved 需要合法 runId：${value}`);
+  return value;
 }
 
 // ---------- 跨进程互斥锁 ----------
@@ -224,11 +354,18 @@ function acquireLock(home, name, op) {
       }
       continue;
     }
+    let wrote = false;
     try {
       const me = selfIdentityCapture();
       fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 'utf8');
+      wrote = true;
     } finally {
-      fs.closeSync(fd);
+      try { fs.closeSync(fd); } catch { /* 忽略 */ }
+      if (!wrote) {
+        // 持有者信息未写入（如 pwsh 不可用）时必须删掉刚创建的空锁，
+        // 否则残留空文件会让后续每次调用都报 LOCK_CORRUPT 而永久卡死该应用。
+        try { fs.unlinkSync(file); } catch { /* 已被删/回收则忽略 */ }
+      }
     }
     return () => {
       try { fs.unlinkSync(file); } catch { /* 已被回收则忽略 */ }
@@ -404,14 +541,19 @@ function upsertApp(reg, appId, desc) {
 
 // ---------- 受管启动（意图先行 → detached 启动 → 身份采集 → 登记） ----------
 
-function launchManaged(home, appId, app) {
+function launchManaged(home, appId, app, opts = {}) {
   const runId = newRunId();
   const logDir = path.join(home, 'logs', appId);
   fs.mkdirSync(logDir, { recursive: true });
   const outPath = path.join(logDir, `${runId}.stdout.log`);
   const errPath = path.join(logDir, `${runId}.stderr.log`);
   const rt = readRuntimeStrict(home, appId) ?? { schemaVersion: SCHEMA_VERSION, appId, prevRuns: [] };
-  archiveCurrent(rt); // 旧运行证据归档保留，绝不删账
+  if (opts.abandonRunId && rt.current && rt.current.runId === opts.abandonRunId
+      && rt.current.managed !== false && isUnresolvedPhase(rt.current.phase)) {
+    archiveCurrent(rt, { reason: 'abandoned-by-ack' }); // 显式 ack 的未结旧账：保留证据并注明原因
+  } else {
+    archiveCurrent(rt); // 旧运行证据归档保留，绝不删账
+  }
 
   rt.current = {
     runId, phase: 'STARTING', managed: true, mode: app.mode,
@@ -527,7 +669,9 @@ function statusWithFacts(home, appId) {
 // ---------- 命令实现 ----------
 
 function cmdStartNew(ctx) {
-  const opts = parseNamed(ctx.rest, { '--desc': 'value' });
+  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
   const appId = computeAppId(desc.root, desc.entry);
   return withLock(ctx.home, appId, 'start-new', () => {
@@ -540,13 +684,16 @@ function cmdStartNew(ctx) {
         throw conflictError('ALREADY_RUNNING', `${desc.alias} 已有受管实例在运行`, { runId: rt.current.runId, pid: rt.current.pid });
       }
     }
+    // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
+    const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const app = upsertApp(reg, appId, desc);
     atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app);
+    const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       readinessUntested: true, logPaths: cur.logPaths,
+      ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
     };
   });
@@ -629,16 +776,23 @@ function cmdStatus(ctx, ref) {
   const app = reg.apps[appId];
   const { rt, st } = statusWithFacts(ctx.home, appId);
   const cur = rt && rt.current;
+  const evidenceFile = runtimePath(ctx.home, appId);
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
-    pid: st.pid ?? null,
+    pid: st.pid ?? cur?.pid ?? null,
+    runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
     portNote: 'expectedPort 为配置预期值，P0 不做实际监听探测',
     run: cur ? {
-      runId: cur.runId, phase: cur.phase, startedAt: cur.startedAt ?? cur.intentAt,
-      endedAt: cur.endedAt, logPaths: cur.logPaths, logHints: cur.logHints ?? null,
+      runId: cur.runId, phase: cur.phase, managed: cur.managed, mode: cur.mode,
+      intentAt: cur.intentAt ?? null, startedAt: cur.startedAt ?? cur.intentAt,
+      endedAt: cur.endedAt, pid: cur.pid ?? null,
+      creationFileTime: cur.creationFileTime ?? null, image: cur.image ?? null,
+      envResolved: cur.envResolved ?? [],
+      logPaths: cur.logPaths, logHints: cur.logHints ?? null,
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
+      evidenceFile,
     } : null,
     readinessUntested: st.status === 'RUNNING',
     note: st.note ?? null,
@@ -649,6 +803,9 @@ function cmdStatus(ctx, ref) {
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
 function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
+  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLock(ctx.home, appId, 'start', () => {
@@ -665,15 +822,18 @@ function cmdStart(ctx, ref) {
       const v = verifyRun(rt.current);
       if (v.alive) throw conflictError('ALREADY_RUNNING', `${app.alias} 已有受管实例在运行`, { runId: rt.current.runId, pid: rt.current.pid });
     }
+    // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
+    const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     app.cwd = cwd;
     app.exe = exe;
     app.updatedAt = new Date().toISOString();
     atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app);
+    const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       readinessUntested: true, logPaths: cur.logPaths,
+      ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '复用已保存启动配置；进程存活不等于业务就绪',
     };
   });
@@ -940,10 +1100,14 @@ function renderHuman(command, data) {
     case 'status':
       return [
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
-        data.run ? `run=${data.run.runId} phase=${data.run.phase} started=${data.run.startedAt ?? '-'}` : 'run=无',
+        data.run ? `run=${data.run.runId} phase=${data.run.phase} managed=${data.run.managed} started=${data.run.startedAt ?? '-'}` : 'run=无',
+        data.run?.pid != null ? `pid=${data.run.pid}${data.run.creationFileTime ? ` creationFileTime=${data.run.creationFileTime}` : ''}${data.run.image ? ` image=${data.run.image}` : ''}` : null,
+        data.run?.lastError ? `lastError: ${data.run.lastError}` : null,
         data.run?.logPaths?.stdout ? `stdout=${data.run.logPaths.stdout}` : null,
         data.run?.logPaths?.stderr ? `stderr=${data.run.logPaths.stderr}` : null,
         data.run?.logHints?.length ? `logHints=${data.run.logHints.join(', ')}` : null,
+        data.runtimeFile ? `证据: ${data.runtimeFile}` : null,
+        ...(data.prevRuns ?? []).map((p) => `prev=${p.runId} phase=${p.phase}${p.archiveReason ? ` archiveReason=${p.archiveReason}` : ''}${p.pid != null ? ` pid=${p.pid}` : ''} archivedAt=${p.archivedAt}`),
         data.readinessUntested ? '就绪未检测：进程存活不等于业务就绪' : null,
         data.note ? `note: ${data.note}` : null,
       ].filter(Boolean).join('\n');
@@ -952,6 +1116,7 @@ function renderHuman(command, data) {
       return [
         `已启动（受管）${data.alias} (${data.appId})`,
         `run=${data.runId} pid=${data.pid} status=${data.status}`,
+        data.abandonedRunId ? `已显式放弃未结记录 run=${data.abandonedRunId}（${data.abandonedReason}），证据保留在 prevRuns` : null,
         `stdout=${data.logPaths.stdout}`,
         `stderr=${data.logPaths.stderr}`,
         data.note ?? '',
@@ -984,14 +1149,17 @@ function usageText() {
     '命令：',
     '  list                              列出已登记应用与实时状态',
     '  status <alias|appId>              单应用详情（含运行证据）',
-    '  start <alias|appId>               用已保存配置启动（任意目录可用）',
+    '  start <alias|appId> [--ack-unresolved <runId>]   用已保存配置启动（任意目录可用）',
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
-    '  start-new --desc <file>           首次受管启动：意图→启动→身份采集→登记',
+    '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
     '  record-unmanaged --desc <file> [--log-hints p1,p2]   记录非受管启动尝试',
+    '',
+    'STARTING/UNKNOWN 未结记录默认拒绝启动（UNRESOLVED_RUN）；人工核验进程已退出后，',
+    '用 --ack-unresolved <runId> 显式放弃旧账并重启：start <ref> --ack-unresolved <runId>',
     '',
     '退出码：0 成功 | 1 用法 | 2 未找到 | 3 状态冲突 | 4 环境依赖 | 5 数据损坏',
   ].join('\n');
@@ -1013,8 +1181,10 @@ function main() {
   }
   try {
     let data;
-    const refCommands = new Set(['status', 'start', 'stop', 'restart']);
-    if (refCommands.has(command)) {
+    const refCommands = new Set(['status', 'stop', 'restart']);
+    if (command === 'start') {
+      if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError('start 需要 <alias|appId>');
+    } else if (refCommands.has(command)) {
       const bad = ctx.rest.find((a, i) => i > 0 || a.startsWith('--'));
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
       if (!ctx.rest[0]) throw usageError(`${command} 需要 <alias|appId>`);

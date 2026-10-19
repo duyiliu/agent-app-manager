@@ -127,9 +127,9 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ```bash
 node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json] <命令>
-# list | status <别名|appId> | start <别名|appId> | stop <别名|appId> | restart <别名|appId>
+# list | status <别名|appId> | start <别名|appId> [--ack-unresolved <runId>] | stop <别名|appId> | restart <别名|appId>
 # logs <别名|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]
-# 内部入口（Agent 用）：start-new --desc <file> | record-unmanaged --desc <file> [--log-hints p1,p2]
+# 内部入口（Agent 用）：start-new --desc <file> [--ack-unresolved <runId>] | record-unmanaged --desc <file> [--log-hints p1,p2]
 ```
 
 Agent 使用规程：
@@ -138,6 +138,13 @@ Agent 使用规程：
 2. **非受管启动**：项目只有启动脚本且无法安全定位目标 JVM（包装进程、多 JVM、远端拉起）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
 3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
 4. **停止/重启**：仅受管实例可用。语义是**有界强制终止**（Windows 同句柄核验后 TerminateProcess，退出码 137，不杀进程树、无优雅关机），执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
-5. **状态解读**：`RUNNING`=进程存活（不等于业务就绪）；`STOPPED` 有退出证据；`STARTING`=启动进行中；`UNKNOWN`=中断/身份不可核验/非受管记录。PID/端口仅有证据才填写；JRebel 是否验证、业务是否就绪与本状态分开表述，不互相冒充。
+4.1 **未结记录与恢复（AC04，不得删账后再起）**：`current` 存在且 `phase` 为 `STARTING`（启动中断/pid 未采集）、`UNKNOWN`（如 `identity_capture_failed`，进程实际可能存活），或任何无法识别的 `phase`（记录被外部改坏等）时，`start`/`start-new` **默认拒绝**，退出码 3、错误码 `UNRESOLVED_RUN`，**不产生任何新进程**（runtime/registry 文件也不被改写）；错误信息给出 `runId`、证据文件（`--home` 下 `runtime/<appId>.json`）与日志路径，以及恢复指引。此时 `status` 仍展示未结记录全量证据（pid/创建时间/映像/日志/`lastError`），文本模式还会列出 `prevRuns` 及 `archiveReason`；`logs --run <旧runId>` 仍可查；**不要删除 runtime 记录或日志来绕过**。
+4.2 **显式人工核验后的恢复**：先由用户/AI 用 `status`、`logs --run <runId>` 及系统进程工具核验旧进程；确认已退出后执行 `start <别名> --ack-unresolved <runId>` 或 `start-new --desc <file> --ack-unresolved <runId>`。仅当 `runId` 与未结记录一致时生效，否则 `ACK_MISMATCH`；manager 会二次核验：
+   - 未结记录有完整身份证据（pid + 创建时间 + 映像）且进程**仍存活** → 仍然拒绝（`UNRESOLVED_RUN`），禁止第二份实例；
+   - PID 存在但缺完整身份证据、无法确认是否原实例 → 拒绝；
+   - 核验已退出（或 PID 已复用），或 `STARTING` 且无 pid（无可核验对象）→ 归档旧账后正常启动，`prevRuns` 条目带 `archiveReason=abandoned-by-ack` 以及原 pid/身份/日志证据，绝不静默丢弃；
+   - 当前没有 `STARTING`/`UNKNOWN` 未结记录时带 `--ack-unresolved` → `ACK_MISMATCH`（避免误用过期 runId）。
+   成功启动的输出会带 `abandonedRunId`/`abandonedReason`，需向用户说明“旧账已被显式放弃、证据保留在 prevRuns”。
+5. **状态解读**：`RUNNING`=进程存活（不等于业务就绪）；`STOPPED` 有退出证据；`STARTING`=启动进行中；`UNKNOWN`=中断/身份不可核验/非受管记录。`STARTING`/`UNKNOWN` 的受管记录属于未结记录，重启受 4.1/4.2 约束。PID/端口仅有证据才填写；JRebel 是否验证、业务是否就绪与本状态分开表述，不互相冒充。
 6. **数据与安全**：注册表/运行记录在 `~/.project-runner/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样，viewer 仍是单项目工具，全局查日志用 `manager logs`。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
-7. **退出码**：0 成功；1 用法；2 未找到；3 状态冲突（已运行/别名占用/身份不明/配置失效等）；4 环境依赖（缺 pwsh 7）；5 数据损坏。`--json` 输出单一稳定对象（`schemaVersion/ok/command/data|error`），脚本化调用优先用它。
+7. **退出码**：0 成功；1 用法；2 未找到；3 状态冲突（已运行/别名占用/身份不明/配置失效/`UNRESOLVED_RUN`/`ACK_MISMATCH` 等）；4 环境依赖（缺 pwsh 7）；5 数据损坏。`--json` 输出单一稳定对象（`schemaVersion/ok/command/data|error`），脚本化调用优先用它。
