@@ -4,13 +4,14 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'terminate')]
+  [ValidateSet('capture', 'verify', 'terminate', 'verify-batch')]
   [string]$Action,
 
   [int]$Id = 0,
   [string]$CreationFileTime = '',
   [string]$Image = '',
-  [int]$WaitMs = 10000
+  [int]$WaitMs = 10000,
+  [string]$ItemsJson = ''   # verify-batch：JSON 数组，逐项 { id, creationFileTime, image }；'-' 表示从 stdin 读取
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,13 +109,14 @@ public static class ProcUtil {
 # 每次 pwsh -File 都是新进程，直接编译加载即可
 Add-Type -TypeDefinition $typeSrc -Language CSharp
 
-function Convert-Result([string]$raw) {
+# withCapture 仅 capture 需要回传身份（creationFileTime/image）；verify/批量核验只回传判定结果
+function Convert-Raw([string]$raw, [bool]$withCapture) {
   $parts = $raw -split "`t", 3
   $obj = [ordered]@{}
   switch ($parts[0]) {
     'OK' {
       $obj.result = 'ok'
-      if ($Action -eq 'capture') {
+      if ($withCapture) {
         $obj.creationFileTime = [string]$parts[1]   # 保持字符串，避免精度丢失
         $obj.image = [string]$parts[2]
       }
@@ -127,7 +129,36 @@ function Convert-Result([string]$raw) {
     'ERR' { $obj.result = 'error'; $obj.code = [string]$parts[1]; $obj.win32 = [int]$parts[2] }
     default { $obj.result = 'error'; $obj.code = 'unexpected'; $obj.raw = $raw }
   }
-  [pscustomobject]$obj | ConvertTo-Json -Compress
+  [pscustomobject]$obj
+}
+
+function Convert-Result([string]$raw) {
+  Convert-Raw $raw ($Action -eq 'capture') | ConvertTo-Json -Compress
+}
+
+# 批量核验：一次进程编译，逐项 OpenProcess 核验（每项仍是独立句柄，单项语义与 verify 完全一致），
+# 按输入顺序返回结果数组。避免 N 个应用 N 次 pwsh + Add-Type 现编 C# 的开销。
+if ($Action -eq 'verify-batch') {
+  if ($ItemsJson -eq '-') { $ItemsJson = [Console]::In.ReadToEnd() }
+  $items = $null
+  try { $items = @($ItemsJson | ConvertFrom-Json) } catch { $items = $null }
+  if ($null -eq $items) {
+    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $out = foreach ($it in $items) {
+    $id = 0
+    [int]::TryParse([string]$it.id, [ref]$id) | Out-Null
+    $cft = [string]$it.creationFileTime
+    $img = [string]$it.image
+    if (($id -le 0) -or (-not $cft) -or (-not $img)) {
+      Convert-Raw ('ERR' + "`t" + 'badArgs' + "`t" + '0') $false
+      continue
+    }
+    Convert-Raw ([ProcUtil]::Verify($id, [long]$cft, $img)) $false
+  }
+  [pscustomobject]@{ results = @($out) } | ConvertTo-Json -Compress
+  exit 0
 }
 
 if (($Action -ne 'capture') -and (($Id -le 0) -or (-not $CreationFileTime) -or (-not $Image))) {
