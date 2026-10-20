@@ -5,7 +5,7 @@ description: Agent 驱动的本地项目启动助手：识别并启动 Java/Spri
 
 # Project Runner · 多语言项目启动 / Standalone JRebel 流程
 
-本 Skill 覆盖三部分能力：Java / JRebel 单项目专项流程（第 0–7 节）、非 Java 主流栈识别与启动（第 1A 节：Python / Node 前端与后端 / 其他真实进程）与跨项目运行管理 `manager.mjs`（第 8 节，已实现）。跨项目管理只操作**由本 Skill 启动并登记**的应用进程，不接管外部进程，不声称全机启停能力。本 Skill 的目标不是提供一条适用于所有项目的固定命令，而是让 AI 先从当前仓库识别项目，再匹配最合适的启动方式。**不要要求用户手工提供可从项目中可靠识别的构建工具、主类、模块 classpath、端口或插件信息。** Java 项目的默认路径是普通 Java 启动（`mode: java`）；JRebel 只是可选的增量增强，仅在 agent、许可与 `rebel.xml` 均可用时叠加，不构成启动前置条件。非 Java 项目同理：mode 只是登记/展示标签，受管能力取决于能否解析出真实目标进程。
+本 Skill 覆盖三部分能力：Java / JRebel 单项目专项流程（第 0–7 节）、非 Java 主流栈识别与启动（第 1A 节：Python / Node 前端与后端 / 其他真实进程）与跨项目运行管理 `manager.mjs`（第 8 节，已实现）。跨项目管理只操作**由本 Skill 启动并登记**的应用进程，不接管外部进程，不声称全机启停能力。本 Skill 的目标不是提供一条适用于所有项目的固定命令，而是让 AI 先从当前仓库识别项目，再匹配最合适的启动方式。**不要要求用户手工提供可从项目中可靠识别的构建工具、主类、模块 classpath、端口或插件信息。** Java 项目的默认路径是普通 Java 启动（`mode: java`）。**JRebel 是否启用完全按项目实际配置与用户要求决定**：项目已有 JRebel 配置（启动脚本已引用 rebel agent、仓库已提交 `rebel.xml`、构建文件含 JRebel 插件）或用户明确要求时才进入 `mode: jrebel` 路径；其余情况一律普通启动，不做 JRebel 环境检查、不要求 `REBEL_HOME`/`rebel.xml`，不把它当作启动前置条件。非 Java 项目同理：mode 只是登记/展示标签，受管能力取决于能否解析出真实目标进程。
 
 Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环境变量 `REBEL_HOME` 或 `JREBEL_HOME` 解析；两者均未设置时，检查用户指定路径和平台常见安装目录，不将某台机器的绝对路径当作通用默认值。`REBEL_HOME`/`JREBEL_HOME` 指向安装根目录，`REBEL_BASE`/`-Drebel.base` 指向用户配置、许可和日志目录，两者不可混淆。
 
@@ -51,7 +51,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 3. **[项目] 应用入口**：搜索本仓库源码内的 `@SpringBootApplication`、`@SpringBootConfiguration`、`public static void main` 或 Kotlin `fun main`，再对照构建插件、启动脚本、manifest、已有启动日志确认。唯一候选可自动采用；多个候选时结合模块/配置作判断，仍无法唯一确定则报告候选并停止，不任意选主类。
 4. **[比对] JDK**：先从仓库约定、Maven/Gradle toolchain、`maven.compiler.release`/`java.version`、`.java-version`/`.sdkmanrc` 取得项目要求；再检查 `JAVA_HOME`、PATH 与启动脚本实际选用的 `java` 得到本机事实。两者不一致或无法确认时报告，不硬编码本机 java.exe 路径，也不改环境来掩盖不匹配。
 5. **[比对] 端口与 profile**：检查 `application*.yml`/`.properties`、环境变量示例、启动参数、容器配置和脚本，取得声明值；实际监听端口只能在启动前探测。若端口由 Nacos、环境变量、远程配置或启动参数决定且本地值无法确认，列出不确定项，不把默认端口冒充为有效端口。
-6. **[比对] JRebel 监控目录**：仅在候选方案包含 JRebel 时才检查。命令行启动需要运行 classpath 上存在有效 `rebel.xml`：检查文件是否存在、`<dir>` 是否覆盖目标模块的类与资源目录，并核对该目录与当前构建产物目录一致；同时检查 Maven/Gradle JRebel 插件能否生成。若缺失或路径不匹配，先报告拟采用的生成方式、文件路径和改动摘要；生成插件配置或手工创建/修改项目文件前必须取得用户明确授权。授权前停在方案，不启动并声称热加载已就绪。
+6. **[比对] JRebel 监控目录**：仅当项目证据表明已配置 JRebel（既有启动脚本引用 `-agentpath`/`-javaagent` rebel、仓库内已有 `rebel.xml`、构建文件含 JRebel 插件配置）或用户明确要求 JRebel 时，候选方案才包含它，本项才有检查对象；否则跳过，`mode: java` 即可，不为此补齐环境。命令行启动需要运行 classpath 上存在有效 `rebel.xml`：检查文件是否存在、`<dir>` 是否覆盖目标模块的类与资源目录，并核对该目录与当前构建产物目录一致；同时检查 Maven/Gradle JRebel 插件能否生成。若缺失或路径不匹配，先报告拟采用的生成方式、文件路径和改动摘要；生成插件配置或手工创建/修改项目文件前必须取得用户明确授权。授权前停在方案，不启动并声称热加载已就绪。
 7. **[比对] 框架插件与 JVM 参数**：从依赖/插件配置识别 Spring Boot、DevTools、MyBatis-Plus 等；插件文件是否存在、路径是否对应当前机器则属环境事实。只在确实适用且插件文件存在时加对应参数；路径使用环境变量或已确认的本机安装位置，不照抄其他项目绝对路径。MyBatis-Plus 桥接插件缺失时默认告警并可继续 Java 类热加载；只有用户明确要求验证 mapper XML 热加载时，才将缺插件视为该项验证的阻塞。
 8. **[比对] 日志和就绪标记**：日志路径、就绪消息与健康检查接口来自项目配置和脚本；当前批次日志文件是否存在、就绪探针此刻是否可达属本机事实。日志入口（`manager ui` / `manager logs`）与就绪探针都必须针对当前仓库和当前应用。
 
@@ -93,7 +93,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 - 运行时来源及版本（Java 为 JDK；非 Java 为解释器/node/编译产物路径）、目标端口/profile；
 - **候选启动形态与取舍**：脚本/插件/fat jar/`-cp` 主类中哪些可用、为何选当前项、其余因何排除（产物过期、脚本含未授权副作用、profile 不符等）；
 - 采用的项目启动脚本或生成的启动方式；
-- JRebel 是否作为可选增强叠加（`mode: java` 还是 `jrebel`）、agent、`rebel.xml` 监控目录、可用插件；
+- `mode` 选型：`java` 还是 `jrebel`——按第 1 节第 6 项的项目实际配置决定（无 JRebel 配置即 `java`，不做环境补齐）；选 `jrebel` 时才展示 agent、`rebel.xml` 监控目录、可用插件；
 - 编译产物是否已存在/是否需要编译、日志文件位置、就绪判据；
 - 尚未能确定的配置或已知能力限制。
 
@@ -109,6 +109,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 - 启动任务本身不等于授权执行任意构建。如果缺少/过期的 class 文件导致无法启动，说明将执行的精确构建命令及影响；用户已明确要求“编译后启动/验证”时按项目约定执行，否则先停在方案并告知需要构建。
 - 项目脚本存在且安全时，按项目约定调用它。项目脚本通常负责模块 classpath、JVM 参数、插件和日志，skill 不重复实现其内部逻辑。
 - 无项目脚本时，根据已确认的项目构建结果组装启动命令：Windows classpath 分隔符为 `;`，引用路径和 `-D` 参数；依赖从项目生成的 classpath 或已准备好的依赖目录获取。fat jar 使用 `-jar`。不要把示例中的占位主类或 classpath 当作真实配置。
+- 以下 JRebel 参数仅在按第 1 节第 6 项选定 `mode: jrebel` 时添加；`mode: java` 的普通启动一律不带。
 - 将 `REBEL_HOME`/`JREBEL_HOME` 展开为实际绝对路径，再传给 `-agentpath`，不要把变量占位符原样传给 JVM。通常优先用平台原生 agent；只有原生 agent 不适用于目标架构时，才按官方 `agent-setup.md` 使用 `-javaagent` 两段式 bootstrap。
 - `-Drebel.base` 指向用户配置目录。关闭 Spring DevTools 仅在项目确实使用 DevTools 且项目约定要求时添加。
 - MyBatis-Plus 的 mapper XML 热加载可能需要独立桥接插件；按第 1 节第 7 项缺插件策略处理。原生 MyBatis 不因此额外加该桥接插件。
