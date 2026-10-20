@@ -334,10 +334,22 @@ function acquireLock(home, name, op) {
     } catch (e) {
       if (e.code !== 'EEXIST') throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
       let holder;
-      try {
-        holder = JSON.parse(fs.readFileSync(file, 'utf8'));
-      } catch (e2) {
-        throw dataError('LOCK_CORRUPT', `锁文件损坏，拒绝静默处理；人工核验后删除：${file}（${e2.message}）`);
+      let lastError;
+      for (let readAttempt = 0; readAttempt < 4; readAttempt++) {
+        try {
+          holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (typeof holder.pid === 'number' && typeof holder.creationFileTime === 'string') break;
+          lastError = new Error('锁持有者身份尚未写完整');
+        } catch (e2) { lastError = e2; }
+        if (readAttempt < 3) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      }
+      if (holder && typeof holder.pid === 'number' && typeof holder.creationFileTime !== 'string') {
+        // A fresh owner publishes pid/op before its slower identity probe completes.
+        // Conservatively treat this valid placeholder as busy, never as corruption.
+        throw conflictError('LOCK_BUSY', `另一操作进行中（${holder.op ?? '?'}，pid=${holder.pid}），拒绝并发执行`);
+      }
+      if (!holder || typeof holder.pid !== 'number' || typeof holder.creationFileTime !== 'string') {
+        throw dataError('LOCK_CORRUPT', `锁文件损坏，拒绝静默处理；人工核验后删除：${file}（${lastError?.message ?? '内容不完整'}）`);
       }
       holder.name = name;
       let alive;
@@ -357,7 +369,9 @@ function acquireLock(home, name, op) {
     }
     let wrote = false;
     try {
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
       const me = selfIdentityCapture();
+      fs.ftruncateSync(fd, 0);
       fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 'utf8');
       wrote = true;
     } finally {
@@ -377,11 +391,12 @@ function acquireLock(home, name, op) {
 
 function withLock(home, name, op, fn) {
   const release = acquireLock(home, name, op);
-  try {
-    return fn();
-  } finally {
-    release();
-  }
+  try { return fn(); } finally { release(); }
+}
+
+async function withLockAsync(home, name, op, fn) {
+  const release = acquireLock(home, name, op);
+  try { return await fn(); } finally { release(); }
 }
 
 function lockHeld(home, name) {
@@ -542,7 +557,7 @@ function upsertApp(reg, appId, desc) {
 
 // ---------- 受管启动（意图先行 → detached 启动 → 身份采集 → 登记） ----------
 
-function launchManaged(home, appId, app, opts = {}) {
+async function launchManaged(home, appId, app, opts = {}) {
   const runId = newRunId();
   const logDir = path.join(home, 'logs', appId);
   fs.mkdirSync(logDir, { recursive: true });
@@ -569,7 +584,7 @@ function launchManaged(home, appId, app, opts = {}) {
   let child;
   let outFd;
   let errFd;
-  let spawnError = null;
+  let spawnOutcome;
   try {
     outFd = fs.openSync(outPath, 'a');
     errFd = fs.openSync(errPath, 'a');
@@ -578,20 +593,30 @@ function launchManaged(home, appId, app, opts = {}) {
       stdio: ['ignore', outFd, errFd],
       env: { ...process.env },
     });
-    // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
-    // 具体失败仍由下方身份采集路径统一落 UNKNOWN 并保留证据
-    child.on('error', (err) => { spawnError = err.message; });
+    spawnOutcome = new Promise((resolve) => {
+      child.once('spawn', () => resolve({ ok: true }));
+      child.once('error', (error) => resolve({ error }));
+    });
     child.unref();
   } catch (e) {
-    rt.current.phase = 'UNKNOWN';
-    rt.current.lastError = `spawn_failed: ${e.message}`;
+    rt.current.phase = 'STOPPED';
+    rt.current.lastError = `spawn_failed: ${e.code ?? e.message}`;
+    rt.current.endedAt = new Date().toISOString();
     writeRuntime(home, appId, rt);
-    throw conflictError('SPAWN_FAILED', `JVM 启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { runId, logPaths: rt.current.logPaths, cause: e.message });
+    throw conflictError('SPAWN_FAILED', `JVM 启动失败：${rt.current.lastError}`, { runId, logPaths: rt.current.logPaths });
   } finally {
     try { if (outFd != null) fs.closeSync(outFd); } catch { /* 忽略 */ }
     try { if (errFd != null) fs.closeSync(errFd); } catch { /* 忽略 */ }
   }
 
+  const outcome = await spawnOutcome;
+  if (outcome.error) {
+    rt.current.phase = 'STOPPED';
+    rt.current.lastError = `spawn_failed: ${outcome.error.code ?? outcome.error.message}`;
+    rt.current.endedAt = new Date().toISOString();
+    writeRuntime(home, appId, rt);
+    throw conflictError('SPAWN_FAILED', `JVM 启动失败：${rt.current.lastError}`, { runId, logPaths: rt.current.logPaths });
+  }
   rt.current.startedAt = new Date().toISOString();
   rt.current.pid = child.pid;
 
@@ -609,13 +634,22 @@ function launchManaged(home, appId, app, opts = {}) {
     return rt.current;
   }
   rt.current.phase = 'UNKNOWN';
-  rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
+  rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}`;
   writeRuntime(home, appId, rt);
   throw conflictError('IDENTITY_CAPTURE_FAILED', `已拉起（pid=${child.pid}）但身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { runId, pid: child.pid, capture: cap, logPaths: rt.current.logPaths });
 }
 
 function writeRuntime(home, appId, rt) {
   atomicWriteJson(runtimePath(home, appId), rt);
+}
+
+function mutateRegistry(home, fn) {
+  return withLock(home, 'registry', 'registry-update', () => {
+    const reg = readRegistry(home);
+    const result = fn(reg);
+    atomicWriteJson(registryPath(home), reg);
+    return result;
+  });
 }
 
 // ---------- 状态计算（只读 + 就地标记；落账由 statusWithFacts 在锁内完成） ----------
@@ -673,14 +707,13 @@ function statusWithFacts(home, appId) {
 
 // ---------- 命令实现 ----------
 
-function cmdStartNew(ctx) {
+async function cmdStartNew(ctx) {
   const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
   const appId = computeAppId(desc.root, desc.entry);
-  return withLock(ctx.home, appId, 'start-new', () => {
-    const reg = readRegistry(ctx.home);
+  return withLockAsync(ctx.home, appId, 'start-new', async () => {
     // 已有受管实例在运行则拒绝（并发/重复启动只允许一份实例）
     const rt = readRuntimeStrict(ctx.home, appId);
     if (rt && rt.current && rt.current.managed && rt.current.phase === 'RUNNING') {
@@ -691,9 +724,8 @@ function cmdStartNew(ctx) {
     }
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
-    const app = upsertApp(reg, appId, desc);
-    atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
+    const app = mutateRegistry(ctx.home, (reg) => upsertApp(reg, appId, desc));
+    const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
@@ -712,13 +744,13 @@ function cmdRecordUnmanaged(ctx) {
   const appId = computeAppId(root, entry);
   const logHints = (opts.getAll('--log-hints') ?? []).flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
   return withLock(ctx.home, appId, 'record-unmanaged', () => {
-    const reg = readRegistry(ctx.home);
+    const now = new Date().toISOString();
+    mutateRegistry(ctx.home, (reg) => {
     for (const app of Object.values(reg.apps)) {
       if (app.appId !== appId && app.alias.toLowerCase() === String(d.alias).toLowerCase()) {
         throw conflictError('ALIAS_TAKEN', `别名 ${d.alias} 已被 ${app.displayName ?? app.alias}（${app.appId}）使用`);
       }
     }
-    const now = new Date().toISOString();
     if (reg.apps[appId]) {
       const app = reg.apps[appId];
       app.alias = d.alias;
@@ -732,7 +764,8 @@ function cmdRecordUnmanaged(ctx) {
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
     }
-    atomicWriteJson(registryPath(ctx.home), reg);
+    });
+    const reg = readRegistry(ctx.home);
     const rt = readRuntimeStrict(ctx.home, appId) ?? { schemaVersion: SCHEMA_VERSION, appId, prevRuns: [] };
     archiveCurrent(rt);
     rt.current = {
@@ -806,16 +839,15 @@ function cmdStatus(ctx, ref) {
 }
 
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
-function cmdStart(ctx, ref) {
+async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
-  return withLock(ctx.home, appId, 'start', () => {
-    const reg = readRegistry(ctx.home);
-    const app = reg.apps[appId];
+  return withLockAsync(ctx.home, appId, 'start', async () => {
+    let app = readRegistry(ctx.home).apps[appId];
     if (!app.exe) {
       throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置；需 Skill 重新分析该项目并走 start-new`);
     }
@@ -829,11 +861,14 @@ function cmdStart(ctx, ref) {
     }
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
-    app.cwd = cwd;
-    app.exe = exe;
-    app.updatedAt = new Date().toISOString();
-    atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
+    app = mutateRegistry(ctx.home, (latest) => {
+      const current = latest.apps[appId];
+      current.cwd = cwd;
+      current.exe = exe;
+      current.updatedAt = new Date().toISOString();
+      return current;
+    });
+    const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
@@ -899,24 +934,26 @@ function cmdStop(ctx, ref) {
   });
 }
 
-function cmdRestart(ctx, ref) {
+async function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
-  return withLock(ctx.home, appId, 'restart', () => {
-    const reg = readRegistry(ctx.home);
-    const app = reg.apps[appId];
+  return withLockAsync(ctx.home, appId, 'restart', async () => {
+    let app = readRegistry(ctx.home).apps[appId];
     if (!app.exe) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
     const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = resolveExe(app.exe, cwd);
-    app.cwd = cwd;
-    app.exe = exe;
-    app.updatedAt = new Date().toISOString();
-    atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app);
+    app = mutateRegistry(ctx.home, (reg) => {
+      const current = reg.apps[appId];
+      current.cwd = cwd;
+      current.exe = exe;
+      current.updatedAt = new Date().toISOString();
+      return current;
+    });
+    const cur = await launchManaged(ctx.home, appId, app);
     return {
       appId, alias: app.alias, stop: stopResult,
       start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths },
@@ -1094,8 +1131,13 @@ function resolveSource(home, ref, src) {
   if ((m = /^hint:(\d{1,3})$/.exec(src))) {
     const hint = (rt?.current?.logHints ?? [])[Number(m[1])];
     if (typeof hint !== 'string' || !path.isAbsolute(hint)) throw notFoundError('日志线索不存在');
-    const real = fs.realpathSync(hint);
-    if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
+    let real;
+    try {
+      real = fs.realpathSync(hint);
+      if (!fs.statSync(real).isFile()) throw new Error('不是普通文件');
+    } catch {
+      throw notFoundError('登记线索已失效：日志文件不存在或不可用');
+    }
     return { appId, alias: app.alias, runId: null, stream: null, file: real };
   }
   if ((m = /^tmp:(.+)$/.exec(src)) && TMP_NAME_RE.test(m[1])) {
@@ -1160,8 +1202,9 @@ function cmdLogs(ctx, ref) {
 function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
   const cur = rt && rt.current;
   process.on('SIGINT', () => {
-    process.stderr.write('\n[已中止 follow]\n');
-    process.exit(0);
+    process.stderr.write('\n[已中止 follow]\n', () => {
+      process.stdout.write('', () => process.exit(0));
+    });
   });
   const managedWithIdentity = !!(cur && cur.managed && cur.pid != null && cur.creationFileTime && cur.image && cur.runId === runId);
   if (!managedWithIdentity) {
@@ -1209,7 +1252,7 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
         } catch { /* 忽略 */ }
         clearInterval(tick);
         process.stderr.write(`\n[进程已退出，follow 结束]\n`);
-        process.exit(0);
+        process.exitCode = 0;
       }
     } catch { /* 核验失败：继续跟随 */ }
   }, 500);
@@ -1313,7 +1356,7 @@ function emitOk(ctx, command, data) {
   } else {
     process.stdout.write(`${renderHuman(command, data)}\n`);
   }
-  process.exit(EXIT.OK);
+  process.exitCode = EXIT.OK;
 }
 
 function emitErr(ctx, command, e) {
@@ -1326,7 +1369,7 @@ function emitErr(ctx, command, e) {
     if (e.detail) text += `\n详情: ${typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)}`;
     process.stderr.write(`${text}\n`);
   }
-  process.exit(e.exitCode ?? 1);
+  process.exitCode = e.exitCode ?? 1;
 }
 
 function renderHuman(command, data) {
@@ -1442,20 +1485,23 @@ async function main() {
     switch (command) {
       case 'list': data = cmdList(ctx); break;
       case 'status': data = cmdStatus(ctx, ctx.rest[0]); break;
-      case 'start': data = cmdStart(ctx, ctx.rest[0]); break;
+      case 'start': data = await cmdStart(ctx, ctx.rest[0]); break;
       case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
-      case 'restart': data = cmdRestart(ctx, ctx.rest[0]); break;
+      case 'restart': data = await cmdRestart(ctx, ctx.rest[0]); break;
       case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;
-      case 'start-new': data = cmdStartNew(ctx); break;
+      case 'start-new': data = await cmdStartNew(ctx); break;
       case 'record-unmanaged': data = cmdRecordUnmanaged(ctx); break;
       case 'ui': await cmdUi(ctx); return; // 前台常驻直到 Ctrl+C，不走 emitOk
       default: throw usageError(`未知命令：${command}\n${usageText()}`);
     }
     emitOk(ctx, command, data);
   } catch (e) {
-    if (e instanceof ManagerError) emitErr(ctx, command, e);
+    if (e instanceof ManagerError) {
+      emitErr(ctx, command, e);
+      return;
+    }
     process.stderr.write(`内部错误：${e.stack}\n`);
-    process.exit(5);
+    process.exitCode = 5;
   }
 }
 
