@@ -6,6 +6,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -40,7 +41,28 @@ function errorStatus(e) {
   }
 }
 
-export async function startUiServer({ home, port = 0, api }) {
+// --open 拉起默认浏览器：任何失败都只降级为“已打印 URL”，绝不阻塞/中断 ui 常驻。
+// Windows 用 cmd /d /s /c start：首个引号参数是窗口标题，URL 加引号防查询串里的特殊字符被 cmd 截断。
+function openInBrowser(url) {
+  try {
+    let child;
+    if (process.platform === 'win32') {
+      child = spawn('cmd', ['/d', '/s', '/c', `start "" "${url}"`], { detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true });
+    } else if (process.platform === 'darwin') {
+      child = spawn('open', [url], { detached: true, stdio: 'ignore' });
+    } else {
+      child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+    }
+    child.on('error', () => {
+      process.stdout.write(`[project-runner] 自动打开浏览器失败，请手动访问上方地址\n`);
+    });
+    child.unref();
+  } catch {
+    process.stdout.write(`[project-runner] 自动打开浏览器失败，请手动访问上方地址\n`);
+  }
+}
+
+export async function startUiServer({ home, port = 0, open = false, api }) {
   const token = crypto.randomBytes(24).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(token).digest();
   let boundPort = port;
@@ -151,13 +173,15 @@ export async function startUiServer({ home, port = 0, api }) {
       resolve();
     });
   });
+  const uiUrl = `http://127.0.0.1:${boundPort}/?token=${token}`;
   process.stdout.write([
     '',
-    `[project-runner] 运行管理台（只读）: http://127.0.0.1:${boundPort}/?token=${token}`,
+    `[project-runner] 运行管理台（只读）: ${uiUrl}`,
     `  数据目录: ${home}`,
     '  该地址包含访问令牌，请勿转发给他人；页面展示的日志可能含敏感信息。',
     '  Ctrl+C 退出（无常驻服务，退出即停止）。',
     '',
   ].join('\n') + '\n');
+  if (open) openInBrowser(uiUrl);
   await new Promise(() => { /* 常驻直到进程被终止 */ });
 }

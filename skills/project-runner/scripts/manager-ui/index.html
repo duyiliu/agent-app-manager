@@ -311,6 +311,12 @@ aside {
   background:rgba(251,191,36,.12);
   font-family:var(--mono-font);
   font-size:11px}
+.alert .copy-btn {
+  height:21px;
+  padding:0 8px;
+  font-size:10.5px;
+  vertical-align:1px;
+  margin:0 2px}
 .hint-line {
   margin:0 13px 11px;
   font-size:11px;
@@ -369,6 +375,21 @@ aside {
   background:linear-gradient(180deg,#151e28 0%,#121922 100%);
   border-bottom:1px solid var(--line)}
 #runSel { flex:0 1 340px; min-width:140px; font:11.5px var(--mono-font) }
+#logFilter {
+  flex:0 1 190px;
+  min-width:110px;
+  height:30px;
+  padding:0 9px;
+  font:11.5px var(--mono-font);
+  color:var(--text);
+  background:rgba(148,163,184,.06);
+  border:1px solid var(--line-strong);
+  border-radius:var(--radius-sm);
+  outline:none;
+  transition:border-color .15s ease,background .15s ease}
+#logFilter::placeholder { color:var(--text-faint) }
+#logFilter:focus { border-color:rgba(45,212,191,.5); background:rgba(148,163,184,.1) }
+#logFilter.invalid { border-color:rgba(248,113,113,.6); background:var(--danger-soft) }
 #followBtn::before { content:"●"; font-size:7px; color:var(--text-faint) }
 #followBtn[aria-pressed="true"]::before { color:var(--accent); text-shadow:0 0 7px rgba(45,212,191,.85) }
 #clearBtn::before { content:"⌫"; font-size:11px; opacity:.8 }
@@ -477,6 +498,8 @@ aside {
     <section class="log-panel" aria-label="运行日志">
       <div class="log-toolbar">
         <select id="runSel" aria-label="日志源" disabled></select>
+        <input id="logFilter" type="search" placeholder="正则过滤…" spellcheck="false" aria-label="日志正则过滤" disabled>
+        <button id="errorsBtn" type="button" aria-pressed="false" title="只看错误（内置错误规则：ERROR/Exception/Caused by 等）" disabled>只看错误</button>
         <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" type="button" disabled>清屏</button>
         <span id="logMeta"></span>
@@ -585,12 +608,47 @@ function renderApps() {
   ordered.forEach((card, i) => { if (list.children[i] !== card) list.insertBefore(card, list.children[i] ?? null); });
   list.scrollTop = previousScroll;
 }
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* 非安全上下文或拒绝授权：退回选区复制 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+function copyButton(text) {
+  const btn = el('button', 'copy-btn', '复制');
+  btn.type = 'button';
+  btn.title = '复制命令';
+  btn.addEventListener('click', async () => {
+    const ok = await copyText(text);
+    btn.textContent = ok ? '已复制 ✓' : '复制失败';
+    setTimeout(() => { btn.textContent = '复制'; }, 1600);
+  });
+  return btn;
+}
+function updateTitle() {
+  const running = appsCache.filter(a => a.status === 'RUNNING').length;
+  document.title = (running > 0 ? `(${running}) ` : '') + 'Project Runner · 运行管理台';
+}
 async function loadApps() {
   if (fatal) return;
   try {
     const d = await api('/api/apps');
     hideBannerIfRecovered();
     appsCache = d.apps ?? [];
+    updateTitle();
     $('#homePath').textContent = d.home ?? '';
     if (selected && !appsCache.some(a => a.alias === selected)) {
       selected = null;
@@ -639,10 +697,11 @@ function renderDetail(d) {
   const run = d.run;
   const needsAttention = run && run.managed !== false && !['RUNNING', 'STOPPED'].includes(run.phase);
   if (needsAttention) {
+    const cmd = `start ${d.alias} --ack-unresolved ${run.runId}`;
     const alert = el('div', 'alert');
     alert.append(el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后用 manager CLI 执行 `));
-    const code = el('code', null, `start ${d.alias} --ack-unresolved ${run.runId}`);
-    alert.appendChild(code);
+    alert.appendChild(el('code', null, cmd));
+    alert.appendChild(copyButton(cmd));
     alert.appendChild(el('span', null, ' 显式恢复。不要删除运行数据绕过。'));
     card.appendChild(alert);
   }
@@ -716,6 +775,11 @@ function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
   detailOpen = false; detailTouched = false;
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set('app', alias);
+    history.replaceState(null, '', u); // 回写 ?app=<alias>：刷新后保持选中（初始定位已支持）
+  } catch { /* 地址不可写时仅影响刷新定位，不阻塞选择 */ }
   renderApps();
   renderDetail(null);
   resetLog();
@@ -734,6 +798,38 @@ const classify = t => errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr
 let logSrc = null, logSrcLabel = '', offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
 let renderedId = 0, sourcesVersion = 0, sourcesController = null;
 let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBusy = false;
+// 过滤在渲染层做：lines 数组始终保留全量，清空条件即恢复全视图；
+// errorsOnly 等价内置 errorPattern；自定义正则无效时给出提示而非静默失效（不过滤 + 输入框标红 + meta 提示）。
+let errorsOnly = false, filterRe = null, filterError = null;
+let logSize = 0, logFallbackLabel = '日志';
+
+function compileFilter() {
+  const input = $('#logFilter');
+  const raw = input.value.trim();
+  filterRe = null;
+  filterError = null;
+  input.classList.remove('invalid');
+  input.title = '';
+  if (!raw) return;
+  try { filterRe = new RegExp(raw); }
+  catch (e) {
+    filterError = e.message;
+    input.classList.add('invalid');
+    input.title = `正则无效：${e.message}`;
+  }
+}
+function lineVisible(text) {
+  if (errorsOnly && !errorPattern.test(text)) return false;
+  return !filterRe || filterRe.test(text);
+}
+function visibleLines() { return lines.filter(l => lineVisible(l.text)); }
+function renderMeta() {
+  let text = `${logSrcLabel || logFallbackLabel} · ${fmtSize(logSize)} · 缓存 ${lines.length} 行`;
+  if (removed) text += ` · 已移除较早 ${removed} 行`;
+  if (filterError) text += ` · 正则无效（${filterError}），已按未过滤显示`;
+  else if (filterRe || errorsOnly) text += ` · 命中 ${visibleLines().length} 行`;
+  $('#logMeta').textContent = text;
+}
 
 function logHint(text, error = false) {
   const box = $('#log');
@@ -742,8 +838,9 @@ function logHint(text, error = false) {
 function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true;
+  logSize = 0; logFallbackLabel = '日志';
   updateFollow();
-  $('#logMeta').textContent = '';
+  renderMeta();
   if (selected) logHint('等待日志输出…'); else logHint('选择左侧应用后查看日志。');
 }
 function updateFollow() {
@@ -755,6 +852,7 @@ function renderLines(force = false) {
   if (!force && renderedId && lines[0]?.id <= renderedId) {
     const frag = document.createDocumentFragment();
     for (const l of lines) if (l.id > renderedId) {
+      if (!lineVisible(l.text)) continue; // 增量新行同样按当前过滤条件入视图
       const row = el('div', 'line ' + classify(l.text)); row.dataset.id = l.id;
       row.appendChild(document.createTextNode(l.text || ' ')); frag.appendChild(row);
     }
@@ -771,6 +869,7 @@ function renderLines(force = false) {
   if (!force && wasEmpty && !lines.length) return;
   const frag = document.createDocumentFragment();
   for (const l of lines) {
+    if (!lineVisible(l.text)) continue; // 增量新行也按当前条件入视图
     const row = el('div', 'line ' + classify(l.text));
     row.dataset.id = l.id;
     row.appendChild(document.createTextNode(l.text || ' '));
@@ -780,6 +879,7 @@ function renderLines(force = false) {
   if (boundary) box.prepend(el('div', 'empty', boundary));
   renderedId = lines.at(-1)?.id ?? 0;
   if (following) box.scrollTop = box.scrollHeight;
+  renderMeta();
 }
 async function pollTail() {
   if (fatal || degrading || !selected || !logSrc || tailBusy) return;
@@ -806,7 +906,9 @@ async function pollTail() {
       renderLines();
     }
     offset = d.offset;
-    $('#logMeta').textContent = `${logSrcLabel || (d.runId ? `${d.runId}.${d.stream}` : '日志')} · ${fmtSize(d.size)} · 缓存 ${lines.length} 行` + (removed ? ` · 已移除较早 ${removed} 行` : '');
+    logSize = d.size;
+    logFallbackLabel = d.runId ? `${d.runId}.${d.stream}` : '日志';
+    renderMeta();
     conn('已连接 · ' + new Date().toLocaleTimeString());
   } catch (e) {
     if (e.status === 404) { logHint('日志文件不存在（可能已被清理，或该批次未产生该流输出）。'); return; }
@@ -830,11 +932,13 @@ async function loadSources() {
     runSel.disabled = !has;
     $('#followBtn').disabled = !has;
     $('#clearBtn').disabled = !has;
+    $('#logFilter').disabled = !has;
+    $('#errorsBtn').disabled = !has;
     if (!has) {
       logSrc = null;
       logSrcLabel = '';
       logHint('该应用暂无可读日志源（受管批次、登记线索与项目 .tmp 日志都未找到）。');
-      $('#logMeta').textContent = '';
+      renderMeta();
       return;
     }
     const want = logSrc && [...runSel.options].some(o => o.value === logSrc) ? logSrc : runSel.options[0].value;
@@ -857,6 +961,16 @@ $('#runSel').addEventListener('change', e => {
 $('#detailBar').addEventListener('click', () => { detailTouched = true; applyDetail(detailOpen = $('#detail').hidden); });
 $('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
 $('#clearBtn').addEventListener('click', () => { lines = []; renderedId = 0; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(true); });
+$('#logFilter').addEventListener('input', () => { compileFilter(); renderLines(true); });
+$('#logFilter').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.target.value = ''; compileFilter(); renderLines(true); }
+});
+$('#errorsBtn').addEventListener('click', () => {
+  errorsOnly = !errorsOnly;
+  $('#errorsBtn').classList.toggle('on', errorsOnly);
+  $('#errorsBtn').setAttribute('aria-pressed', String(errorsOnly));
+  renderLines(true);
+});
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
   const box = $('#log');

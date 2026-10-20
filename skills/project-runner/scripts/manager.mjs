@@ -1792,7 +1792,7 @@ function probeManagerUi(port) {
 }
 
 async function cmdUi(ctx) {
-  const opts = parseNamed(ctx.rest, { '--port': 'value' });
+  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   let port = 8199; // 固定端口契约；--port 0 使用随机端口
   if (opts.has('--port')) {
@@ -1804,6 +1804,7 @@ async function cmdUi(ctx) {
     await startUiServer({
       home: ctx.home,
       port,
+      open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         list: () => cmdList(ctx),
         status: (ref) => cmdStatus(ctx, ref).then((data) => { delete data.portListening; delete data.portNote; return data; }),
@@ -1999,7 +2000,7 @@ function usageText() {
     '       [--src <run:…|hint:N|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
     '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
-    '  ui [--port N]                     本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌，Ctrl+C 退出）',
+    '  ui [--port N] [--open]              本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌；--open 监听成功后用默认浏览器打开带令牌 URL，失败仅打印地址；Ctrl+C 退出）',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
