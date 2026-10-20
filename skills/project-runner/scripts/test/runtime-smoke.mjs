@@ -14,7 +14,8 @@ const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-runtime-smoke-'));
 const home = path.join(base, 'home');
 const projNode = path.join(base, 'node-app');
 const projPy = path.join(base, 'py-app');
-for (const d of [projNode, projPy]) fs.mkdirSync(d, { recursive: true });
+const projUm = path.join(base, 'um-app');
+for (const d of [projNode, projPy, projUm]) fs.mkdirSync(d, { recursive: true });
 
 fs.writeFileSync(path.join(projNode, 'srv.js'),
   'console.log("node-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
@@ -158,6 +159,16 @@ try {
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'CONFIG_INVALID');
     assert(r.json.error.message.includes('WindowsApps'));
+  });
+  await check('record-unmanaged 登记非受管记录并保留 mode', () => {
+    const r = cli('record-unmanaged', '--desc', descFile({
+      alias: 'pyum', root: projUm, mode: 'python',
+    }), '--log-hints', path.join(projUm, '.tmp', 'runner-local-x.stdout.log'));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    assert.equal(r.json.data.managed, false);
+    const s = cli('status', 'pyum');
+    assert.equal(s.json.data.mode, 'python');
   });
   await check('list 汇总有真实 mode 展示', () => {
     if (!nodeRunId) skip('无受管实例');

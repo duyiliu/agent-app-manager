@@ -75,10 +75,10 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 4. **受管启动形态（关键）**：`npm run dev`/`pnpm dev`/`yarn dev` 在 Windows 下经 `.cmd` shim + cmd 包装拉起真实 node——包装进程不是受管目标，`.cmd` 也会被 manager 直接拒绝。**受管做法是把 script 映射为真实 node 入口**：
    - script 形如 `<bin> <args…>`：读 `node_modules/.bin/<bin>.cmd` 里被调用的 js 入口（`%dp0%` 相对路径），或读对应包的 `package.json` `bin` 字段解析。常见映射：vite→`node_modules/vite/bin/vite.js`，vue-cli-service→`node_modules/@vue/cli-service/bin/vue-cli-service.js`，react-scripts→`node_modules/react-scripts/scripts/start.js`，next→`node_modules/next/dist/bin/next`，nuxt→`node_modules/nuxt/bin/nuxt.mjs`，ng→`node_modules/@angular/cli/bin/ng.js`（`.mjs`/`.cjs` 同理）。
    - script 形如 `node <file>`（Node 后端）→ 该文件即 args[0]。
-   - 复合命令（`&&` 串联、`cross-env KEY=V <bin>`）：把最终真正拉起服务的那个进程解析出来；环境变量用 `envRefs` 引用（值不落注册表），解析不了就转非受管。
-   - desc：`exe`=真实 `node.exe`（`where node` 解析），`args`=[入口 js 路径, 其余参数]，`cwd`=项目根，`mode`=`node`。
+   - 复合命令（`&&` 串联、`cross-env KEY=V <bin>`）：把最终真正拉起服务的那个进程解析出来；`cross-env` 注入的**非敏感字面值**（如 `PORT=3001`）在调用 `start-new` 的进程环境里设置同名变量即可（manager 会把当前环境整体传给子进程），敏感值用 `envRefs` 只记名称；解析不了就转非受管。
+   - desc：`exe`=真实 `node.exe`（`where node` 解析；agent 自身运行在 Node 上时直接用 `process.execPath` 更可靠），`args`=[入口 js 路径, 其余参数]，`cwd`=项目根，`mode`=`node`。
    - 无法解析唯一入口（turbo/nx 并行编排、自定义 shell 串联等）→ 报 `UNSUPPORTED_LAUNCH` 类限制说明后按原授权执行项目命令，`record-unmanaged` 登记日志线索（`--log-hints` 指向 `.tmp/runner-local-*` 日志），不伪造托管。
-5. **[比对] 端口**：以实际输出/配置为准；`vite.config.*`/`vue.config.js`/`next.config.*`/`.env*` 中的 `server.port`/`PORT` 优先于框架默认（vite 5173、next 3000、ng 4200、vue-cli 8080）。`.env*` 只读取值，不改写、不外泄。
+5. **[比对] 端口**：以实际输出/配置为准；`vite.config.*`/`vue.config.js`/`next.config.*`/`.env*` 中的 `server.port`/`PORT` 优先于框架默认（vite 5173、next 3000、ng 4200、vue-cli 8080）。注意 vite 等在端口被占用时可能自动换用下一个端口并在输出中说明——就绪端口以实际输出为准，不是配置文件。`.env*` 只读取值，不改写、不外泄。
 6. **热更新**：前端 dev server 的 HMR/文件监听是框架能力，不是本 Skill 承诺；验证方式=改动源文件后看 dev server 输出或页面。Python 同理（uvicorn `--reload`、flask debug 等由项目配置决定，不擅自添加参数）。
 
 ### 其他栈（Go / .NET / PHP / Rust 等）
@@ -183,7 +183,7 @@ node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json]
 
 Agent 使用规程：
 
-1. **首次启动（受管登记）**：按第 1/1A 节完成项目识别、第 3/4 节完成命令匹配与启动前检查后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`|`python`|`node`|`proc`）、`exe`（**必须解析为真实可执行进程**：Java 为真实 JDK bin 的 `java.exe`——裸名 `java` 先取 `JAVA_HOME` 再查 PATH，解析到 Oracle javapath 转发 shim 会被拒绝，shim 会让真实 JVM 变成子进程导致日志句柄不落地、终止错位；Python 为 venv/真实 `python.exe`；Node 前端/后端为 `node.exe`+入口 js。`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps 0 字节 stub 一律拒绝——先按第 1A 节解析到底层真实进程再登记）、`args`（字符串数组：Java 为 `-cp`/`-jar`+主类/参数含 JRebel agent 参数；Python/Node 为脚本/模块与参数）、`envRefs`（仅环境变量**名称**数组，启动时从当前环境解析，值不落注册表）、`expectedPort`。manager 按“持久化意图 → detached 启动 → 同句柄身份采集 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定。
+1. **首次启动（受管登记）**：按第 1/1A 节完成项目识别、第 3/4 节完成命令匹配与启动前检查后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`|`python`|`node`|`proc`）、`exe`（**必须解析为真实可执行进程**：Java 为真实 JDK bin 的 `java.exe`——裸名 `java` 先取 `JAVA_HOME` 再查 PATH，解析到 Oracle javapath 转发 shim 会被拒绝，shim 会让真实 JVM 变成子进程导致日志句柄不落地、终止错位；Python 为 venv/真实 `python.exe`；Node 前端/后端为 `node.exe`+入口 js。`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps 0 字节 stub 一律拒绝——先按第 1A 节解析到底层真实进程再登记）、`args`（字符串数组：Java 为 `-cp`/`-jar`+主类/参数含 JRebel agent 参数；Python/Node 为脚本/模块与参数）、`envRefs`（仅环境变量**名称**数组，值不落注册表；manager 启动子进程时把当前环境整体传入，`envRefs` 仅作已解析名称的证据记录——需要注入非敏感字面值时在调用 `start-new` 的进程环境里设置同名变量）、`expectedPort`。manager 按“持久化意图 → detached 启动 → 同句柄身份采集 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定。
 2. **非受管启动**：项目只有启动脚本且无法安全定位目标进程（包装进程、多进程编排、远端拉起）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移；非 Java 项目脚本日志按第 4 节放到 `.tmp/runner-local-*`）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
 3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
 4. **停止/重启**：仅受管实例可用。语义是**有界强制终止**（Windows 同句柄核验后 TerminateProcess，退出码 137，不杀进程树、无优雅关机），执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。

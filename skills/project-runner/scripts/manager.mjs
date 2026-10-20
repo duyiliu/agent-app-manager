@@ -484,7 +484,7 @@ function realpathOrConflict(label, p) {
 // WindowsApps 应用执行别名：Node lstat 视为符号链接（AppX reparse point）。
 // 未安装应用时是 0 字节 stub（运行即打开商店），已安装时也无法预先验证目标进程身份，
 // 一律不作为受管 exe——真实解释器应来自安装目录或项目 venv。
-function isAppExecStub(file) {
+function isAppExecAlias(file) {
   if (!/\\Microsoft\\WindowsApps\\/i.test(file)) return false;
   try {
     const st = fs.lstatSync(file);
@@ -496,7 +496,7 @@ function isAppExecStub(file) {
 
 // 校验解析出的候选可执行文件：返回 null 表示可用，否则为拒绝原因。
 function exeRejection(resolved) {
-  if (isAppExecStub(resolved)) {
+  if (isAppExecAlias(resolved)) {
     return `WindowsApps 应用执行别名（reparse point，无法核验真实目标进程）`;
   }
   if (WRAPPER_EXT_RE.test(resolved)) {
@@ -509,6 +509,13 @@ function exeRejection(resolved) {
     return `不是可直接启动的可执行文件（受管要求 .exe/.com）；请解析到底层真实进程`;
   }
   return null;
+}
+
+// where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：UTF-8 解码失败回退 GBK，
+// 避免非 ASCII 用户名路径乱码后把真实候选误判为不可用。
+function decodeCmdOutput(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { return new TextDecoder('gbk').decode(buf); }
 }
 
 function resolveExe(exe, cwd) {
@@ -533,10 +540,10 @@ function resolveExe(exe, cwd) {
     const jh = path.join(process.env.JAVA_HOME, 'bin', `${exe}.exe`);
     if (fs.existsSync(jh)) return path.resolve(jh);
   }
-  const r = spawnSync('where', [exe], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  const r = spawnSync('where', [exe], { encoding: 'buffer', windowsHide: true, timeout: 10000 });
   if (r.error) return exe; // 无法定位 where 时按原值交给 spawn
   if (r.status !== 0) throw conflictError('CONFIG_INVALID', `exe 不在 PATH 中：${exe}（Skill 需重新分析该目标项目）`);
-  const candidates = r.stdout.trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const candidates = decodeCmdOutput(r.stdout).trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   // 按 where 顺序逐个校验：跳过 stub/脚本包装/非 exe，取第一个真实可执行文件；
   // 全部不可用时报告候选清单与原因，不静默选一个包装进程冒充受管目标。
   const rejected = [];

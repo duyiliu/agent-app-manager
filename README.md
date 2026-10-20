@@ -4,7 +4,7 @@
 
 > 当前可用：Java / Spring Boot、Python、Vue/React/Vite 等 Node 前端及其他主流栈的项目识别与启动、Standalone JRebel 环境初始化、热加载验证，以及 `manager.mjs` 跨项目运行管理 P0 与其 `ui` 统一只读 Web 管理台（日志 + 项目文件；命令与使用规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节，能力与验收基线见 [design.md](docs/design.md)）。
 >
-> 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管进程跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的应用进程，**不接管 IDEA / 手工启动的外部进程**。受管要求解析出真实可执行进程（`.exe`），`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps stub 会被拒绝并转非受管路径。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
+> 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管进程跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的应用进程，**不接管 IDEA / 手工启动的外部进程**。受管要求解析出真实可执行进程（`.exe`/`.com`），`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps stub 会被拒绝并转非受管路径。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
 
 ## 安装
 
