@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Project Runner · 运行管理台</title>
+<style>
+:root {
+  --bg:#0c1015;
+  --panel:#141b24;
+  --panel-2:#18212c;
+  --panel-3:#1d2836;
+  --line-soft:rgba(148,163,184,.10);
+  --line:rgba(148,163,184,.14);
+  --line-strong:rgba(148,163,184,.24);
+  --text:#d6e0ea;
+  --text-dim:#9babbd;
+  --text-faint:#71829a;
+  --accent:#2dd4bf;
+  --accent-text:#8df4e4;
+  --accent-soft:rgba(45,212,191,.12);
+  --danger:#f87171;
+  --danger-soft:rgba(248,113,113,.08);
+  --warn:#fbbf24;
+  --warn-soft:rgba(251,191,36,.10);
+  --ok:#4ade80;
+  --shadow:0 16px 40px rgba(0,0,0,.45);
+  --radius:12px;
+  --radius-sm:7px;
+  --ui-font:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  --mono-font:"Cascadia Code","JetBrains Mono",Consolas,"Microsoft YaHei UI",monospace;
+}
+* { box-sizing:border-box }
+[hidden] { display:none!important }
+html,body { height:100% }
+body {
+  margin:0;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+  background:
+    radial-gradient(1100px 520px at 74% -12%, rgba(45,212,191,.07), transparent 62%),
+    radial-gradient(900px 480px at -8% 108%, rgba(96,165,250,.05), transparent 60%),
+    var(--bg);
+  color:var(--text);
+  font:13px/1.5 var(--ui-font);
+  -webkit-font-smoothing:antialiased}
+::selection { background:rgba(45,212,191,.28); color:#f4fffd }
+* { scrollbar-width:thin; scrollbar-color:#2d3948 transparent }
+::-webkit-scrollbar { width:10px; height:10px }
+::-webkit-scrollbar-track { background:transparent }
+::-webkit-scrollbar-thumb { background:#2d3948; background-clip:padding-box; border:2px solid transparent; border-radius:99px }
+::-webkit-scrollbar-thumb:hover { background:#3d4d61; background-clip:padding-box; border:2px solid transparent }
+::-webkit-scrollbar-corner { background:transparent }
+
+button,select {
+  font:inherit;
+  color:var(--text-dim);
+  border:1px solid var(--line-strong);
+  border-radius:var(--radius-sm);
+  background:linear-gradient(180deg,var(--panel-3),var(--panel-2));
+  transition:background .15s ease,border-color .15s ease,color .15s ease,transform .08s ease}
+button {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  height:30px;
+  padding:0 11px;
+  font-size:12px;
+  font-weight:500;
+  cursor:pointer;
+  white-space:nowrap;
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset}
+button:hover { color:var(--text); border-color:rgba(94,234,212,.34); background:linear-gradient(180deg,#223041,#1a2531) }
+button:active { transform:translateY(1px) }
+button:disabled { opacity:.42; cursor:default; transform:none }
+button:focus-visible,select:focus-visible,[tabindex]:focus-visible { outline:2px solid rgba(45,212,191,.75); outline-offset:1px }
+button.on,
+#followBtn[aria-pressed="true"] {
+  color:var(--accent-text);
+  border-color:rgba(45,212,191,.42);
+  background:linear-gradient(180deg,rgba(45,212,191,.18),rgba(45,212,191,.09))}
+select {
+  appearance:none;
+  height:30px;
+  padding:0 30px 0 10px;
+  cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237f91a8' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 9px center}
+select:hover { color:var(--text); border-color:rgba(94,234,212,.3) }
+select option { background:#151d27; color:var(--text) }
+.icon-btn { width:30px; padding:0; font-size:13px }
+#refreshBtn::before { content:"↻"; font-size:14px; line-height:1 }
+
+.topbar {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 14px;
+  background:linear-gradient(180deg,#151e28 0%,#121922 100%);
+  border-bottom:1px solid var(--line);
+  box-shadow:0 1px 0 rgba(255,255,255,.025) inset}
+.brand { display:flex; align-items:center; gap:9px; min-width:0 }
+.live-dot {
+  flex:none;
+  width:7px; height:7px;
+  border-radius:50%;
+  background:var(--accent);
+  box-shadow:0 0 0 3px rgba(45,212,191,.12),0 0 9px rgba(45,212,191,.55)}
+.brand-text { display:flex; flex-direction:column; line-height:1.2; min-width:0 }
+.kicker { font-size:8.5px; font-weight:600; letter-spacing:.15em; text-transform:uppercase; color:var(--text-faint) }
+.brand-text strong { font-size:13.5px; font-weight:650; color:var(--text) }
+.badge {
+  flex:none;
+  padding:2px 8px;
+  font-size:10px;
+  font-weight:500;
+  color:var(--text-faint);
+  background:rgba(148,163,184,.05);
+  border:1px solid var(--line);
+  border-radius:99px}
+.badge.ro { color:var(--warn); border-color:rgba(251,191,36,.32); background:var(--warn-soft) }
+.home-path {
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis;
+  font:11px/1.4 var(--mono-font);
+  color:var(--text-faint);
+  text-align:right}
+.conn { flex:none; font:10.5px/1.4 var(--mono-font); color:var(--text-faint) }
+.conn.bad { color:var(--danger) }
+
+.banner {
+  flex:none;
+  padding:9px 14px;
+  font-size:12px;
+  line-height:1.6;
+  color:#ffd9d9;
+  background:rgba(248,113,113,.1);
+  border-bottom:1px solid rgba(248,113,113,.35);
+  overflow-wrap:anywhere}
+.banner.warn { color:#ffe6a8; background:var(--warn-soft); border-bottom-color:rgba(251,191,36,.35) }
+
+.layout {
+  flex:1;
+  min-height:0;
+  display:grid;
+  grid-template-columns:340px minmax(0,1fr)}
+aside {
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  background:linear-gradient(180deg,var(--panel) 0%,#111821 100%);
+  border-right:1px solid var(--line)}
+.panel-title {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  height:46px;
+  padding:0 12px;
+  border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.012)}
+.panel-heading { flex:1; min-width:0; display:flex; flex-direction:column; line-height:1.25 }
+.panel-kicker { font-size:8.5px; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--text-faint) }
+.panel-title strong { font-size:12.5px; font-weight:600; color:var(--text) }
+#appList { flex:1; overflow:auto; padding:8px }
+
+.app-card {
+  display:block;
+  width:100%;
+  margin:0 0 6px;
+  padding:10px 11px;
+  border:1px solid var(--line);
+  border-radius:10px;
+  background:linear-gradient(180deg,rgba(148,163,184,.035),rgba(148,163,184,.015));
+  text-align:left;
+  cursor:pointer;
+  box-shadow:none;
+  height:auto}
+.app-card:hover { border-color:rgba(94,234,212,.3); background:linear-gradient(180deg,rgba(148,163,184,.07),rgba(148,163,184,.03)) }
+.app-card.selected {
+  border-color:rgba(45,212,191,.45);
+  background:linear-gradient(180deg,rgba(45,212,191,.13),rgba(45,212,191,.05));
+  box-shadow:inset 2px 0 0 var(--accent)}
+.app-head { display:flex; align-items:center; gap:7px; min-width:0 }
+.app-alias {
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis;
+  font-size:13px;
+  font-weight:600;
+  color:var(--text)}
+.app-card.selected .app-alias { color:var(--accent-text) }
+.app-meta {
+  display:flex;
+  gap:8px;
+  margin-top:5px;
+  font:10.5px/1.5 var(--mono-font);
+  color:var(--text-faint);
+  overflow:hidden;
+  white-space:nowrap}
+.app-meta span { overflow:hidden; text-overflow:ellipsis }
+.app-root {
+  margin-top:4px;
+  font:10px/1.4 var(--mono-font);
+  color:#5f7189;
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis}
+
+.pill {
+  flex:none;
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:1px 8px;
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.02em;
+  border-radius:99px;
+  border:1px solid var(--line-strong);
+  color:var(--text-dim);
+  background:rgba(148,163,184,.07)}
+.pill::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--text-faint) }
+.pill.st-RUNNING { color:#9df0c5; border-color:rgba(74,222,128,.4); background:rgba(74,222,128,.1) }
+.pill.st-RUNNING::before { background:var(--ok); box-shadow:0 0 6px rgba(74,222,128,.7) }
+.pill.st-STOPPED { color:var(--text-faint) }
+.pill.st-STARTING { color:#ffe099; border-color:rgba(251,191,36,.4); background:var(--warn-soft) }
+.pill.st-STARTING::before { background:var(--warn); box-shadow:0 0 6px rgba(251,191,36,.7) }
+.pill.st-UNKNOWN { color:#ffb9b9; border-color:rgba(248,113,113,.4); background:var(--danger-soft) }
+.pill.st-UNKNOWN::before { background:var(--danger); box-shadow:0 0 6px rgba(248,113,113,.7) }
+.pill.unmanaged { color:#c9b18f; border-color:rgba(201,177,143,.35); background:rgba(201,177,143,.08) }
+.pill.unmanaged::before { display:none }
+.pill.mode { color:var(--text-faint); font-weight:500 }
+.pill.mode::before { display:none }
+
+.detail-panel { display:flex; flex-direction:column; min-width:0; min-height:0 }
+#detail { flex:0 1 auto; max-height:52%; overflow:auto; padding:12px 14px 4px }
+.empty {
+  margin:44px auto;
+  max-width:430px;
+  padding:22px 20px;
+  text-align:center;
+  font-size:12px;
+  line-height:1.75;
+  color:var(--text-faint);
+  border:1px dashed var(--line-strong);
+  border-radius:12px;
+  background:rgba(148,163,184,.025)}
+.empty.error { color:var(--danger); border-color:rgba(248,113,113,.35) }
+
+.card {
+  margin-bottom:10px;
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  background:linear-gradient(180deg,var(--panel) 0%,#121923 100%);
+  overflow:hidden}
+.card-head {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+  padding:11px 13px;
+  border-bottom:1px solid var(--line-soft)}
+.card-head .name { font-size:14.5px; font-weight:650; color:var(--text) }
+.card-head .appid { font:10.5px/1.4 var(--mono-font); color:var(--text-faint) }
+.card-head .spacer { flex:1 }
+.card-body { padding:11px 13px 13px }
+.alert {
+  margin:0 13px 11px;
+  padding:9px 12px;
+  font-size:11.5px;
+  line-height:1.7;
+  color:#ffe0a1;
+  background:var(--warn-soft);
+  border:1px solid rgba(251,191,36,.35);
+  border-radius:9px;
+  overflow-wrap:anywhere}
+.alert code {
+  padding:0 4px;
+  border-radius:4px;
+  background:rgba(251,191,36,.12);
+  font-family:var(--mono-font);
+  font-size:11px}
+.hint-line {
+  margin:0 13px 11px;
+  font-size:11px;
+  color:var(--text-faint);
+  line-height:1.6}
+.kv {
+  display:grid;
+  grid-template-columns:118px minmax(0,1fr);
+  gap:5px 12px;
+  font-size:12px}
+.k { color:var(--text-faint); text-align:right; line-height:1.7 }
+.v {
+  font-family:var(--mono-font);
+  font-size:11.5px;
+  color:#c3cfdd;
+  line-height:1.7;
+  overflow-wrap:anywhere;
+  min-width:0}
+.v.dim { color:var(--text-faint) }
+.v.bad { color:#ffb9b9 }
+.v.good { color:#9df0c5 }
+
+.prev-title {
+  padding:8px 13px 4px;
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:var(--text-faint)}
+.prev-row {
+  display:flex;
+  gap:12px;
+  align-items:baseline;
+  padding:5px 13px;
+  border-top:1px solid var(--line-soft);
+  font:11px/1.6 var(--mono-font);
+  color:var(--text-dim);
+  flex-wrap:wrap}
+.prev-row .rid { color:#bddcf4; overflow-wrap:anywhere }
+.prev-row .why { color:#dcc389 }
+.prev-row .dim { color:var(--text-faint) }
+
+.log-panel {
+  flex:1;
+  min-height:170px;
+  display:flex;
+  flex-direction:column;
+  border-top:1px solid var(--line);
+  background:#0b1016}
+.log-toolbar {
+  display:flex;
+  gap:7px;
+  align-items:center;
+  flex-wrap:wrap;
+  padding:8px 12px;
+  background:linear-gradient(180deg,#151e28 0%,#121922 100%);
+  border-bottom:1px solid var(--line)}
+#runSel { flex:0 1 340px; min-width:140px; font:11.5px var(--mono-font) }
+#streamSel { flex:none; font:11.5px var(--mono-font) }
+#followBtn::before { content:"●"; font-size:7px; color:var(--text-faint) }
+#followBtn[aria-pressed="true"]::before { color:var(--accent); text-shadow:0 0 7px rgba(45,212,191,.85) }
+#clearBtn::before { content:"⌫"; font-size:11px; opacity:.8 }
+#logMeta {
+  flex:1;
+  min-width:100px;
+  text-align:right;
+  font:10.5px/1.4 var(--mono-font);
+  color:var(--text-faint);
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis}
+#log {
+  flex:1;
+  overflow:auto;
+  padding:10px 0 40px;
+  background:
+    linear-gradient(180deg,rgba(45,212,191,.018),transparent 120px),
+    #0b1016;
+  white-space:pre-wrap;
+  word-break:break-all;
+  font-family:var(--mono-font);
+  font-size:12.5px;
+  outline:none}
+#log>.empty { margin:30px auto }
+.line {
+  padding:1px 16px 1px 13px;
+  border-left:3px solid transparent;
+  line-height:1.62;
+  color:#c3cfdd}
+.line:hover { background:rgba(148,163,184,.05) }
+.line.jr { color:#8ff0de; background:rgba(45,212,191,.045); border-left-color:rgba(45,212,191,.38) }
+.line.err { color:#ffb9b9; background:rgba(248,113,113,.075); border-left-color:var(--danger) }
+.line.warn { color:#f5d88f; border-left-color:rgba(251,191,36,.48); background:rgba(251,191,36,.035) }
+.line.sql { color:#91a1b6 }
+
+@media(max-width:860px) {
+  .layout { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(150px,38%) minmax(0,1fr) }
+  aside { border-right:0; border-bottom:1px solid var(--line) }
+  #detail { max-height:none; flex:1 }
+  .log-panel { flex:0 0 44% }
+  .home-path { display:none }
+}
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after { animation:none!important; transition:none!important }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="live-dot" aria-hidden="true"></span><div class="brand-text"><span class="kicker">Project Runner</span><strong>运行管理台</strong></div></div>
+  <span class="badge ro">只读 · v1</span>
+  <div class="home-path" id="homePath"></div>
+  <span class="conn" id="connState">连接中…</span>
+</header>
+<div class="banner warn" id="roBanner">只读视图：这里不提供启动/停止/重启——stop 是有界强制终止，请用 manager CLI 或让 Agent 执行；未结记录的恢复指引见下方黄色提示。</div>
+<div class="banner" id="fatalBanner" hidden></div>
+<main class="layout">
+  <aside aria-label="应用列表">
+    <div class="panel-title">
+      <div class="panel-heading"><span class="panel-kicker">Applications</span><strong>应用</strong></div>
+      <span class="badge" id="appCount">0</span>
+      <button id="refreshBtn" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
+    </div>
+    <div id="appList" role="list"></div>
+  </aside>
+  <section class="detail-panel" aria-label="应用详情">
+    <div id="detail"><div class="empty">正在加载注册表…<br>这里展示由本 Skill 启动并登记的应用；IDEA / 手工启动的进程不会出现。</div></div>
+    <section class="log-panel" aria-label="运行日志">
+      <div class="log-toolbar">
+        <select id="runSel" aria-label="运行批次" disabled></select>
+        <select id="streamSel" aria-label="日志流" disabled><option value="stdout">stdout</option><option value="stderr">stderr</option></select>
+        <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
+        <button id="clearBtn" type="button" disabled>清屏</button>
+        <span id="logMeta"></span>
+      </div>
+      <div id="log" tabindex="0" aria-label="日志内容"><div class="empty">选择左侧应用后查看按批次的运行日志。</div></div>
+    </section>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
+const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : null;
+
+let token = new URLSearchParams(location.search).get('token') || '';
+let selected = null;          // 当前选中的 alias
+let appsCache = [];
+let fatal = false;            // 令牌失效后停止轮询
+let degrading = false;        // 数据损坏等持久性错误
+
+async function api(path) {
+  const u = new URL(path, location.origin);
+  u.searchParams.set('token', token);
+  const r = await fetch(u, { cache: 'no-store' });
+  const j = await r.json().catch(() => ({ ok: false, error: { code: 'BAD_JSON', message: '响应解析失败' } }));
+  if (!r.ok) {
+    const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
+    e.code = j?.error?.code; e.status = r.status;
+    throw e;
+  }
+  return j.data;
+}
+function showBanner(text, warn = false) {
+  const b = $('#fatalBanner');
+  b.hidden = false;
+  b.classList.toggle('warn', warn);
+  b.replaceChildren(el('span', null, text));
+}
+function hideBanner() { $('#fatalBanner').hidden = true; }
+function conn(text, bad = false) { const c = $('#connState'); c.textContent = text; c.classList.toggle('bad', bad); }
+function handlePollError(e) {
+  conn(e.message, true);
+  if (e.status === 403) {
+    fatal = true;
+    showBanner('访问令牌无效：请使用启动 manager ui 时打印的完整地址（含 ?token=…）。');
+  } else if (String(e.code ?? '').startsWith('DATA_')) {
+    degrading = true;
+    showBanner(`数据异常[${e.code}] ${e.message} —— 按设计不静默跳过：请人工处置，不要删除运行数据重建。`, true);
+  }
+}
+
+// ---------- 应用列表 ----------
+
+function statusPill(status) { return el('span', 'pill st-' + (status ?? 'UNKNOWN'), status ?? 'UNKNOWN'); }
+function renderApps() {
+  const list = $('#appList');
+  $('#appCount').textContent = String(appsCache.length);
+  list.replaceChildren();
+  if (!appsCache.length) {
+    list.appendChild(el('div', 'empty', '注册表为空：尚无由本 Skill 启动并登记的应用。\n用 Skill/Agent 启动第一个项目后会自动出现在这里。'));
+    return;
+  }
+  for (const a of appsCache) {
+    const card = el('button', 'app-card' + (a.alias === selected ? ' selected' : ''));
+    card.type = 'button';
+    card.setAttribute('role', 'listitem');
+    const head = el('div', 'app-head');
+    head.append(el('span', 'app-alias', a.alias), statusPill(a.status));
+    if (a.managed === false) head.appendChild(el('span', 'pill unmanaged', '非受管'));
+    card.appendChild(head);
+    const meta = el('div', 'app-meta');
+    meta.append(el('span', null, a.mode ?? '?'));
+    if (a.pid != null) meta.appendChild(el('span', null, 'pid ' + a.pid));
+    if (a.expectedPort != null) meta.appendChild(el('span', null, ':' + a.expectedPort));
+    if (a.error) meta.appendChild(el('span', 'v bad', a.error));
+    card.appendChild(meta);
+    card.appendChild(el('div', 'app-root', a.root ?? ''));
+    card.title = a.error ? `${a.alias}：${a.error}` : `${a.alias} · ${a.appId}`;
+    card.addEventListener('click', () => selectApp(a.alias));
+    list.appendChild(card);
+  }
+}
+async function loadApps() {
+  if (fatal) return;
+  try {
+    const d = await api('/api/apps');
+    hideBannerIfRecovered();
+    appsCache = d.apps ?? [];
+    $('#homePath').textContent = d.home ?? '';
+    if (selected && !appsCache.some(a => a.alias === selected)) {
+      selected = null;
+      renderDetail(null);
+      resetLog();
+    }
+    renderApps();
+    if (!selected) renderDetail(null);
+    conn('已连接 · ' + new Date().toLocaleTimeString());
+  } catch (e) { handlePollError(e); }
+}
+function hideBannerIfRecovered() { if (!degrading) hideBanner(); }
+
+// ---------- 详情 ----------
+
+function kvRow(grid, k, v, cls) {
+  if (v == null || v === '') return;
+  grid.append(el('div', 'k', k), el('div', 'v' + (cls ? ' ' + cls : ''), String(v)));
+}
+function renderDetail(d) {
+  const box = $('#detail');
+  box.replaceChildren();
+  if (!d) {
+    box.appendChild(el('div', 'empty', selected ? '该应用已不在注册表中。' : '从左侧选择应用查看状态与日志。'));
+    return;
+  }
+  const card = el('div', 'card');
+  const head = el('div', 'card-head');
+  head.append(el('span', 'name', d.alias), statusPill(d.status),
+    el('span', 'pill mode', d.mode === 'jrebel' ? 'jrebel' : 'java'),
+    el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'));
+  head.appendChild(el('span', 'spacer'));
+  head.appendChild(el('span', 'appid', d.appId));
+  card.appendChild(head);
+
+  const run = d.run;
+  if (run && run.managed !== false && !['RUNNING', 'STOPPED'].includes(run.phase)) {
+    const alert = el('div', 'alert');
+    alert.append(el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后用 manager CLI 执行 `));
+    const code = el('code', null, `start ${d.alias} --ack-unresolved ${run.runId}`);
+    alert.appendChild(code);
+    alert.appendChild(el('span', null, ' 显式恢复。不要删除运行数据绕过。'));
+    card.appendChild(alert);
+  }
+  if (d.readinessUntested) {
+    card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：就绪与 JRebel/热加载验证需按 Skill 规程用真实证据判定，本页不代替该结论。'));
+  }
+  if (d.note) card.appendChild(el('div', 'hint-line', 'note: ' + d.note));
+
+  const body = el('div', 'card-body');
+  const grid = el('div', 'kv');
+  kvRow(grid, '仓库', d.root);
+  kvRow(grid, '入口', d.entry);
+  kvRow(grid, '预期端口', d.expectedPort != null ? d.expectedPort : null, 'dim');
+  kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
+  kvRow(grid, 'runId', run?.runId);
+  kvRow(grid, 'phase', run?.phase);
+  kvRow(grid, '启动时间', fmtTime(run?.startedAt));
+  kvRow(grid, '结束时间', fmtTime(run?.endedAt));
+  kvRow(grid, '退出说明', run?.exitNote, run?.exitNote ? 'dim' : undefined);
+  kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
+  kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
+  kvRow(grid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
+  kvRow(grid, 'stdout', run?.logPaths?.stdout);
+  kvRow(grid, 'stderr', run?.logPaths?.stderr);
+  kvRow(grid, '日志线索', run?.logHints?.length ? run.logHints.join('\n') : null, 'dim');
+  kvRow(grid, '记录文件', d.runtimeFile, 'dim');
+  if (d.managed === false) kvRow(grid, '能力', '非受管登记：仅记录启动尝试与日志线索，不提供跨会话启停', 'dim');
+  body.appendChild(grid);
+  card.appendChild(body);
+
+  if (d.prevRuns?.length) {
+    card.appendChild(el('div', 'prev-title', '历史批次（prevRuns）'));
+    for (const p of d.prevRuns.slice(0, 10)) {
+      const row = el('div', 'prev-row');
+      row.appendChild(el('span', 'rid', p.runId));
+      row.appendChild(el('span', 'dim', p.phase ?? '?'));
+      if (p.pid != null) row.appendChild(el('span', 'dim', 'pid ' + p.pid));
+      if (p.archivedAt) row.appendChild(el('span', 'dim', '归档 ' + fmtTime(p.archivedAt)));
+      if (p.archiveReason) row.appendChild(el('span', 'why', p.archiveReason));
+      if (p.lastError) row.appendChild(el('span', 'dim', p.lastError));
+      card.appendChild(row);
+    }
+  }
+  box.appendChild(card);
+}
+async function loadStatus() {
+  if (fatal || !selected) return;
+  try {
+    renderDetail(await api('/api/status?app=' + encodeURIComponent(selected)));
+  } catch (e) {
+    if (e.status === 404) { renderDetail(null); return; }
+    handlePollError(e);
+  }
+}
+function selectApp(alias) {
+  if (selected === alias) return;
+  selected = alias;
+  renderApps();
+  renderDetail(null);
+  resetLog();
+  loadRuns();
+  loadStatus();
+}
+
+// ---------- 日志 ----------
+
+const MAX_LINES = 8000;
+const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:/;
+const classify = t => errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
+  : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(t) ? 'sql' : '';
+let logRun = null, logStream = 'stdout', offset = -1, pending = '', decoder = new TextDecoder('utf-8');
+let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBusy = false;
+
+function logHint(text, error = false) {
+  const box = $('#log');
+  box.replaceChildren(el('div', 'empty' + (error ? ' error' : ''), text));
+}
+function resetLog() {
+  offset = -1; pending = ''; decoder = new TextDecoder('utf-8');
+  lines = []; nextId = 1; boundary = ''; removed = 0; following = true;
+  updateFollow();
+  $('#logMeta').textContent = '';
+  if (selected) logHint('等待日志输出…'); else logHint('选择左侧应用后查看按批次的运行日志。');
+}
+function updateFollow() {
+  $('#followBtn').textContent = following ? '跟随中' : '恢复跟随';
+  $('#followBtn').setAttribute('aria-pressed', String(following));
+}
+function renderLines() {
+  const box = $('#log');
+  const frag = document.createDocumentFragment();
+  for (const l of lines) {
+    const row = el('div', 'line ' + classify(l.text));
+    row.dataset.id = l.id;
+    row.appendChild(document.createTextNode(l.text || ' '));
+    frag.appendChild(row);
+  }
+  box.replaceChildren(frag);
+  if (boundary) box.appendChild(el('div', 'empty', boundary));
+  if (following) box.scrollTop = box.scrollHeight;
+}
+async function pollTail() {
+  if (fatal || degrading || !selected || !logRun || tailBusy) return;
+  tailBusy = true;
+  try {
+    const d = await api(`/api/tail?app=${encodeURIComponent(selected)}&run=${encodeURIComponent(logRun)}&stream=${logStream}&offset=${offset}`);
+    if (offset >= 0 && d.start !== offset) {
+      pending = ''; decoder = new TextDecoder('utf-8');
+      lines = []; removed = 0; boundary = '日志已截断，读取位置已重置';
+    } else if (offset < 0) {
+      boundary = d.start > 0 ? `已加载尾部 ${fmtSize(d.size - d.start)}，更早内容未加载` : '从文件起始读取';
+    }
+    if (d.b64) {
+      const bytes = Uint8Array.from(atob(d.b64), c => c.charCodeAt(0));
+      const parts = (pending + decoder.decode(bytes, { stream: true })).split('\n');
+      pending = parts.pop();
+      for (const text of parts) lines.push({ id: nextId++, text: text.replace(/\r$/, '') });
+      if (lines.length > MAX_LINES) {
+        const count = lines.length - MAX_LINES;
+        lines.splice(0, count);
+        removed += count;
+      }
+      renderLines();
+    }
+    offset = d.offset;
+    $('#logMeta').textContent = `${d.runId}.${d.stream} · ${fmtSize(d.size)} · 缓存 ${lines.length} 行` + (removed ? ` · 已移除较早 ${removed} 行` : '');
+    conn('已连接 · ' + new Date().toLocaleTimeString());
+  } catch (e) {
+    if (e.status === 404) { logHint('日志文件不存在（可能已被清理，或该批次未产生该流输出）。'); return; }
+    handlePollError(e);
+  } finally { tailBusy = false; }
+}
+async function loadRuns() {
+  const runSel = $('#runSel');
+  if (!selected) { runSel.replaceChildren(); runSel.disabled = true; return; }
+  try {
+    const d = await api('/api/runs?app=' + encodeURIComponent(selected));
+    runSel.replaceChildren();
+    if (d.current) {
+      runSel.appendChild(new Option(`当前 · ${d.current.runId}（${d.current.phase}）`, d.current.runId));
+    }
+    for (const p of [...d.prevRuns].reverse()) {
+      runSel.appendChild(new Option(`历史 · ${p.runId}${p.archivedAt ? '（' + fmtTime(p.archivedAt) + '）' : ''}`, p.runId));
+    }
+    const has = runSel.options.length > 0;
+    runSel.disabled = !has;
+    $('#streamSel').disabled = !has;
+    $('#followBtn').disabled = !has;
+    $('#clearBtn').disabled = !has;
+    if (!has) {
+      logRun = null;
+      const hints = d.current?.logHints;
+      logHint(d.current
+        ? (hints?.length ? `非受管记录：本台不接管其日志，仅列脚本自身日志线索：\n${hints.join('\n')}` : '非受管记录：无可 tail 的受管日志，请用项目原路径查看。')
+        : '该应用暂无运行批次。');
+      $('#logMeta').textContent = '';
+      return;
+    }
+    const want = logRun && [...runSel.options].some(o => o.value === logRun) ? logRun : runSel.options[0].value;
+    runSel.value = want;
+    if (want !== logRun) { logRun = want; resetLog(); }
+  } catch (e) { handlePollError(e); }
+}
+
+// ---------- 事件与轮询 ----------
+
+$('#refreshBtn').addEventListener('click', loadApps);
+$('#runSel').addEventListener('change', e => { logRun = e.target.value || null; resetLog(); });
+$('#streamSel').addEventListener('change', e => { logStream = e.target.value; resetLog(); });
+$('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
+$('#clearBtn').addEventListener('click', () => { lines = []; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(); });
+$('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
+$('#log').addEventListener('scroll', () => {
+  const box = $('#log');
+  if (box.scrollTop + box.clientHeight < box.scrollHeight - 40 && following) { following = false; updateFollow(); }
+}, { passive: true });
+
+loadApps().then(() => { if (appsCache.length === 1) selectApp(appsCache[0].alias); });
+setInterval(loadApps, 4000);
+setInterval(loadStatus, 4000);
+setInterval(loadRuns, 8000);
+setInterval(pollTail, 1000);
+</script>
+</body>
+</html>

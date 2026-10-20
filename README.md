@@ -2,7 +2,7 @@
 
 **Agent-native 本地开发项目启动与运行管理 Skill**
 
-> 当前可用：Java / Spring Boot 项目识别、Standalone JRebel 环境初始化、按项目启动和热加载验证、单项目只读日志 Viewer，以及 `manager.mjs` 跨项目运行管理 P0（命令与使用规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节，能力与验收基线见 [design.md](docs/design.md)）。
+> 当前可用：Java / Spring Boot 项目识别、Standalone JRebel 环境初始化、按项目启动和热加载验证、单项目只读日志 Viewer，以及 `manager.mjs` 跨项目运行管理 P0 与其 `ui` 本地只读 Web 管理台（命令与使用规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节，能力与验收基线见 [design.md](docs/design.md)）。
 >
 > 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管 JVM 跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的 Java 应用，**不接管 IDEA / 手工启动的外部进程**。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
 >
@@ -24,6 +24,7 @@ npx skills add duyiliu/project-runner --skill project-runner -g
 - **JRebel**：初始化 / 检查 standalone JRebel、许可与 `rebel.xml`，按已有项目约定启动，验证加载与热更新证据。
 - **日志工作台**：单项目只读 Viewer，位于 `skills/project-runner/scripts/log-viewer/`；在目标项目目录下启动，默认监听本机 `127.0.0.1:8199`。
 - **跨项目运行管理**：`manager.mjs` 统一登记并管理**本 Skill 启动且具有可信进程身份**的 Java 应用；支持全局 `list`/`status`、已登记应用从任意目录 `start`、受管实例 `stop`/`restart`、按运行批次 `logs`，以及跨 Agent 会话核验。只管理本 Skill 启动并记录的应用，**不接管 IDEA / 手工启动的外部进程**；`stop` 为有界强制终止，不承诺优雅关机。
+- **本地运行管理台**：`manager ui` 按需启动只读网页（仅 127.0.0.1 + 一次性令牌，Ctrl+C 即退出，无常驻服务），查看全局应用状态、未结记录证据与按批次日志；不提供启停操作，启停走 CLI/Agent。
 - **非受管启动**：无法安全定位目标 JVM 的项目脚本仍可按原授权执行，但只记录启动尝试与日志线索并标记为非受管，不承诺跨会话启停。
 
 ## 目录
@@ -38,6 +39,9 @@ skills/project-runner/
     │   ├── index.html
     │   └── server.mjs
     ├── manager.mjs              # 跨项目运行管理 P0
+    ├── manager-ui/
+    │   ├── index.html           # manager ui 只读管理台页面
+    │   └── server.mjs           # ui 本地服务（127.0.0.1 + 一次性令牌）
     └── ps/
         └── proc.ps1             # 受管进程身份核验与终止适配
 ```

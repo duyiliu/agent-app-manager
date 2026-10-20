@@ -939,34 +939,61 @@ function readTailLines(file, n) {
   return { lines, truncated: start > 0 || all.length > want, skippedBytes: start };
 }
 
+// 解析 logs 与 ui 共用的日志目标：校验应用、runId 归属与流名，返回绝对路径（不读内容）
+function resolveLogFile(home, ref, run, stream = 'stdout') {
+  if (!ref) throw usageError('需要 <alias|appId>');
+  if (!['stdout', 'stderr'].includes(stream)) throw usageError('--stream 只能是 stdout 或 stderr');
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const app = reg.apps[appId];
+  const rt = readRuntimeStrict(home, appId);
+  const cur = rt && rt.current;
+  const prev = rt && rt.prevRuns ? rt.prevRuns.find((p) => p.runId === run) : null;
+  const runId = run ?? cur?.runId ?? null;
+  if (!runId) throw notFoundError(`${app.alias} 无运行批次`);
+  if (!ID_RE.test(runId)) throw usageError(`runId 非法：${runId}`);
+  if (run && runId !== cur?.runId && !prev) {
+    throw notFoundError(`runId=${runId} 不在 ${app.alias} 的运行记录中`);
+  }
+  return { appId, alias: app.alias, runId, stream, file: path.join(home, 'logs', appId, `${runId}.${stream}.log`) };
+}
+
+// 运行批次列表（ui 日志选择器用）：当前批次 + prevRuns 全量
+function listRuns(home, ref) {
+  if (!ref) throw usageError('需要 <alias|appId>');
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const rt = readRuntimeStrict(home, appId);
+  const cur = rt && rt.current;
+  return {
+    appId, alias: reg.apps[appId].alias,
+    current: cur ? {
+      runId: cur.runId, phase: cur.phase, managed: cur.managed,
+      logPaths: cur.logPaths ?? null, logHints: cur.logHints ?? null,
+    } : null,
+    prevRuns: (rt?.prevRuns ?? []).map((p) => ({
+      runId: p.runId, phase: p.phase, managed: p.managed ?? null,
+      endedAt: p.endedAt ?? null, archivedAt: p.archivedAt ?? null, archiveReason: p.archiveReason ?? null,
+    })),
+  };
+}
+
 function cmdLogs(ctx, ref) {
   if (!ref) throw usageError('logs 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), { '--lines': 'value', '--run': 'value', '--stream': 'value', '--follow': 'flag' });
   const lines = opts.has('--lines') ? Number.parseInt(opts.get('--lines'), 10) : 200;
   if (!Number.isInteger(lines) || lines < 1) throw usageError('--lines 需要正整数');
-  const stream = opts.get('--stream') ?? 'stdout';
-  if (!['stdout', 'stderr'].includes(stream)) throw usageError('--stream 只能是 stdout 或 stderr');
-  const reg = readRegistry(ctx.home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(ctx.home, appId);
-  const cur = rt && rt.current;
-  const prev = rt && rt.prevRuns ? rt.prevRuns.find((p) => p.runId === opts.get('--run')) : null;
-  const runId = opts.get('--run') ?? cur?.runId ?? null;
-  if (!runId) throw notFoundError(`${app.alias} 无运行批次`);
-  if (!ID_RE.test(runId)) throw usageError(`runId 非法：${runId}`);
-  if (opts.get('--run') && runId !== cur?.runId && !prev) {
-    throw notFoundError(`runId=${runId} 不在 ${app.alias} 的运行记录中`);
-  }
-  const file = path.join(ctx.home, 'logs', appId, `${runId}.${stream}.log`);
-  if (!fs.existsSync(file)) throw notFoundError(`日志不存在（runId=${runId}, stream=${stream}）`);
+  const t = resolveLogFile(ctx.home, ref, opts.get('--run'), opts.get('--stream') ?? 'stdout');
+  if (!fs.existsSync(t.file)) throw notFoundError(`日志不存在（runId=${t.runId}, stream=${t.stream}）`);
   if (opts.has('--follow')) {
     if (ctx.json) throw usageError('--follow 与 --json 不兼容');
-    followLogs(ctx, appId, app, rt, runId, stream, file, lines);
+    const reg = readRegistry(ctx.home);
+    const rt = readRuntimeStrict(ctx.home, t.appId);
+    followLogs(ctx, t.appId, reg.apps[t.appId], rt, t.runId, t.stream, t.file, lines);
     return { following: true };
   }
-  const r = readTailLines(file, lines);
-  return { appId, alias: app.alias, runId, stream, lines: r.lines, truncated: r.truncated, skippedBytes: r.skippedBytes, file };
+  const r = readTailLines(t.file, lines);
+  return { appId: t.appId, alias: t.alias, runId: t.runId, stream: t.stream, lines: r.lines, truncated: r.truncated, skippedBytes: r.skippedBytes, file: t.file };
 }
 
 function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
@@ -1025,6 +1052,29 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
       }
     } catch { /* 核验失败：继续跟随 */ }
   }, 500);
+}
+
+// ---------- 本地只读 Web 管理台（ui，design.md §2.2 / AC08） ----------
+
+async function cmdUi(ctx) {
+  const opts = parseNamed(ctx.rest, { '--port': 'value' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  let port = 0;
+  if (opts.has('--port')) {
+    port = Number.parseInt(opts.get('--port'), 10);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError('--port 需要 0-65535 的整数（0 为随机端口）');
+  }
+  const { startUiServer } = await import('./manager-ui/server.mjs');
+  await startUiServer({
+    home: ctx.home,
+    port,
+    api: {
+      list: () => cmdList(ctx),
+      status: (ref) => cmdStatus(ctx, ref),
+      listRuns: (ref) => listRuns(ctx.home, ref),
+      resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
+    },
+  });
 }
 
 // ---------- 简单选项解析 ----------
@@ -1153,6 +1203,7 @@ function usageText() {
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
+    '  ui [--port N]                     本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
@@ -1165,9 +1216,13 @@ function usageText() {
   ].join('\n');
 }
 
+// ---------- 供 manager-ui 复用的只读数据层 ----------
+
+export { resolveHome, cmdList, cmdStatus, listRuns, resolveLogFile };
+
 // ---------- 入口 ----------
 
-function main() {
+async function main() {
   let ctx;
   let command;
   try {
@@ -1198,6 +1253,7 @@ function main() {
       case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;
       case 'start-new': data = cmdStartNew(ctx); break;
       case 'record-unmanaged': data = cmdRecordUnmanaged(ctx); break;
+      case 'ui': await cmdUi(ctx); return; // 前台常驻直到 Ctrl+C，不走 emitOk
       default: throw usageError(`未知命令：${command}\n${usageText()}`);
     }
     emitOk(ctx, command, data);
@@ -1208,4 +1264,14 @@ function main() {
   }
 }
 
-main();
+// 仅在直接执行时进入 CLI；被其他模块 import（如 ui 服务或测试）时不运行 main
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(path.resolve(process.argv[1])) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) main();
