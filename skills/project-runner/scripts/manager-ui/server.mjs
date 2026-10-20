@@ -7,12 +7,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SCHEMA_VERSION, errorStatus } from '../lib/constants.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
 const TAIL_CHUNK = 256 * 1024;
-const SCHEMA_VERSION = 1;
-
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
 // 常数时间比较：对两侧各做一次哈希拉平长度后 timingSafeEqual
@@ -27,18 +26,7 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-// ManagerError 退出码契约 → HTTP 状态；数据损坏必须原样透出，不静默当空数据
-function errorStatus(e) {
-  if (e.status) return e.status;
-  switch (e.code) {
-    case 'NOT_FOUND': return 404;
-    case 'USAGE': return 400;
-    case 'PWSH_MISSING': return 503;
-    case 'CONFLICT': return 409;
-    default: return String(e.code ?? '').startsWith('DATA_') ? 500 : 500;
-  }
-}
-
+// HTTP 错误状态映射与 CLI/API 常量共用，避免接口契约分叉。
 export async function startUiServer({ home, port = 0, api }) {
   const token = crypto.randomBytes(24).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(token).digest();

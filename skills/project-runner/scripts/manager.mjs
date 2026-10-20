@@ -15,11 +15,14 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { EXIT, SCHEMA_VERSION } from './lib/constants.mjs';
+import { registryPath, runtimePath, lockPath, readRegistry, readRuntimeStrict, atomicWriteJson } from './lib/store.mjs';
+import { UI_FILE_CHUNK, TMP_NAME_RE, uiBlocked, uiFail, uiResolveFile } from './lib/ui-data.mjs';
+import { readTailLines } from './lib/logs.mjs';
+import { retryProcessProbe } from './lib/proc.mjs';
 
-const SCHEMA_VERSION = 1;
-const EXIT = { OK: 0, USAGE: 1, NOT_FOUND: 2, CONFLICT: 3, DEPENDENCY: 4, DATA: 5 };
+export { SCHEMA_VERSION };
 const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
-const MAX_LOG_LINES = 5000;              // --lines 上限
 const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
 const PREV_RUNS_KEEP = 20;
 // 未结记录：STARTING（启动中断，pid 未采集）、UNKNOWN（身份不明，进程可能仍存活）
@@ -88,7 +91,10 @@ function psProcOnce(action, params) {
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
   if (params.image != null) args.push('-Image', params.image);
   if (action === 'terminate') args.push('-WaitMs', String(params.waitMs ?? TERMINATE_WAIT_MS));
-  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  // verify-batch 的 JSON 数组走 stdin（'-ItemsJson -'），不受 Windows 命令行长度限制
+  const input = action === 'verify-batch' ? JSON.stringify(params.items ?? []) : undefined;
+  if (action === 'verify-batch') args.push('-ItemsJson', '-');
+  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout: 30000, windowsHide: true, input });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
     throw dependencyError(`pwsh 调用失败：${r.error.message}`);
@@ -115,17 +121,8 @@ function psProcOnce(action, params) {
   }
 }
 
-const PS_PROBE_ATTEMPTS = 3; // 仅针对 pwsh/Add-Type 编译的瞬时崩溃，不重试语义性失败
-
 function psProc(action, params = {}) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return psProcOnce(action, params);
-    } catch (e) {
-      // terminate 不重试：避免“已终止但响应丢失”后重试带来歧义（重试只会看到 notfound/exited）
-      if (!e.psTransient || action === 'terminate' || attempt >= PS_PROBE_ATTEMPTS) throw e;
-    }
-  }
+  return retryProcessProbe(action, () => psProcOnce(action, params));
 }
 
 function selfIdentityCapture() {
@@ -137,71 +134,36 @@ function selfIdentityCapture() {
   return selfIdentity;
 }
 
+// 核验结果的统一解释（单条 verify 与批量逐项共用，保证语义一致）。
 // 返回 {alive, reason}；reason: 'gone' | 'pidReused'。核验失败抛错（不猜）。
-function verifyRun(run) {
-  if (run.pid == null || !run.creationFileTime || !run.image) {
-    throw conflictError('IDENTITY_UNKNOWN', '运行记录缺少身份证据（pid/创建时间/映像），无法核验');
-  }
-  const r = psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image });
+function interpretVerifyResult(r) {
   if (r.result === 'ok') return { alive: true };
   if (r.result === 'exited' || r.result === 'notfound') return { alive: false, reason: 'gone' };
   if (r.result === 'mismatch') return { alive: false, reason: 'pidReused' };
   throw conflictError('IDENTITY_UNKNOWN', `身份核验失败（${r.code ?? r.result}），拒绝操作`, r);
 }
 
+function verifyRun(run) {
+  if (run.pid == null || !run.creationFileTime || !run.image) {
+    throw conflictError('IDENTITY_UNKNOWN', '运行记录缺少身份证据（pid/创建时间/映像），无法核验');
+  }
+  return interpretVerifyResult(psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image }));
+}
+
+// 批量核验 N 条受管 RUNNING 记录：一次 pwsh 调用逐项 OpenProcess 核验，返回按输入顺序的结果数组。
+// 单项核验语义与单条 verify 完全一致（同一 OpenProcess→GetProcessTimes/映像比对路径）。
+function psVerifyBatch(items) {
+  const r = psProc('verify-batch', { items });
+  const results = r && Array.isArray(r.results) ? r.results : null;
+  if (!results || results.length !== items.length) {
+    throw dependencyError(`proc.ps1 verify-batch 输出形状无效：${JSON.stringify(r)}`);
+  }
+  return results;
+}
+
 // ---------- 注册表与运行记录 ----------
 
-function registryPath(home) { return path.join(home, 'registry.json'); }
-function runtimePath(home, appId) { return path.join(home, 'runtime', `${appId}.json`); }
-function lockPath(home, name) { return path.join(home, 'locks', `${name}.lock`); }
-
-function parseStructured(file, label) {
-  let raw;
-  try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (e) {
-    throw dataError('DATA_UNREADABLE', `${label} 不可读（${file}）：${e.message}`);
-  }
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch (e) {
-    throw dataError('DATA_CORRUPT', `${label} 损坏，拒绝覆盖并保留原件（${file}）：${e.message}`);
-  }
-  if (!obj || typeof obj !== 'object' || obj.schemaVersion !== SCHEMA_VERSION) {
-    throw dataError('DATA_UNSUPPORTED', `${label} schemaVersion=${obj && obj.schemaVersion} 不受支持（期望 ${SCHEMA_VERSION}），拒绝覆盖（${file}）`);
-  }
-  return obj;
-}
-
-function readRegistry(home) {
-  const p = registryPath(home);
-  if (!fs.existsSync(p)) return { schemaVersion: SCHEMA_VERSION, apps: {} };
-  const reg = parseStructured(p, '注册表');
-  if (!reg.apps || typeof reg.apps !== 'object') throw dataError('DATA_CORRUPT', `注册表结构无效（缺少 apps，${p}）`);
-  return reg;
-}
-
-function readRuntimeStrict(home, appId) {
-  const p = runtimePath(home, appId);
-  if (!fs.existsSync(p)) return null;
-  const rt = parseStructured(p, `运行记录(${appId})`);
-  if (rt.appId !== appId) throw dataError('DATA_CORRUPT', `运行记录 appId 不匹配（${p}）`);
-  return rt;
-}
-
-function atomicWriteJson(file, obj) {
-  const dir = path.dirname(file);
-  const tmp = path.join(dir, `.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', 'utf8');
-  try {
-    fs.renameSync(tmp, file);
-  } catch (e) {
-    try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }
-    throw dataError('DATA_UNWRITABLE', `写入失败（${file}）：${e.message}`);
-  }
-}
-
+/* Store reads/writes and atomic JSON persistence live in scripts/lib/store.mjs. */
 function archiveCurrent(rt, opts = {}) {
   if (rt.current) {
     const cur = rt.current;
@@ -396,6 +358,16 @@ function computeAppId(root, entry) {
 
 function newRunId() {
   return `r${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function appContext(home, ref) {
+  if (!ref) throw usageError('需要 <alias|appId>');
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const app = reg.apps[appId];
+  const rt = readRuntimeStrict(home, appId);
+  const cur = rt?.current ?? null;
+  return { reg, appId, app, rt, cur };
 }
 
 function resolveAppId(reg, ref) {
@@ -620,7 +592,18 @@ function writeRuntime(home, appId, rt) {
 
 // ---------- 状态计算（只读 + 就地标记；落账由 statusWithFacts 在锁内完成） ----------
 
-function computeStatus(home, appId, rt) {
+// RUNNING 记录核验结果 → 状态与落账标记（单条核验与批量分发共用，保证结果一致）
+function applyVerifyResult(cur, v) {
+  if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid };
+  cur.phase = 'STOPPED';
+  cur.endedAt = new Date().toISOString();
+  cur.exitNote = v.reason === 'pidReused' ? '进程退出后 PID 被复用（未触碰新进程）' : '进程已退出';
+  return { status: 'STOPPED', managed: true, runId: cur.runId, pid: cur.pid, note: cur.exitNote, writeback: true };
+}
+
+// 状态计算（只读 + 就地标记）；verifyFn 注入进程核验，便于 cmdList 延迟到批量调用。
+// verifyFn 返回 null 表示核验被调用方延迟（批量场景），RUNNING 状态带 deferredVerify 由调用方回填。
+function computeStatusVerify(home, appId, rt, verifyFn) {
   if (!rt || !rt.current) return { status: 'UNKNOWN', note: '无当前运行记录' };
   const cur = rt.current;
   if (!cur.managed) {
@@ -637,36 +620,41 @@ function computeStatus(home, appId, rt) {
     return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: cur.lastError ?? '状态未知' };
   }
   if (cur.phase === 'RUNNING') {
-    const v = verifyRun(cur);
-    if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid };
-    cur.phase = 'STOPPED';
-    cur.endedAt = new Date().toISOString();
-    cur.exitNote = v.reason === 'pidReused' ? '进程退出后 PID 被复用（未触碰新进程）' : '进程已退出';
-    return { status: 'STOPPED', managed: true, runId: cur.runId, pid: cur.pid, note: cur.exitNote, writeback: true };
+    const v = verifyFn(cur);
+    if (v === null) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid, deferredVerify: true };
+    return applyVerifyResult(cur, v);
   }
   return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: `未知 phase=${cur.phase}` };
 }
 
-// 查询即核验，并按 OS 事实落账；落账在应用锁内二次确认同一 runId 后写入，
-// 避免与并发启动/停止对运行记录的写入互相覆盖。
+function computeStatus(home, appId, rt) {
+  return computeStatusVerify(home, appId, rt, (cur) => verifyRun(cur));
+}
+
+// 查询发现的进程退出落账：在应用锁内二次确认同一 runId 仍为 RUNNING 后写入，
+// 避免与并发启动/停止对运行记录的写入互相覆盖；锁忙或锁损坏时跳过（不阻塞只读命令）
+function settleStoppedWriteback(home, appId, marked) {
+  try {
+    withLock(home, appId, 'status-refresh', () => {
+      const rt2 = readRuntimeStrict(home, appId);
+      if (rt2 && rt2.current && rt2.current.runId === marked.runId && rt2.current.phase === 'RUNNING') {
+        rt2.current.phase = 'STOPPED';
+        rt2.current.endedAt = marked.endedAt;
+        rt2.current.exitNote = marked.exitNote;
+        writeRuntime(home, appId, rt2);
+      }
+    });
+  } catch {
+    // 跳过落账，查询结果照常返回
+  }
+}
+
+// 查询即核验，并按 OS 事实落账
 function statusWithFacts(home, appId) {
   const rt = readRuntimeStrict(home, appId);
   const st = computeStatus(home, appId, rt);
   if (st.writeback && rt && rt.current) {
-    const marked = { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId };
-    try {
-      withLock(home, appId, 'status-refresh', () => {
-        const rt2 = readRuntimeStrict(home, appId);
-        if (rt2 && rt2.current && rt2.current.runId === marked.runId && rt2.current.phase === 'RUNNING') {
-          rt2.current.phase = 'STOPPED';
-          rt2.current.endedAt = marked.endedAt;
-          rt2.current.exitNote = marked.exitNote;
-          writeRuntime(home, appId, rt2);
-        }
-      });
-    } catch {
-      // 锁忙或锁损坏：跳过落账，查询结果照常返回（不阻塞只读命令）
-    }
+    settleStoppedWriteback(home, appId, { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId });
   }
   return { rt, st };
 }
@@ -751,17 +739,58 @@ function cmdRecordUnmanaged(ctx) {
   });
 }
 
+// 批量核验结果回填：与单条核验路径（verifyRun + computeStatus RUNNING 分支）语义完全一致；
+// 需要落账时同样在锁内二次确认后写入。单项核验失败只影响该行，不阻断整表。
+function settleListRow(ctx, entry, interpret) {
+  let v;
+  try {
+    v = interpret();
+  } catch (e) {
+    entry.error = `${e.code}: ${e.message}`;
+    entry.st = { status: 'UNKNOWN', managed: entry.rt?.current?.managed ?? null, note: e.message };
+    return;
+  }
+  entry.st = applyVerifyResult(entry.cur, v);
+  if (entry.st.writeback) {
+    settleStoppedWriteback(ctx.home, entry.app.appId, { endedAt: entry.cur.endedAt, exitNote: entry.cur.exitNote, runId: entry.cur.runId });
+  }
+}
+
 function cmdList(ctx) {
   const reg = readRegistry(ctx.home);
   const apps = Object.values(reg.apps);
-  const rows = apps.map((app) => {
-    let rt;
-    let st;
+  // 先逐行计算免核验状态；RUNNING 的进程核验延后收集，最后合并为一次 pwsh 批量调用
+  const entries = apps.map((app) => {
+    const entry = { app, rt: null, st: null, cur: null, error: null };
     try {
-      ({ rt, st } = statusWithFacts(ctx.home, app.appId));
+      entry.rt = readRuntimeStrict(ctx.home, app.appId);
+      entry.st = computeStatusVerify(ctx.home, app.appId, entry.rt, (cur) => {
+        entry.cur = cur; // 延迟核验：登记待批量项，占位返回 null
+        return null;
+      });
     } catch (e) {
-      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
+      entry.error = `${e.code}: ${e.message}`;
     }
+    return entry;
+  });
+  const pending = entries.filter((e) => e.st?.deferredVerify);
+  if (pending.length) {
+    let results = null;
+    try {
+      results = psVerifyBatch(pending.map((e) => ({
+        id: e.cur.pid, creationFileTime: e.cur.creationFileTime, image: e.cur.image,
+      })));
+    } catch {
+      results = null; // 批量调用失败（含缺 pwsh）：回退逐条核验，保证与逐条结果一致
+    }
+    for (const [i, e] of pending.entries()) {
+      settleListRow(ctx, e, results
+        ? () => interpretVerifyResult(results[i])
+        : () => verifyRun(e.cur));
+    }
+  }
+  const rows = entries.map(({ app, rt, st, error }) => {
+    if (error) return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error, root: app.root };
     return {
       alias: app.alias, appId: app.appId, mode: app.mode,
       status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
@@ -925,34 +954,12 @@ function cmdRestart(ctx, ref) {
   });
 }
 
-function readTailLines(file, n) {
-  const want = Math.min(Math.max(1, n), MAX_LOG_LINES);
-  const size = fs.statSync(file).size;
-  const start = Math.max(0, size - MAX_LOG_BYTES);
-  const fd = fs.openSync(file, 'r');
-  let buf;
-  try {
-    buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-  } finally {
-    fs.closeSync(fd);
-  }
-  const text = buf.toString('utf8');
-  let all = text.split(/\r?\n/);
-  if (all.length && all[all.length - 1] === '') all.pop();
-  const lines = all.slice(-want);
-  return { lines, truncated: start > 0 || all.length > want, skippedBytes: start };
-}
+// Bounded log tail implementation lives in scripts/lib/logs.mjs.
 
 // 解析 logs 与 ui 共用的日志目标：校验应用、runId 归属与流名，返回绝对路径（不读内容）
 function resolveLogFile(home, ref, run, stream = 'stdout') {
-  if (!ref) throw usageError('需要 <alias|appId>');
   if (!['stdout', 'stderr'].includes(stream)) throw usageError('--stream 只能是 stdout 或 stderr');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(home, appId);
-  const cur = rt && rt.current;
+  const { appId, app, rt, cur } = appContext(home, ref);
   const prev = rt && rt.prevRuns ? rt.prevRuns.find((p) => p.runId === run) : null;
   const runId = run ?? cur?.runId ?? null;
   // 非受管记录没有批次日志（设计边界：只记录日志线索，不接管日志）；报错要说清去哪找，不伪装成日志丢失
@@ -973,13 +980,9 @@ function resolveLogFile(home, ref, run, stream = 'stdout') {
 
 // 运行批次列表（ui 日志选择器用）：当前批次 + prevRuns 全量
 function listRuns(home, ref) {
-  if (!ref) throw usageError('需要 <alias|appId>');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const rt = readRuntimeStrict(home, appId);
-  const cur = rt && rt.current;
+  const { appId, app, rt, cur } = appContext(home, ref);
   return {
-    appId, alias: reg.apps[appId].alias,
+    appId, alias: app.alias,
     current: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed,
       logPaths: cur.logPaths ?? null, logHints: cur.logHints ?? null,
@@ -995,37 +998,10 @@ function listRuns(home, ref) {
 // 日志源三类：受管批次 logs/<appId>/<runId>.<stream>.log、非受管登记的 logHints、
 // 应用 root/.tmp 下 jrebel-local-* 兼容扫描。文件树/预览限定在应用 root 内。
 
-const TMP_NAME_RE = /^jrebel-local-[^/\\]+\.(stdout|stderr)\.log$/;
-const UI_FILE_CHUNK = 256 * 1024;
-const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
-  || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
-  || /^(id_rsa|id_ed25519|credentials)(\..*)?$/i.test(name);
-const uiFail = (status, message) => Object.assign(new Error(message), { status });
-const uiInside = (base, file) => {
-  const rel = path.relative(base, file);
-  return rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + path.sep));
-};
-
-// 相对路径、无穿越、逐段非符号链接、realpath 仍在 base 内
-function uiResolveFile(base, rel = '') {
-  if (rel.includes('\\') || rel.includes('\0') || path.isAbsolute(rel)
-    || rel.split('/').some((p) => p === '..' || uiBlocked(p))) throw uiFail(403, '此路径不允许访问');
-  const candidate = path.resolve(base, rel);
-  if (!uiInside(base, candidate)) throw uiFail(403, '此路径不允许访问');
-  let walk = base;
-  for (const part of rel.split('/').filter(Boolean)) {
-    walk = path.join(walk, part);
-    if (fs.lstatSync(walk).isSymbolicLink()) throw uiFail(403, '不支持浏览符号链接');
-  }
-  const real = fs.realpathSync(candidate);
-  if (!uiInside(base, real)) throw uiFail(403, '此路径不允许访问');
-  return real;
-}
+// UI file-path policy and filtering live in scripts/lib/ui-data.mjs.
 
 function appRootOf(home, ref) {
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
+  const { appId, app } = appContext(home, ref);
   try {
     return { appId, app, root: fs.realpathSync.native(app.root) };
   } catch {
@@ -1033,13 +1009,13 @@ function appRootOf(home, ref) {
   }
 }
 
+// 非受管日志线索定位符：hint:<路径 hash>。listSources 与 tail 之间 current.logHints 可能变化，
+// 下标会错位读错文件；hash 定位与内容无关、与顺序无关，错位时明确报错而不是静默读错。
+const hintLocator = (hint) => `hint:${crypto.createHash('sha256').update(hint).digest('hex').slice(0, 12)}`;
+
 // 统一日志源列表：src 为不透明定位符（run:/hint:/tmp:），tail 时回传并重新校验
 function listSources(home, ref) {
-  if (!ref) throw usageError('需要 <alias|appId>');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(home, appId);
+  const { appId, app, rt } = appContext(home, ref);
   const curRunId = rt?.current?.runId ?? null;
   const sources = [];
   const seen = new Set();
@@ -1061,9 +1037,9 @@ function listSources(home, ref) {
       push({ src: `run:${m[1]}.${m[2]}`, kind: 'run', label: `${m[1]} · ${m[2]}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
     }
   }
-  (rt?.current?.logHints ?? []).forEach((hint, i) => {
+  (rt?.current?.logHints ?? []).forEach((hint) => {
     if (typeof hint !== 'string' || !path.isAbsolute(hint)) return;
-    push({ src: `hint:${i}`, kind: 'hint', label: `线索 · ${path.basename(hint)}`, current: true, stream: null }, hint);
+    push({ src: hintLocator(hint), kind: 'hint', label: `线索 · ${path.basename(hint)}`, current: true, stream: null }, hint);
   });
   try {
     const tmpDir = uiResolveFile(app.root, '.tmp');
@@ -1081,22 +1057,23 @@ function listSources(home, ref) {
 }
 
 function resolveSource(home, ref, src) {
-  if (!ref) throw usageError('需要 <alias|appId>');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(home, appId);
+  const { appId, app, rt } = appContext(home, ref);
   if (typeof src !== 'string' || src.length > 200) throw usageError('日志源标识无效');
   let m;
   if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)$/.exec(src))) {
     return { appId, alias: app.alias, runId: m[1], stream: m[2], file: uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log`) };
   }
-  if ((m = /^hint:(\d{1,3})$/.exec(src))) {
-    const hint = (rt?.current?.logHints ?? [])[Number(m[1])];
-    if (typeof hint !== 'string' || !path.isAbsolute(hint)) throw notFoundError('日志线索不存在');
-    const real = fs.realpathSync(hint);
-    if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
-    return { appId, alias: app.alias, runId: null, stream: null, file: real };
+  if (src.startsWith('hint:')) {
+    if ((m = /^hint:([0-9a-f]{12})$/.exec(src))) {
+      const hints = (rt?.current?.logHints ?? []).filter((h) => typeof h === 'string' && path.isAbsolute(h));
+      const hint = hints.find((h) => hintLocator(h) === src);
+      if (!hint) throw notFoundError(`日志线索定位符失效（${src}）：登记的日志线索已变化或不存在，请重新拉取日志源列表`);
+      const real = fs.realpathSync(hint);
+      if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
+      return { appId, alias: app.alias, runId: null, stream: null, file: real };
+    }
+    // 旧版下标定位符（hint:0）或其他失效形状：一律明确报错，不静默解析，避免错位读错文件
+    throw notFoundError(`日志线索定位符无效或已失效（${src}）：定位符已改为 hint:<hash>，请重新拉取日志源列表`);
   }
   if ((m = /^tmp:(.+)$/.exec(src)) && TMP_NAME_RE.test(m[1])) {
     return { appId, alias: app.alias, runId: null, stream: m[1].endsWith('.stdout.log') ? 'stdout' : 'stderr', file: uiResolveFile(app.root, `.tmp/${m[1]}`) };
@@ -1199,12 +1176,20 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
         try {
           const s2 = fs.statSync(file).size;
           if (s2 > pos) {
+            // 最终 drain 与 tick 内读取同一上限：超过 MAX_LOG_BYTES 截断并提示，不无限占内存
+            const len = Math.min(s2 - pos, MAX_LOG_BYTES);
             const fd = fs.openSync(file, 'r');
-            const buf = Buffer.alloc(s2 - pos);
-            fs.readSync(fd, buf, 0, buf.length, pos);
-            fs.closeSync(fd);
-            process.stdout.write(buf.toString('utf8'));
-            pos = s2;
+            try {
+              const buf = Buffer.alloc(len);
+              fs.readSync(fd, buf, 0, len, pos);
+              process.stdout.write(buf.toString('utf8'));
+            } finally {
+              fs.closeSync(fd);
+            }
+            pos += len;
+            if (s2 - pos > 0) {
+              process.stderr.write(`\n[日志截断：进程退出后剩余 ${(s2 - pos)} 字节超过单次读取上限 ${MAX_LOG_BYTES} 字节，未继续输出；完整内容可用 manager logs 查看]\n`);
+            }
           }
         } catch { /* 忽略 */ }
         clearInterval(tick);
@@ -1333,10 +1318,10 @@ function renderHuman(command, data) {
   switch (command) {
     case 'list': {
       if (!data.apps?.length) return data.note ?? '（空）';
-      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'lastRunId';
+      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'lastRunId';
       const rows = data.apps.map((a) =>
         String(a.alias).padEnd(14) + String(a.mode ?? '').padEnd(8) + String(a.status).padEnd(10)
-        + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.lastRunId ?? '-')
+        + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7) + String(a.lastRunId ?? '-')
         + (a.error ? `\n  ! ${a.error}` : ''));
       return [head, ...rows].join('\n');
     }
@@ -1418,6 +1403,11 @@ export { resolveHome, cmdList, cmdStatus, listRuns, resolveLogFile };
 // ---------- 入口 ----------
 
 async function main() {
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
+    process.stderr.write(`project-runner manager 需要 Node.js 20 或更高版本；当前版本：${process.versions.node}\n`);
+    process.exit(1);
+  }
   let ctx;
   let command;
   try {
