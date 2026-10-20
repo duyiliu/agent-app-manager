@@ -112,7 +112,8 @@ export async function startUiServer({ home, port = 0, api }) {
   }
 
   const server = http.createServer(handle);
-  server.on('error', (e) => console.error(`[project-runner ui] ${e.message}`));
+  // 端口占用由 manager.mjs 统一给出可操作提示，这里只记录其他运行期错误
+  server.on('error', (e) => { if (e.code !== 'EADDRINUSE') console.error(`[project-runner ui] ${e.message}`); });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {

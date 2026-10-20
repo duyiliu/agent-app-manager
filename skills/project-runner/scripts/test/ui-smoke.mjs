@@ -143,6 +143,22 @@ try {
     assert(logsCli.text.includes('nohup.out'));
   });
 
+  const spawnUi = (p) => spawn(process.execPath, [MANAGER, '--home', home, 'ui', '--port', String(p)], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const dup = await exitInfo(spawnUi(port));
+  await check('重复 ui 提示已有实例（退出码 3）', () => {
+    assert.equal(dup.code, 3);
+    assert(dup.text.includes('已有 manager ui 实例'));
+  });
+  const foreign = http.createServer((q, s) => s.end('not ours'));
+  await new Promise((r) => foreign.listen(0, '127.0.0.1', r));
+  try {
+    const occ = await exitInfo(spawnUi(foreign.address().port));
+    await check('端口被其他程序占用时提示换端口（退出码 3）', () => {
+      assert.equal(occ.code, 3);
+      assert(occ.text.includes('被其他程序占用'));
+    });
+  } finally { foreign.close(); }
+
   const stuck = await exitInfo(spawn(process.execPath, [MANAGER, '--home', home, 'start', 'stuck'], { stdio: ['ignore', 'pipe', 'pipe'] }));
   await check('未结记录拒绝自动重试（UNRESOLVED_RUN）', () => {
     if (stuck.code === 4 && stuck.text.includes('PWSH_MISSING')) { console.log('  skip（缺 pwsh 7，跳过生命周期检查）'); return; }

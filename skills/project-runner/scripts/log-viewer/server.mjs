@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PORT = Number(process.env.LOG_VIEWER_PORT || 8199);
+// 8199 固定给 manager ui（默认观察入口）；单项目 viewer 默认 8200，可用 LOG_VIEWER_PORT 覆盖
+const PORT = Number(process.env.LOG_VIEWER_PORT || 8200);
 const ROOT = fs.realpathSync(process.cwd());
 const LOG_DIR = path.join(ROOT, '.tmp');
 const PROJECT = path.basename(ROOT);

@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -1068,25 +1069,53 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
 
 // ---------- 本地只读 Web 管理台（ui，design.md §2.2 / AC08） ----------
 
+// 固定端口 8199 的占用探测：ui 对所有请求（含 /）都要求令牌，未带令牌时返回
+// 本工具固定形状的 403 JSON，可据此区分"已有 ui 实例"与"被其他程序占用"
+function probeManagerUi(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/', timeout: 800 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(body);
+          resolve(!!(j && j.schemaVersion === SCHEMA_VERSION && j.ok === false && j.error?.code === 'FORBIDDEN'));
+        } catch { resolve(false); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
+}
+
 async function cmdUi(ctx) {
   const opts = parseNamed(ctx.rest, { '--port': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
-  let port = 0;
+  let port = 8199; // 固定端口契约；--port 0 使用随机端口
   if (opts.has('--port')) {
     port = Number.parseInt(opts.get('--port'), 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError('--port 需要 0-65535 的整数（0 为随机端口）');
   }
   const { startUiServer } = await import('./manager-ui/server.mjs');
-  await startUiServer({
-    home: ctx.home,
-    port,
-    api: {
-      list: () => cmdList(ctx),
-      status: (ref) => cmdStatus(ctx, ref),
-      listRuns: (ref) => listRuns(ctx.home, ref),
-      resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
-    },
-  });
+  try {
+    await startUiServer({
+      home: ctx.home,
+      port,
+      api: {
+        list: () => cmdList(ctx),
+        status: (ref) => cmdStatus(ctx, ref),
+        listRuns: (ref) => listRuns(ctx.home, ref),
+        resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
+      },
+    });
+  } catch (e) {
+    if (e.code !== 'EADDRINUSE') throw e;
+    const ours = await probeManagerUi(port);
+    throw conflictError('PORT_IN_USE', ours
+      ? `端口 ${port} 已有 manager ui 实例在运行：请使用该实例启动终端打印的带令牌 URL（令牌每次启动不同），或 --port <N> 换端口`
+      : `端口 ${port} 被其他程序占用：用 --port <N> 换端口（--port 0 为随机端口）`);
+  }
 }
 
 // ---------- 简单选项解析 ----------
@@ -1217,7 +1246,7 @@ function usageText() {
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
-    '  ui [--port N]                     本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）',
+    '  ui [--port N]                     本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌，Ctrl+C 退出）',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
