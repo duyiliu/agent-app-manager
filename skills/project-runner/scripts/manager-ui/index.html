@@ -241,6 +241,30 @@ aside {
 
 .detail-panel { display:flex; flex-direction:column; min-width:0; min-height:0 }
 #detail { flex:0 1 auto; max-height:52%; overflow:auto; padding:12px 14px 4px }
+.detail-bar {
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  width:100%;
+  height:34px;
+  padding:0 12px;
+  border:0;
+  border-bottom:1px solid var(--line);
+  border-radius:0;
+  background:linear-gradient(180deg,#151e28 0%,#121922 100%);
+  box-shadow:none;
+  font:11px/1.4 var(--mono-font);
+  color:var(--text-dim);
+  text-align:left;
+  overflow:hidden}
+.detail-bar:hover { color:var(--text); background:#1a2431; border-color:var(--line) }
+.detail-bar .db-toggle { flex:none; color:var(--accent); font-size:9px; transition:transform .12s ease }
+.detail-bar[aria-expanded="true"] .db-toggle { transform:rotate(90deg) }
+.detail-bar .db-summary { flex:1; min-width:0; display:flex; align-items:center; gap:8px; overflow:hidden; white-space:nowrap }
+.detail-bar .db-name { font:600 12px var(--ui-font); color:var(--text) }
+.detail-bar .db-info { min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--text-faint) }
+.detail-bar .db-hint { flex:none; font-size:10px; color:var(--text-faint) }
 .empty {
   margin:44px auto;
   max-width:430px;
@@ -444,6 +468,11 @@ aside {
     <div id="appList" role="list"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
+    <button id="detailBar" class="detail-bar" type="button" hidden aria-expanded="false" title="展开/收起应用详情">
+      <span class="db-toggle" aria-hidden="true">▸</span>
+      <span id="detailSummary" class="db-summary"></span>
+      <span class="db-hint">详情</span>
+    </button>
     <div id="detail"><div class="empty">正在加载注册表…<br>这里展示由本 Skill 启动并登记的应用；IDEA / 手工启动的进程不会出现。</div></div>
     <section class="log-panel" aria-label="运行日志">
       <div class="log-toolbar">
@@ -572,10 +601,18 @@ function kvRow(grid, k, v, cls) {
   if (v == null || v === '') return;
   grid.append(el('div', 'k', k), el('div', 'v' + (cls ? ' ' + cls : ''), String(v)));
 }
+let detailOpen = false, detailTouched = false;
+function applyDetail(open) {
+  $('#detail').hidden = !open;
+  $('#detailBar').setAttribute('aria-expanded', String(open));
+}
 function renderDetail(d) {
   const box = $('#detail');
+  const bar = $('#detailBar');
   box.replaceChildren();
   if (!d) {
+    bar.hidden = true;
+    box.hidden = false;
     box.appendChild(el('div', 'empty', selected ? '该应用已不在注册表中。' : '从左侧选择应用查看状态与日志。'));
     return;
   }
@@ -589,7 +626,8 @@ function renderDetail(d) {
   card.appendChild(head);
 
   const run = d.run;
-  if (run && run.managed !== false && !['RUNNING', 'STOPPED'].includes(run.phase)) {
+  const needsAttention = run && run.managed !== false && !['RUNNING', 'STOPPED'].includes(run.phase);
+  if (needsAttention) {
     const alert = el('div', 'alert');
     alert.append(el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后用 manager CLI 执行 `));
     const code = el('code', null, `start ${d.alias} --ack-unresolved ${run.runId}`);
@@ -638,6 +676,21 @@ function renderDetail(d) {
     }
   }
   box.appendChild(card);
+
+  const bits = [
+    run?.pid != null ? 'pid ' + run.pid : null,
+    d.expectedPort != null ? ':' + d.expectedPort : null,
+    run?.runId,
+    fmtTime(run?.startedAt),
+  ].filter(Boolean).join(' · ');
+  $('#detailSummary').replaceChildren(
+    el('span', 'db-name', d.alias),
+    statusPill(d.status),
+    el('span', 'pill mode', d.mode === 'jrebel' ? 'jrebel' : 'java'),
+    el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'),
+    el('span', 'db-info', bits));
+  bar.hidden = false;
+  applyDetail(detailTouched ? detailOpen : needsAttention);
 }
 async function loadStatus() {
   if (fatal || !selected) return;
@@ -651,6 +704,7 @@ async function loadStatus() {
 function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
+  detailOpen = false; detailTouched = false;
   renderApps();
   renderDetail(null);
   resetLog();
@@ -694,7 +748,7 @@ function renderLines() {
     frag.appendChild(row);
   }
   box.replaceChildren(frag);
-  if (boundary) box.appendChild(el('div', 'empty', boundary));
+  if (boundary) box.prepend(el('div', 'empty', boundary));
   if (following) box.scrollTop = box.scrollHeight;
 }
 async function pollTail() {
@@ -765,6 +819,7 @@ $('#runSel').addEventListener('change', e => {
   logSrcLabel = opt ? opt.textContent.replace(/^● /, '').replace(/ · [\d.]+ (KB|MB)$/, '') : '';
   resetLog();
 });
+$('#detailBar').addEventListener('click', () => { detailTouched = true; applyDetail(detailOpen = $('#detail').hidden); });
 $('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
 $('#clearBtn').addEventListener('click', () => { lines = []; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(); });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
