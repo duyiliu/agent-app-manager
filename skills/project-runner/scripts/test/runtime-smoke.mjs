@@ -184,11 +184,12 @@ try {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdfail', root: projAmb, entry: 'fail', mode: 'node',
-      command: 'dir', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
+      command: 'node missing-module-for-runtime-smoke.js', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'SPAWN_FAILED');
+    assert.match(r.json.error.detail.stderrTail, /Cannot find module/);
     assert.equal(cli('status', 'cmdfail').json.data.status, 'STOPPED');
   });
   await check('desc 校验：command 缺 expectedImage / 与 exe 混填均拒绝', () => {
