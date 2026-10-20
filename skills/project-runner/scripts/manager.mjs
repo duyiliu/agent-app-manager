@@ -13,6 +13,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import http from 'node:http';
+import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -79,9 +80,10 @@ function parseArgv(argv) {
   return ctx;
 }
 
-function resolveHome(argHome) {
+function resolveHome(argHome, readOnly = false) {
   const raw = argHome || path.join(os.homedir(), '.project-runner');
   if (!path.isAbsolute(raw)) throw usageError(`--home 需要绝对路径：${raw}`);
+  if (readOnly) return fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
   fs.mkdirSync(raw, { recursive: true });
   const home = fs.realpathSync.native(raw);
   for (const d of ['runtime', 'logs', 'locks']) fs.mkdirSync(path.join(home, d), { recursive: true });
@@ -138,6 +140,31 @@ function psProc(action, params = {}) {
       if (!e.psTransient || action === 'terminate' || attempt >= PS_PROBE_ATTEMPTS) throw e;
     }
   }
+}
+
+function portOccupants(port) {
+  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', path.join(SCRIPT_DIR, 'ps', 'port.ps1'), '-Port', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  if (r.error) {
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
+    throw dependencyError(`端口诊断调用失败：${r.error.message}`);
+  }
+  if (r.status !== 0) throw dependencyError(`端口诊断失败：${(r.stderr || '').trim()}`);
+  let rows;
+  try { rows = JSON.parse((r.stdout || '').trim() || '[]'); } catch { throw dependencyError('端口诊断输出无法解析'); }
+  if (!Array.isArray(rows)) rows = rows ? [rows] : [];
+  return rows.map((row) => {
+    let identity = null;
+    try { identity = psProc('capture', { id: row.pid }); } catch (e) { identity = { result: 'error', message: e.message }; }
+    return { ...row, identity };
+  });
+}
+
+function portConflict(port, force, ignorePid = null) {
+  if (!Number.isInteger(port) || port < 1) return null;
+  const occupants = portOccupants(port).filter((p) => p.pid !== ignorePid);
+  if (!occupants.length) return null;
+  if (force) return { port, occupants, forced: true, note: '--force 已明确允许在端口监听时继续；外部进程仅诊断，不接管、不停止' };
+  throw conflictError('PORT_IN_USE', `预期端口 ${port} 已监听，拒绝启动；占用证据见详情。外部进程仅诊断，不接管、不停止；如确认仍要继续请用 --force`, { port, occupants, forced: false });
 }
 
 function selfIdentityCapture() {
@@ -850,7 +877,7 @@ function statusWithFacts(home, appId) {
 // ---------- 命令实现 ----------
 
 function cmdStartNew(ctx) {
-  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value' });
+  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value', '--force': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
@@ -867,6 +894,7 @@ function cmdStartNew(ctx) {
     }
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
+    const portEvidence = portConflict(desc.expectedPort, opts.has('--force'));
     const app = upsertApp(reg, appId, desc);
     atomicWriteJson(registryPath(ctx.home), reg);
     const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
@@ -875,6 +903,7 @@ function cmdStartNew(ctx) {
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       ...(cur.wrapperPid ? { wrapperPid: cur.wrapperPid } : {}),
       readinessUntested: true, logPaths: cur.logPaths,
+      ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
     };
@@ -929,6 +958,51 @@ function cmdRecordUnmanaged(ctx) {
   });
 }
 
+function cmdPort(ctx, value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw usageError('port 需要 1-65535 的整数');
+  return { port, occupants: portOccupants(port), note: '外部进程仅诊断，不接管、不停止' };
+}
+
+function cmdDoctor(ctx) {
+  const home = ctx.home;
+  const reg = readRegistry(home);
+  const runtimes = [];
+  const runtimeDir = path.join(home, 'runtime');
+  if (fs.existsSync(runtimeDir)) for (const name of fs.readdirSync(runtimeDir)) {
+    if (!/^[a-z0-9][a-z0-9-]{0,47}\.json$/.test(name)) continue;
+    const appId = name.slice(0, -5);
+    const rt = readRuntimeStrict(home, appId);
+    const logChecks = [];
+    for (const run of [rt?.current, ...(rt?.prevRuns ?? [])].filter(Boolean)) {
+      if (!run.runId || !run.managed) continue;
+      const paths = run.logPaths ?? { stdout: path.join(home, 'logs', appId, `${run.runId}.stdout.log`), stderr: path.join(home, 'logs', appId, `${run.runId}.stderr.log`) };
+      for (const stream of ['stdout', 'stderr']) logChecks.push({ runId: run.runId, stream, exists: !!paths[stream] && fs.existsSync(paths[stream]) });
+    }
+    runtimes.push({ appId, schemaVersion: rt.schemaVersion, prevRuns: rt.prevRuns?.length ?? 0, logs: logChecks });
+  }
+  const locksDir = path.join(home, 'locks');
+  const locks = fs.existsSync(locksDir) ? fs.readdirSync(locksDir).filter((n) => n.endsWith('.lock')) : [];
+  const tempFiles = [];
+  const scanTemps = (dir, depth = 0) => {
+    if (!fs.existsSync(dir) || depth > 2) return;
+    for (const name of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, name.name);
+      if (name.name.startsWith('.tmp-')) tempFiles.push(file);
+      else if (name.isDirectory()) scanTemps(file, depth + 1);
+    }
+  };
+  for (const dir of [home, runtimeDir, path.join(home, 'logs'), locksDir]) scanTemps(dir);
+  const pw = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+  const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
+  const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
+  return Promise.all(portSummary.map(async (p) => ({ ...p, listening: await p.listening }))).then((ports) => ({
+    nodeVersion: process.version, pwshVersion: !pw.error && pw.status === 0 ? pw.stdout.trim() : null,
+    home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports,
+    note: '只读诊断；locks 项仅列出，不回收；端口监听不代表业务就绪',
+  }));
+}
+
 function cmdList(ctx) {
   const reg = readRegistry(ctx.home);
   const apps = Object.values(reg.apps);
@@ -952,7 +1026,33 @@ function cmdList(ctx) {
   return { apps: rows };
 }
 
-function cmdStatus(ctx, ref) {
+function tcpListening(port) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(700);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', () => resolve(false));
+    socket.once('timeout', () => { socket.destroy(); resolve(false); });
+    socket.connect(port, '127.0.0.1');
+  });
+}
+
+function extractJrebelEvidence(home, appId, cur) {
+  const files = ['stdout', 'stderr'].map((stream) => cur.logPaths?.[stream]).filter((file) => file && fs.existsSync(file));
+  if (!files.length) return { available: false, note: '当前批次日志不存在；日志证据，不是热加载成功证明' };
+  const read = files.map((file) => ({ file, ...readTailLines(file, MAX_LOG_LINES) }));
+  const lines = read.flatMap((r) => r.lines).slice(-MAX_LOG_LINES);
+  const matching = (re) => lines.filter((line) => re.test(line));
+  return {
+    available: true, files: read.map((r) => r.file), truncated: read.some((r) => r.truncated),
+    banner: matching(/JRebel:/i), licenseErrors: matching(/(?:license|licence).*(?:error|invalid|expired|fail)|(?:error|invalid|expired|fail).*license/i),
+    reloadingClassCount: matching(/Reloading class/i).length,
+    reloadingSqlMapsCount: matching(/Reloading SQL maps/i).length,
+    note: '仅引用当前批次日志原文；banner 不代表许可有效，日志证据不是热加载成功证明',
+  };
+}
+
+async function cmdStatus(ctx, ref, probeRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -960,13 +1060,17 @@ function cmdStatus(ctx, ref) {
   const { rt, st } = statusWithFacts(ctx.home, appId);
   const cur = rt && rt.current;
   const evidenceFile = runtimePath(ctx.home, appId);
+  const portListening = probeRequested && Number.isInteger(app.expectedPort) ? await tcpListening(app.expectedPort) : null;
+  const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
-    portNote: 'expectedPort 为配置预期值，P0 不做实际监听探测',
+    portNote: probeRequested ? '端口监听仅为 TCP 证据；监听 ≠ 业务就绪' : '使用 --probe 执行本机 TCP 监听探测',
+    ...(probeRequested ? { portListening } : {}),
+    ...(jrebelEvidence ? { jrebelEvidence } : {}),
     run: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, mode: cur.mode,
       kind: cur.kind ?? 'direct', wrapperPid: cur.wrapperPid ?? null,
@@ -987,7 +1091,7 @@ function cmdStatus(ctx, ref) {
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
 function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value' });
+  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value', '--force': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
@@ -1008,6 +1112,7 @@ function cmdStart(ctx, ref) {
     }
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
+    const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
     app.cwd = cwd;
     app.exe = exe;
     app.updatedAt = new Date().toISOString();
@@ -1017,6 +1122,7 @@ function cmdStart(ctx, ref) {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       readinessUntested: true, logPaths: cur.logPaths,
+      ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '复用已保存启动配置；进程存活不等于业务就绪',
     };
@@ -1083,6 +1189,8 @@ function cmdStop(ctx, ref) {
 
 function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
+  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLock(ctx.home, appId, 'restart', () => {
@@ -1091,9 +1199,10 @@ function cmdRestart(ctx, ref) {
     if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
-    const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = app.command ? null : resolveExe(app.exe, cwd);
+    const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
+    const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
     app.cwd = cwd;
     app.exe = exe;
     app.updatedAt = new Date().toISOString();
@@ -1101,7 +1210,7 @@ function cmdRestart(ctx, ref) {
     const cur = launchManaged(ctx.home, appId, app);
     return {
       appId, alias: app.alias, stop: stopResult,
-      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths },
+      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths, ...(portEvidence ? { portEvidence } : {}) },
       note: '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
     };
   });
@@ -1697,7 +1806,7 @@ async function cmdUi(ctx) {
       port,
       api: {
         list: () => cmdList(ctx),
-        status: (ref) => cmdStatus(ctx, ref),
+        status: (ref) => cmdStatus(ctx, ref).then((data) => { delete data.portListening; delete data.portNote; return data; }),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
         listSources: (ref) => listSources(ctx.home, ref),
@@ -1785,6 +1894,10 @@ function renderHuman(command, data) {
         + (a.error ? `\n  ! ${a.error}` : ''));
       return [head, ...rows].join('\n');
     }
+    case 'port':
+      return [`端口 ${data.port}`, ...data.occupants.map((p) => `PID=${p.pid} process=${p.processName ?? '-'} path=${p.executablePath ?? '-'} started=${p.startedAt ?? '-'} identity=${p.identity?.result ?? 'unknown'}`), data.note].join('\n');
+    case 'doctor':
+      return JSON.stringify(data, null, 2);
     case 'status':
       return [
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
@@ -1794,6 +1907,8 @@ function renderHuman(command, data) {
         data.run?.logPaths?.stdout ? `stdout=${data.run.logPaths.stdout}` : null,
         data.run?.logPaths?.stderr ? `stderr=${data.run.logPaths.stderr}` : null,
         data.run?.logHints?.length ? `logHints=${data.run.logHints.join(', ')}` : null,
+        data.portListening !== undefined ? `portListening=${data.portListening}（监听 ≠ 业务就绪）` : null,
+        data.jrebelEvidence ? `jrebelEvidence=${JSON.stringify(data.jrebelEvidence)}` : null,
         data.runtimeFile ? `证据: ${data.runtimeFile}` : null,
         ...(data.prevRuns ?? []).map((p) => `prev=${p.runId} phase=${p.phase}${p.archiveReason ? ` archiveReason=${p.archiveReason}` : ''}${p.pid != null ? ` pid=${p.pid}` : ''} archivedAt=${p.archivedAt}`),
         data.readinessUntested ? '就绪未检测：进程存活不等于业务就绪' : null,
@@ -1804,9 +1919,11 @@ function renderHuman(command, data) {
       return [
         `已启动（受管）${data.alias} (${data.appId})`,
         `run=${data.runId} pid=${data.pid} status=${data.status}`,
+        data.portEvidence?.forced ? data.portEvidence.note : null,
         data.abandonedRunId ? `已显式放弃未结记录 run=${data.abandonedRunId}（${data.abandonedReason}），证据保留在 prevRuns` : null,
         `stdout=${data.logPaths.stdout}`,
         `stderr=${data.logPaths.stderr}`,
+        data.portEvidence?.forced ? data.portEvidence.note : null,
         data.note ?? '',
         '观察：manager ui 可在浏览器只读查看全部受管应用与日志（Ctrl+C 退出）',
       ].filter(Boolean).join('\n');
@@ -1844,6 +1961,7 @@ function renderHuman(command, data) {
       return [
         `restart ${data.alias}: stop=${data.stop.result} → start run=${data.start.runId} pid=${data.start.pid} status=${data.start.status}`,
         `stdout=${data.start.logPaths.stdout}`,
+        data.start.portEvidence?.forced ? data.start.portEvidence.note : null,
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'logs': {
@@ -1871,10 +1989,12 @@ function usageText() {
     '',
     '命令：',
     '  list                              列出已登记应用与实时状态',
-    '  status <alias|appId>              单应用详情（含运行证据）',
-    '  start <alias|appId> [--ack-unresolved <runId>]   用已保存配置启动（任意目录可用）',
+    '  status <alias|appId> [--probe]    单应用详情；--probe 检测本机 TCP 监听',
+    '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
+    '  doctor [--json]                    只读自检（不修复）',
+    '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
-    '  restart <alias|appId>             确认退出后重启（仅受管实例）',
+    '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:N|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
@@ -1912,7 +2032,7 @@ async function main() {
   try {
     ctx = parseArgv(process.argv.slice(2));
     command = ctx.command;
-    ctx.home = resolveHome(ctx.home);
+    ctx.home = resolveHome(ctx.home, ['doctor', 'port', 'status'].includes(command));
   } catch (e) {
     const c = command ?? 'cli';
     if (e instanceof ManagerError) emitErr({ json: false }, c, e);
@@ -1924,13 +2044,15 @@ async function main() {
     if (command === 'start' || command === 'remove') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
     } else if (refCommands.has(command)) {
-      const bad = ctx.rest.find((a, i) => i > 0 || a.startsWith('--'));
+      const bad = command === 'status' ? ctx.rest.slice(1).find((a) => a !== '--probe') : ctx.rest.find((a, i) => i > 0 || a.startsWith('--'));
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
       if (!ctx.rest[0]) throw usageError(`${command} 需要 <alias|appId>`);
     }
     switch (command) {
       case 'list': data = cmdList(ctx); break;
-      case 'status': data = cmdStatus(ctx, ctx.rest[0]); break;
+      case 'status': data = await cmdStatus(ctx, ctx.rest[0], ctx.rest.includes('--probe')); break;
+      case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
+      case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;
       case 'start': data = cmdStart(ctx, ctx.rest[0]); break;
       case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
       case 'restart': data = cmdRestart(ctx, ctx.rest[0]); break;
