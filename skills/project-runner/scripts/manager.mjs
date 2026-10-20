@@ -91,10 +91,7 @@ function psProcOnce(action, params) {
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
   if (params.image != null) args.push('-Image', params.image);
   if (action === 'terminate') args.push('-WaitMs', String(params.waitMs ?? TERMINATE_WAIT_MS));
-  // verify-batch 的 JSON 数组走 stdin（'-ItemsJson -'），不受 Windows 命令行长度限制
-  const input = action === 'verify-batch' ? JSON.stringify(params.items ?? []) : undefined;
-  if (action === 'verify-batch') args.push('-ItemsJson', '-');
-  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout: 30000, windowsHide: true, input });
+  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
     throw dependencyError(`pwsh 调用失败：${r.error.message}`);
@@ -148,17 +145,6 @@ function verifyRun(run) {
     throw conflictError('IDENTITY_UNKNOWN', '运行记录缺少身份证据（pid/创建时间/映像），无法核验');
   }
   return interpretVerifyResult(psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image }));
-}
-
-// 批量核验 N 条受管 RUNNING 记录：一次 pwsh 调用逐项 OpenProcess 核验，返回按输入顺序的结果数组。
-// 单项核验语义与单条 verify 完全一致（同一 OpenProcess→GetProcessTimes/映像比对路径）。
-function psVerifyBatch(items) {
-  const r = psProc('verify-batch', { items });
-  const results = r && Array.isArray(r.results) ? r.results : null;
-  if (!results || results.length !== items.length) {
-    throw dependencyError(`proc.ps1 verify-batch 输出形状无效：${JSON.stringify(r)}`);
-  }
-  return results;
 }
 
 // ---------- 注册表与运行记录 ----------
@@ -592,18 +578,8 @@ function writeRuntime(home, appId, rt) {
 
 // ---------- 状态计算（只读 + 就地标记；落账由 statusWithFacts 在锁内完成） ----------
 
-// RUNNING 记录核验结果 → 状态与落账标记（单条核验与批量分发共用，保证结果一致）
-function applyVerifyResult(cur, v) {
-  if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid };
-  cur.phase = 'STOPPED';
-  cur.endedAt = new Date().toISOString();
-  cur.exitNote = v.reason === 'pidReused' ? '进程退出后 PID 被复用（未触碰新进程）' : '进程已退出';
-  return { status: 'STOPPED', managed: true, runId: cur.runId, pid: cur.pid, note: cur.exitNote, writeback: true };
-}
-
-// 状态计算（只读 + 就地标记）；verifyFn 注入进程核验，便于 cmdList 延迟到批量调用。
-// verifyFn 返回 null 表示核验被调用方延迟（批量场景），RUNNING 状态带 deferredVerify 由调用方回填。
-function computeStatusVerify(home, appId, rt, verifyFn) {
+// 状态计算（只读 + 就地标记）。
+function computeStatus(home, appId, rt) {
   if (!rt || !rt.current) return { status: 'UNKNOWN', note: '无当前运行记录' };
   const cur = rt.current;
   if (!cur.managed) {
@@ -620,15 +596,14 @@ function computeStatusVerify(home, appId, rt, verifyFn) {
     return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: cur.lastError ?? '状态未知' };
   }
   if (cur.phase === 'RUNNING') {
-    const v = verifyFn(cur);
-    if (v === null) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid, deferredVerify: true };
-    return applyVerifyResult(cur, v);
+    const v = verifyRun(cur);
+    if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid };
+    cur.phase = 'STOPPED';
+    cur.endedAt = new Date().toISOString();
+    cur.exitNote = v.reason === 'pidReused' ? '进程退出后 PID 被复用（未触碰新进程）' : '进程已退出';
+    return { status: 'STOPPED', managed: true, runId: cur.runId, pid: cur.pid, note: cur.exitNote, writeback: true };
   }
   return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: `未知 phase=${cur.phase}` };
-}
-
-function computeStatus(home, appId, rt) {
-  return computeStatusVerify(home, appId, rt, (cur) => verifyRun(cur));
 }
 
 // 查询发现的进程退出落账：在应用锁内二次确认同一 runId 仍为 RUNNING 后写入，
@@ -739,58 +714,17 @@ function cmdRecordUnmanaged(ctx) {
   });
 }
 
-// 批量核验结果回填：与单条核验路径（verifyRun + computeStatus RUNNING 分支）语义完全一致；
-// 需要落账时同样在锁内二次确认后写入。单项核验失败只影响该行，不阻断整表。
-function settleListRow(ctx, entry, interpret) {
-  let v;
-  try {
-    v = interpret();
-  } catch (e) {
-    entry.error = `${e.code}: ${e.message}`;
-    entry.st = { status: 'UNKNOWN', managed: entry.rt?.current?.managed ?? null, note: e.message };
-    return;
-  }
-  entry.st = applyVerifyResult(entry.cur, v);
-  if (entry.st.writeback) {
-    settleStoppedWriteback(ctx.home, entry.app.appId, { endedAt: entry.cur.endedAt, exitNote: entry.cur.exitNote, runId: entry.cur.runId });
-  }
-}
-
 function cmdList(ctx) {
   const reg = readRegistry(ctx.home);
   const apps = Object.values(reg.apps);
-  // 先逐行计算免核验状态；RUNNING 的进程核验延后收集，最后合并为一次 pwsh 批量调用
-  const entries = apps.map((app) => {
-    const entry = { app, rt: null, st: null, cur: null, error: null };
+  const rows = apps.map((app) => {
+    let rt;
+    let st;
     try {
-      entry.rt = readRuntimeStrict(ctx.home, app.appId);
-      entry.st = computeStatusVerify(ctx.home, app.appId, entry.rt, (cur) => {
-        entry.cur = cur; // 延迟核验：登记待批量项，占位返回 null
-        return null;
-      });
+      ({ rt, st } = statusWithFacts(ctx.home, app.appId));
     } catch (e) {
-      entry.error = `${e.code}: ${e.message}`;
+      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
     }
-    return entry;
-  });
-  const pending = entries.filter((e) => e.st?.deferredVerify);
-  if (pending.length) {
-    let results = null;
-    try {
-      results = psVerifyBatch(pending.map((e) => ({
-        id: e.cur.pid, creationFileTime: e.cur.creationFileTime, image: e.cur.image,
-      })));
-    } catch {
-      results = null; // 批量调用失败（含缺 pwsh）：回退逐条核验，保证与逐条结果一致
-    }
-    for (const [i, e] of pending.entries()) {
-      settleListRow(ctx, e, results
-        ? () => interpretVerifyResult(results[i])
-        : () => verifyRun(e.cur));
-    }
-  }
-  const rows = entries.map(({ app, rt, st, error }) => {
-    if (error) return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error, root: app.root };
     return {
       alias: app.alias, appId: app.appId, mode: app.mode,
       status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
@@ -798,8 +732,7 @@ function cmdList(ctx) {
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
     };
-  });
-  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
+  });  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };
 }
 

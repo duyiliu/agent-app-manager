@@ -2,7 +2,7 @@
 // manager CLI 生命周期冒烟测试：隔离 --home + process.execPath 作假 JVM exe，不触碰真实 ~/.project-runner/。
 // 覆盖：start-new→RUNNING、重复 start→ALREADY_RUNNING、杀进程后 status 自动落账 STOPPED、
 // stop/alreadyStopped、restart 新 runId+归档、伪造未结记录的 UNRESOLVED_RUN 与 --ack-unresolved 正反例、
-// list 批量核验与单条 status 核验一致性、退出码/--json 抽查。
+// list 与单条 status 核验一致性、退出码/--json 抽查。
 // 用法：node scripts/test/manager-smoke.mjs   （无外部依赖，Node 22+；缺 pwsh 7 时按惯例跳过核验类断言）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -118,7 +118,7 @@ try {
     currentPid = j.data.pid;
   });
 
-  lifecycle('list 批量核验：RUNNING + expectedPort 列 + 数据层含 appId', () => {
+  lifecycle('list 核验：RUNNING + expectedPort 列 + 数据层含 appId', () => {
     const j = expectOk(run(['list']));
     const row = j.data.apps.find((a) => a.alias === 'smoke');
     assert(row, 'list 缺少 smoke 行');
@@ -128,7 +128,7 @@ try {
     appId = row.appId;
   });
 
-  lifecycle('status 单条核验与 list 批量核验结果一致（RUNNING）', () => {
+  lifecycle('status 单条核验与 list 结果一致（RUNNING）', () => {
     const j = expectOk(run(['status', 'smoke']));
     assert.equal(j.data.status, 'RUNNING');
     assert.equal(j.data.run.runId, firstRunId);
@@ -181,7 +181,7 @@ try {
     assert(rt.current.endedAt, '缺少 endedAt 退出证据');
   });
 
-  lifecycle('list 批量核验与单条核验一致（进程已退出 → STOPPED）', () => {
+  lifecycle('list 与单条核验一致（进程已退出 → STOPPED）', () => {
     const j = expectOk(run(['list']));
     assert.equal(j.data.apps.find((a) => a.alias === 'smoke').status, 'STOPPED');
   });
