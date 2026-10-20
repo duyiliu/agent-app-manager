@@ -937,7 +937,9 @@ function readTailLines(file, n) {
   } finally {
     fs.closeSync(fd);
   }
-  const text = buf.toString('utf8');
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { text = new TextDecoder('gbk').decode(buf); }
   let all = text.split(/\r?\n/);
   if (all.length && all[all.length - 1] === '') all.pop();
   const lines = all.slice(-want);
@@ -1117,17 +1119,20 @@ function listTree(home, ref, rel = '') {
   return { alias: app.alias, root, path: rel, entries };
 }
 
-function readProjectFile(home, ref, rel = '') {
+function readProjectFile(home, ref, rel = '', offset = 0) {
   const { root } = appRootOf(home, ref);
   const file = uiResolveFile(root, rel);
   const stat = fs.statSync(file);
   if (!stat.isFile()) throw uiFail(400, '不是普通文件');
-  const chunk = Math.min(stat.size, UI_FILE_CHUNK);
+  offset = Number(offset);
+  if (!Number.isSafeInteger(offset) || offset < 0) offset = 0;
+  offset = Math.min(offset, Math.max(0, stat.size - 1));
+  const chunk = Math.min(Math.max(0, stat.size - offset), UI_FILE_CHUNK);
   const fd = fs.openSync(file, 'r');
   let buf;
   try {
     buf = Buffer.alloc(chunk);
-    const read = fs.readSync(fd, buf, 0, chunk, 0);
+    const read = fs.readSync(fd, buf, 0, chunk, offset);
     buf = buf.subarray(0, read);
   } finally { fs.closeSync(fd); }
   let text = null;
@@ -1136,7 +1141,7 @@ function readProjectFile(home, ref, rel = '') {
     text = new TextDecoder('utf-8', { fatal: true }).decode(buf, { stream: stat.size > buf.length });
     if (/[\x01-\x08\x0e-\x1f]/.test(text)) text = null;
   } catch { text = null; }
-  return { path: rel, size: stat.size, truncated: stat.size > buf.length, binary: text === null, text };
+  return { path: rel, size: stat.size, offset, nextOffset: offset + buf.length, hasMore: offset + buf.length < stat.size, binary: text === null, text };
 }
 
 function cmdLogs(ctx, ref) {
@@ -1170,6 +1175,8 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
   const first = readTailLines(file, initialLines);
   for (const l of first.lines) process.stdout.write(`${l}\n`);
   let pos = fs.statSync(file).size;
+  let decoder = new TextDecoder('utf-8', { fatal: true });
+  let encoding = 'utf-8';
   let lastIdentityCheck = 0;
   const tick = setInterval(() => {
     let size = 0;
@@ -1184,7 +1191,8 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
         const len = Math.min(size - pos, MAX_LOG_BYTES);
         const buf = Buffer.alloc(len);
         fs.readSync(fd, buf, 0, len, pos);
-        process.stdout.write(buf.toString('utf8'));
+        try { process.stdout.write(decoder.decode(buf, { stream: true })); }
+        catch { encoding = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
       } finally {
         fs.closeSync(fd);
       }
@@ -1203,7 +1211,8 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
             const buf = Buffer.alloc(s2 - pos);
             fs.readSync(fd, buf, 0, buf.length, pos);
             fs.closeSync(fd);
-            process.stdout.write(buf.toString('utf8'));
+            try { process.stdout.write(decoder.decode(buf, { stream: true })); }
+            catch { encoding = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
             pos = s2;
           }
         } catch { /* 忽略 */ }
@@ -1258,7 +1267,7 @@ async function cmdUi(ctx) {
         listSources: (ref) => listSources(ctx.home, ref),
         resolveSource: (ref, src) => resolveSource(ctx.home, ref, src),
         listTree: (ref, p) => listTree(ctx.home, ref, p),
-        readFile: (ref, p) => readProjectFile(ctx.home, ref, p),
+        readFile: (ref, p, offset) => readProjectFile(ctx.home, ref, p, offset),
       },
     });
   } catch (e) {

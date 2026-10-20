@@ -495,7 +495,8 @@ aside {
   <div class="fd-body">
     <div id="fdTree" class="fd-tree"></div>
     <div class="fd-preview">
-      <div id="fdPath" class="fd-path">选择文件查看内容（只读，UTF-8 前 256 KB）</div>
+      <div id="fdPath" class="fd-path">选择文件查看内容（只读，UTF-8）</div>
+      <div style="display:flex;gap:6px;padding:5px 10px"><button id="fdTail" type="button" disabled>尾部</button><button id="fdPrev" type="button" disabled>上一页</button><button id="fdNext" type="button" disabled>下一页</button></div>
       <div id="fdBody" class="fd-content"></div>
     </div>
   </div>
@@ -512,10 +513,10 @@ let appsCache = [];
 let fatal = false;            // 令牌失效后停止轮询
 let degrading = false;        // 数据损坏等持久性错误
 
-async function api(path) {
+async function api(path, signal) {
   const u = new URL(path, location.origin);
   u.searchParams.set('token', token);
-  const r = await fetch(u, { cache: 'no-store' });
+  const r = await fetch(u, { cache: 'no-store', signal });
   const j = await r.json().catch(() => ({ ok: false, error: { code: 'BAD_JSON', message: '响应解析失败' } }));
   if (!r.ok) {
     const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
@@ -549,13 +550,20 @@ function statusPill(status) { return el('span', 'pill st-' + (status ?? 'UNKNOWN
 function renderApps() {
   const list = $('#appList');
   $('#appCount').textContent = String(appsCache.length);
-  list.replaceChildren();
+  const previousScroll = list.scrollTop;
+  const existing = new Map([...list.querySelectorAll('.app-card')].map(card => [card.dataset.appId, card]));
   if (!appsCache.length) {
-    list.appendChild(el('div', 'empty', '注册表为空：尚无由本 Skill 启动并登记的应用。\n用 Skill/Agent 启动第一个项目后会自动出现在这里。'));
+    if (!list.querySelector('.empty')) list.replaceChildren(el('div', 'empty', '注册表为空：尚无由本 Skill 启动并登记的应用。\n用 Skill/Agent 启动第一个项目后会自动出现在这里。'));
     return;
   }
+  list.querySelector('.empty')?.remove();
+  const ordered = [];
   for (const a of appsCache) {
-    const card = el('button', 'app-card' + (a.alias === selected ? ' selected' : ''));
+    const card = existing.get(a.appId) ?? el('button', 'app-card');
+    existing.delete(a.appId);
+    card.className = 'app-card' + (a.alias === selected ? ' selected' : '');
+    card.dataset.appId = a.appId;
+    card.replaceChildren();
     card.type = 'button';
     card.setAttribute('role', 'listitem');
     const head = el('div', 'app-head');
@@ -570,9 +578,12 @@ function renderApps() {
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
     card.title = a.error ? `${a.alias}：${a.error}` : `${a.alias} · ${a.appId}`;
-    card.addEventListener('click', () => selectApp(a.alias));
-    list.appendChild(card);
+    card.onclick = () => selectApp(a.alias);
+    ordered.push(card);
   }
+  for (const stale of existing.values()) stale.remove();
+  ordered.forEach((card, i) => { if (list.children[i] !== card) list.insertBefore(card, list.children[i] ?? null); });
+  list.scrollTop = previousScroll;
 }
 async function loadApps() {
   if (fatal) return;
@@ -720,7 +731,8 @@ const MAX_LINES = 8000;
 const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:/;
 const classify = t => errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
   : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(t) ? 'sql' : '';
-let logSrc = null, logSrcLabel = '', offset = -1, pending = '', decoder = new TextDecoder('utf-8');
+let logSrc = null, logSrcLabel = '', offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
+let renderedId = 0, sourcesVersion = 0, sourcesController = null;
 let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBusy = false;
 
 function logHint(text, error = false) {
@@ -728,7 +740,7 @@ function logHint(text, error = false) {
   box.replaceChildren(el('div', 'empty' + (error ? ' error' : ''), text));
 }
 function resetLog() {
-  offset = -1; pending = ''; decoder = new TextDecoder('utf-8');
+  offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true;
   updateFollow();
   $('#logMeta').textContent = '';
@@ -738,8 +750,25 @@ function updateFollow() {
   $('#followBtn').textContent = following ? '跟随中' : '恢复跟随';
   $('#followBtn').setAttribute('aria-pressed', String(following));
 }
-function renderLines() {
+function renderLines(force = false) {
   const box = $('#log');
+  if (!force && renderedId && lines[0]?.id <= renderedId) {
+    const frag = document.createDocumentFragment();
+    for (const l of lines) if (l.id > renderedId) {
+      const row = el('div', 'line ' + classify(l.text)); row.dataset.id = l.id;
+      row.appendChild(document.createTextNode(l.text || ' ')); frag.appendChild(row);
+    }
+    box.appendChild(frag);
+    // Keep the DOM window bounded without replacing the remaining nodes, so
+    // selection and scroll position survive once the line cache reaches MAX_LINES.
+    const renderedLines = box.querySelectorAll('.line');
+    for (let i = 0, excess = renderedLines.length - lines.length; i < excess; i++) renderedLines[i].remove();
+    renderedId = lines.at(-1)?.id ?? renderedId;
+    if (following) box.scrollTop = box.scrollHeight;
+    return;
+  }
+  const wasEmpty = box.querySelector('.empty') !== null;
+  if (!force && wasEmpty && !lines.length) return;
   const frag = document.createDocumentFragment();
   for (const l of lines) {
     const row = el('div', 'line ' + classify(l.text));
@@ -749,6 +778,7 @@ function renderLines() {
   }
   box.replaceChildren(frag);
   if (boundary) box.prepend(el('div', 'empty', boundary));
+  renderedId = lines.at(-1)?.id ?? 0;
   if (following) box.scrollTop = box.scrollHeight;
 }
 async function pollTail() {
@@ -757,13 +787,14 @@ async function pollTail() {
   try {
     const d = await api(`/api/tail?app=${encodeURIComponent(selected)}&src=${encodeURIComponent(logSrc)}&offset=${offset}`);
     if (offset >= 0 && d.start !== offset) {
-      pending = ''; decoder = new TextDecoder('utf-8');
+      pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
       lines = []; removed = 0; boundary = '日志已截断，读取位置已重置';
     } else if (offset < 0) {
       boundary = d.start > 0 ? `已加载尾部 ${fmtSize(d.size - d.start)}，更早内容未加载` : '从文件起始读取';
     }
     if (d.b64) {
       const bytes = Uint8Array.from(atob(d.b64), c => c.charCodeAt(0));
+      if (d.encoding !== logEncoding) { logEncoding = d.encoding; decoder = new TextDecoder(logEncoding); pending = ''; }
       const parts = (pending + decoder.decode(bytes, { stream: true })).split('\n');
       pending = parts.pop();
       for (const text of parts) lines.push({ id: nextId++, text: text.replace(/\r$/, '') });
@@ -783,10 +814,14 @@ async function pollTail() {
   } finally { tailBusy = false; }
 }
 async function loadSources() {
+  const version = ++sourcesVersion;
+  sourcesController?.abort();
+  sourcesController = new AbortController();
   const runSel = $('#runSel');
   if (!selected) { runSel.replaceChildren(); runSel.disabled = true; return; }
   try {
-    const d = await api('/api/sources?app=' + encodeURIComponent(selected));
+    const d = await api('/api/sources?app=' + encodeURIComponent(selected), sourcesController.signal);
+    if (version !== sourcesVersion) return;
     runSel.replaceChildren();
     for (const s of d.sources ?? []) {
       runSel.appendChild(new Option(`${s.current ? '● ' : ''}${s.label} · ${fmtSize(s.size)}`, s.src));
@@ -807,7 +842,7 @@ async function loadSources() {
     const picked = (d.sources ?? []).find(s => s.src === want);
     logSrcLabel = picked ? picked.label : '';
     if (want !== logSrc) { logSrc = want; resetLog(); }
-  } catch (e) { handlePollError(e); }
+  } catch (e) { if (e.name !== 'AbortError' && version === sourcesVersion) handlePollError(e); }
 }
 
 // ---------- 事件与轮询 ----------
@@ -821,7 +856,7 @@ $('#runSel').addEventListener('change', e => {
 });
 $('#detailBar').addEventListener('click', () => { detailTouched = true; applyDetail(detailOpen = $('#detail').hidden); });
 $('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
-$('#clearBtn').addEventListener('click', () => { lines = []; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(); });
+$('#clearBtn').addEventListener('click', () => { lines = []; renderedId = 0; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(true); });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
   const box = $('#log');
@@ -830,7 +865,7 @@ $('#log').addEventListener('scroll', () => {
 
 // ---------- 项目文件（只读，替代原单项 viewer 的文件树/预览） ----------
 
-let treeVersion = 0, previewVersion = 0;
+let treeVersion = 0, previewVersion = 0, previewOffset = 0, previewSize = 0, previewPath = '';
 function fdHint(target, text, error = false) {
   target.replaceChildren(el('div', 'empty' + (error ? ' error' : ''), text));
 }
@@ -878,12 +913,13 @@ async function loadTree(rel, target, version) {
     if (version === treeVersion) fdHint(target, e.message, true);
   }
 }
-async function previewFile(rel) {
+async function previewFile(rel, offset = 0) {
+  previewPath = rel; previewOffset = offset;
   const version = ++previewVersion;
   $('#fdPath').textContent = rel;
   fdHint($('#fdBody'), '加载中…');
   try {
-    const d = await api(`/api/file?app=${encodeURIComponent(selected)}&path=${encodeURIComponent(rel)}`);
+    const d = await api(`/api/file?app=${encodeURIComponent(selected)}&path=${encodeURIComponent(rel)}&offset=${offset}`);
     if (version !== previewVersion) return;
     const box = $('#fdBody');
     box.replaceChildren();
@@ -892,11 +928,15 @@ async function previewFile(rel) {
     const frag = document.createDocumentFragment();
     d.text.split('\n').forEach((text, i) => {
       const line = el('div', 'fd-line');
-      line.append(el('span', 'no', String(i + 1)), el('span', 'tx', text || ' '));
+      line.append(el('span', 'no', String(d.offset + i + 1)), el('span', 'tx', text || ' '));
       frag.appendChild(line);
     });
     box.appendChild(frag);
-    $('#fdPath').textContent = `${rel} · ${fmtSize(d.size)}${d.truncated ? ' · 仅显示前 256 KB' : ''}`;
+    previewOffset = d.offset; previewSize = d.size;
+    $('#fdPath').textContent = `${rel} · ${fmtSize(d.size)} · ${fmtSize(d.offset)} - ${fmtSize(d.nextOffset)}`;
+    $('#fdPrev').disabled = d.offset === 0;
+    $('#fdNext').disabled = !d.hasMore;
+    $('#fdTail').disabled = d.size <= 256 * 1024;
   } catch (e) {
     if (version === previewVersion) fdHint($('#fdBody'), e.message, true);
   }
@@ -909,6 +949,9 @@ function openFiles() {
   fdHint($('#fdBody'), '');
   loadTree('', $('#fdTree'), ++treeVersion);
 }
+$('#fdTail').addEventListener('click', () => previewFile(previewPath, Math.max(0, previewSize - 256 * 1024)));
+$('#fdPrev').addEventListener('click', () => previewFile(previewPath, Math.max(0, previewOffset - 256 * 1024)));
+$('#fdNext').addEventListener('click', () => previewFile(previewPath, previewOffset + 256 * 1024));
 $('#filesBtn').addEventListener('click', openFiles);
 $('#fdClose').addEventListener('click', () => { $('#fileDrawer').hidden = true; });
 $('#fdRefresh').addEventListener('click', () => { if (selected) loadTree('', $('#fdTree'), ++treeVersion); });
