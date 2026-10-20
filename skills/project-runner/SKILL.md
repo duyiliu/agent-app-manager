@@ -1,6 +1,6 @@
 ---
 name: project-runner
-description: Agent 驱动的本地 Java 项目启动助手：读取 Maven/Gradle 或现有启动脚本，初始化/使用 standalone JRebel，启动、查看日志并验证热更新。用户要求启动 Java/Spring Boot 服务、配置或排查 JRebel、查看运行日志、打开本地 Web 管理台（manager ui，默认固定 http://127.0.0.1:8199）时使用；跨项目运行管理与只读管理台（manager.mjs list/status/start/stop/restart/logs/ui）已实现，用法见第 8 章。
+description: Agent 驱动的本地 Java 项目启动助手：读取 Maven/Gradle 或现有启动脚本，初始化/使用 standalone JRebel，启动、查看日志并验证热更新。用户要求启动 Java/Spring Boot 服务、配置或排查 JRebel、查看运行日志、打开本地 Web 管理台（manager ui，默认固定 http://127.0.0.1:8199）时使用；跨项目运行管理与只读管理台（manager.mjs list/status/start/stop/restart/remove/prune/logs/ui）已实现，用法见第 8 章。
 ---
 
 # Project Runner · Java / Standalone JRebel 启动流程
@@ -134,7 +134,9 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 ```bash
 node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json] <命令>
 # list | status <别名|appId> | start <别名|appId> [--ack-unresolved <runId>] | stop <别名|appId> | restart <别名|appId>
-# logs <别名|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]
+# remove <别名|appId> [--ack-unresolved <runId>]　移除登记（须无存活受管实例；只删注册表条目，运行记录与日志证据保留）
+# prune [--dry-run] [--apply]　回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run，--apply 才删除）
+# logs <别名|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow] [--src <run:…|hint:N|tmp:…>] [--list-sources]
 # ui [--port N]　本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌；URL 含令牌勿转发，Ctrl+C 退出）
 # 内部入口（Agent 用）：start-new --desc <file> [--ack-unresolved <runId>] | record-unmanaged --desc <file> [--log-hints p1,p2]
 ```
@@ -153,6 +155,8 @@ Agent 使用规程：
    - 当前没有 `STARTING`/`UNKNOWN` 未结记录时带 `--ack-unresolved` → `ACK_MISMATCH`（避免误用过期 runId）。
    成功启动的输出会带 `abandonedRunId`/`abandonedReason`，需向用户说明“旧账已被显式放弃、证据保留在 prevRuns”。
 5. **状态解读**：`RUNNING`=进程存活（不等于业务就绪）；`STOPPED` 有退出证据；`STARTING`=启动进行中；`UNKNOWN`=中断/身份不可核验/非受管记录。`STARTING`/`UNKNOWN` 的受管记录属于未结记录，重启受 4.1/4.2 约束。PID/端口仅有证据才填写；JRebel 是否验证、业务是否就绪与本状态分开表述，不互相冒充。
-6. **数据与安全**：注册表/运行记录在 `~/.project-runner/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样。日志入口统一为 `manager ui`（网页，含日志源与文件树）与 `manager logs`（CLI）。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
+6. **数据与安全**：注册表/运行记录在 `~/.project-runner/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样。日志入口统一为 `manager ui`（网页，含日志源与文件树）与 `manager logs`（CLI，`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析）。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
+6.1 **移除登记（remove）**：应用不再需要时用 `remove <别名|appId>` 从注册表移除。仅允许无存活受管实例时移除：current 为 RUNNING 且核验存活一律拒绝（退出码 3，`INSTANCE_RUNNING`，先 `stop` 再 `remove`）；STARTING/UNKNOWN 未结记录默认拒绝（`UNRESOLVED_RUN`），人工核验已退出后用 `--ack-unresolved <runId>` 显式放弃（规则同 4.2）。remove 只删注册表条目，`runtime/<appId>.json` 与 `logs/<appId>/` 证据一律保留；成功后 `list` 不再显示该应用，`status`/`logs` 按“未登记”报 NOT_FOUND（证据文件仍在数据目录，可人工查看）。不要用删 registry.json/runtime 文件的方式“移除”。
+6.2 **残留回收（prune）**：`prune [--dry-run] [--apply]` 回收三类残留——`logs/<appId>/` 超保留期历史批次日志（保留 current 与 prevRuns（≤20，PREV_RUNS_KEEP）引用的 runId，其余回收）、`locks/*.lock.stale-*` 死锁回收残留、数据目录内 `.tmp-<pid>-<hex>` 原子写孤儿临时文件。**默认 dry-run** 只打印将删内容，确认后加 `--apply` 才真正删除；绝不删 current 运行日志与 runtime/registry 证据，绝不触碰数据目录之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝（退出码 5），不删任何文件。逐应用在应用锁内判定，锁忙/损坏或缺 pwsh 时跳过该应用并注明；不要在 prune 之外手工批量删 `logs/` 下的文件。
 7. **本地管理台（ui，v1 只读）与默认观察入口**：**受管启动（start/start-new）成功后，用户的默认观察入口是 `manager ui`**——它全局展示所有受管应用的状态与按批次日志；**ui 实例数量与项目数无关**：启动 N 个项目不会拉起任何 Web 进程，并行多项目也共用同一个 ui 实例（读共享数据目录，天然全局视角），不要为每个项目各开一个；受管日志在数据目录；原单项目 viewer 已移除，非受管日志线索、`.tmp` 兼容日志与项目文件树都在本台查看（见第 5 节）。用户想"不开终端看一眼"或要求网页时，前台启动 `node <安装目录>/scripts/manager.mjs ui [--port N]`，把打印出的带令牌完整 URL 交给用户；**未启动 ui 时也要在汇报里告知入口**（固定地址 `http://127.0.0.1:8199` + 启动命令 + 令牌每次变化，见第 7 节交付口径），不要只在用户主动问时才说。**默认固定端口 8199**（`--port 0` 为随机端口）：重复启动会提示"已有 ui 实例占用"，此时复用该实例启动终端打印的 URL 或用 `--port` 换端口；8199 被其他程序占用时提示换端口。令牌每次启动都会变化，**固定端口不等于可收藏的固定地址**，URL 仍以启动输出为准。管理台只读展示 list、status（含未结记录证据与 prevRuns）、日志（受管批次、非受管线索、`.tmp` 兼容日志）与所选应用的项目文件，**不提供启停**；未结记录恢复与启停一律走 CLI。URL 含访问令牌，不得转发给他人或写入文件/聊天记录；用完 Ctrl+C 退出，不留常驻进程。数据损坏时管理台原样报错，处置方式同第 6 条。
 8. **退出码**：0 成功；1 用法；2 未找到；3 状态冲突（已运行/别名占用/身份不明/配置失效/`UNRESOLVED_RUN`/`ACK_MISMATCH` 等）；4 环境依赖（缺 pwsh 7）；5 数据损坏。`--json` 输出单一稳定对象（`schemaVersion/ok/command/data|error`），脚本化调用优先用它。
