@@ -42,8 +42,10 @@ skills/project-runner/
     ├── manager-ui/
     │   ├── index.html           # manager ui 只读管理台页面
     │   └── server.mjs           # ui 本地服务（127.0.0.1 + 一次性令牌）
-    └── ps/
-        └── proc.ps1             # 受管进程身份核验与终止适配
+    ├── ps/
+    │   └── proc.ps1             # 受管进程身份核验与终止适配
+    └── test/
+        └── ui-smoke.mjs         # manager ui 冒烟测试（隔离 --home，不碰真实数据）
 ```
 
 ## 来源与兼容性
@@ -57,3 +59,5 @@ skills/project-runner/
 ## 开发边界
 
 Skill 负责理解目标项目，确定性脚本只负责需要可靠重复执行的操作。不要为了支持更多语言预先引入通用适配框架、Daemon、数据库或 MCP。跨项目能力的验收要求见 [design.md](docs/design.md)。
+
+改动 `manager.mjs` / `manager-ui` 后运行冒烟测试：`node skills/project-runner/scripts/test/ui-smoke.mjs`。

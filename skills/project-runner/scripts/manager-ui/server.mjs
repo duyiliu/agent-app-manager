@@ -106,7 +106,8 @@ export async function startUiServer({ home, port = 0, api }) {
     route(res, u).catch((e) => {
       const status = errorStatus(e);
       if (status >= 500) console.error(e?.stack ?? e);
-      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: e.status ? e.message : '读取失败，请刷新重试' } });
+      // 4xx 是面向用户的业务错误（未找到/非受管/状态冲突等），原样透出消息；5xx 保持通用文案
+      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: status < 500 ? e.message : '读取失败，请刷新重试' } });
     });
   }
 

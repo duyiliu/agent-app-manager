@@ -568,6 +568,7 @@ function launchManaged(home, appId, app, opts = {}) {
   let child;
   let outFd;
   let errFd;
+  let spawnError = null;
   try {
     outFd = fs.openSync(outPath, 'a');
     errFd = fs.openSync(errPath, 'a');
@@ -576,6 +577,9 @@ function launchManaged(home, appId, app, opts = {}) {
       stdio: ['ignore', outFd, errFd],
       env: { ...process.env },
     });
+    // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
+    // 具体失败仍由下方身份采集路径统一落 UNKNOWN 并保留证据
+    child.on('error', (err) => { spawnError = err.message; });
     child.unref();
   } catch (e) {
     rt.current.phase = 'UNKNOWN';
@@ -604,7 +608,7 @@ function launchManaged(home, appId, app, opts = {}) {
     return rt.current;
   }
   rt.current.phase = 'UNKNOWN';
-  rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}`;
+  rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
   writeRuntime(home, appId, rt);
   throw conflictError('IDENTITY_CAPTURE_FAILED', `已拉起（pid=${child.pid}）但身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { runId, pid: child.pid, capture: cap, logPaths: rt.current.logPaths });
 }
@@ -950,6 +954,14 @@ function resolveLogFile(home, ref, run, stream = 'stdout') {
   const cur = rt && rt.current;
   const prev = rt && rt.prevRuns ? rt.prevRuns.find((p) => p.runId === run) : null;
   const runId = run ?? cur?.runId ?? null;
+  // 非受管记录没有批次日志（设计边界：只记录日志线索，不接管日志）；报错要说清去哪找，不伪装成日志丢失
+  if (!run && cur && !cur.managed) {
+    const hints = (cur.logHints ?? []).filter((h) => typeof h === 'string' && h);
+    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（直接读取线索路径，或用单项 viewer 查看）`);
+  }
+  if (prev && !prev.managed) {
+    throw notFoundError(`runId=${runId} 为非受管记录，无批次日志；请按项目脚本输出路径或单项 viewer 查看`);
+  }
   if (!runId) throw notFoundError(`${app.alias} 无运行批次`);
   if (!ID_RE.test(runId)) throw usageError(`runId 非法：${runId}`);
   if (run && runId !== cur?.runId && !prev) {
