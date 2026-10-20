@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 const SCHEMA_VERSION = 1;
 const EXIT = { OK: 0, USAGE: 1, NOT_FOUND: 2, CONFLICT: 3, DEPENDENCY: 4, DATA: 5 };
 const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
+const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_LOG_LINES = 5000;              // --lines 上限
 const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
 const PREV_RUNS_KEEP = 20;
@@ -29,6 +30,7 @@ const RESUMABLE_PHASES = new Set(['RUNNING', 'STOPPED']);
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PS_PROC = path.join(SCRIPT_DIR, 'ps', 'proc.ps1');
+const LOG_WRITER = path.join(SCRIPT_DIR, 'log-writer.mjs');
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
@@ -482,6 +484,7 @@ function loadManagedDesc(file) {
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
+  if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
     alias: d.alias,
@@ -497,6 +500,7 @@ function loadManagedDesc(file) {
     discoverTimeoutMs: d.discoverTimeoutMs ?? null,
     envRefs: d.envRefs ?? [],
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+    logMaxBytes: d.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
 }
@@ -632,6 +636,7 @@ function upsertApp(reg, appId, desc) {
     existing.discoverTimeoutMs = desc.discoverTimeoutMs ?? null;
     existing.envRefs = desc.envRefs;
     existing.expectedPort = desc.expectedPort ?? null;
+    existing.logMaxBytes = desc.logMaxBytes ?? RUN_LOG_MAX_BYTES;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
     existing.updatedAt = now;
@@ -642,7 +647,8 @@ function upsertApp(reg, appId, desc) {
     cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
     discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
-    expectedPort: desc.expectedPort ?? null, sourceFingerprint: desc.sourceFingerprint ?? null,
+    expectedPort: desc.expectedPort ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
+    sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };
   reg.apps[appId] = app;
@@ -699,22 +705,26 @@ function launchManaged(home, appId, app, opts = {}) {
   };
 
   let child;
-  let outFd;
-  let errFd;
+  const pidFile = path.join(logDir, `.${runId}.pid`);
   let spawnError = null;
   try {
-    outFd = fs.openSync(outPath, 'a');
-    errFd = fs.openSync(errPath, 'a');
+    const sinkConfig = path.join(logDir, `.${runId}.sink.json`);
+    fs.writeFileSync(sinkConfig, JSON.stringify({
+      file: isCommand ? resolveComspec(app.cwd) : app.exe,
+      args: isCommand ? ['/d', '/s', '/c', app.command] : app.args,
+      cwd: app.cwd, env: { ...process.env }, outPath, errPath,
+      runtimeFile: runtimePath(home, appId), runId, limit: app.logMaxBytes ?? RUN_LOG_MAX_BYTES, pidFile,
+    }));
+    // The detached logger owns both output descriptors and launches the application
+    // with pipes, allowing safe stdout rotation without touching a live app fd.
     // 命令模式：拉起 cmd wrapper 执行完整命令行；真实目标进程稍后按后代发现确定。
     // 注意 wrapper 不能 detach——Windows 下 detached(无控制台) wrapper 的后代进程
     // stdout 句柄全部失效（实测 echo/node/ping 写入丢失），必须共享父进程控制台。
     // Windows 父退出不杀子进程，wrapper/目标仍会存活；代价是交互终端启动时
     // 共享其控制台（典型 agent 管道调用下 manager 本无控制台，不受影响）。
-    const file = isCommand ? resolveComspec(app.cwd) : app.exe;
-    const argv = isCommand ? ['/d', '/s', '/c', app.command] : app.args;
-    child = spawn(file, argv, {
+    child = spawn(process.execPath, [LOG_WRITER, sinkConfig], {
       cwd: app.cwd, detached: !isCommand, windowsHide: true,
-      stdio: ['ignore', outFd, errFd],
+      stdio: 'ignore',
       env: { ...process.env },
     });
     // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
@@ -726,8 +736,7 @@ function launchManaged(home, appId, app, opts = {}) {
     rt.current.lastError = `spawn_failed: ${e.message}`;
     failUnresolved('SPAWN_FAILED', `进程启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: e.message });
   } finally {
-    try { if (outFd != null) fs.closeSync(outFd); } catch { /* 忽略 */ }
-    try { if (errFd != null) fs.closeSync(errFd); } catch { /* 忽略 */ }
+    // Logger owns log descriptors; the manager never opens active log files.
   }
 
   rt.current.startedAt = new Date().toISOString();
@@ -738,13 +747,17 @@ function launchManaged(home, appId, app, opts = {}) {
   }
 
   let cap;
-  try {
-    cap = psProc('capture', { id: child.pid });
-  } catch (e) {
-    cap = { result: 'error', message: e.message };
+  if (isCommand) {
+    try { cap = psProc('capture', { id: child.pid }); }
+    catch (e) { cap = { result: 'error', message: e.message }; }
   }
-
   if (!isCommand) {
+    // Capture the managed application, not the logging helper.
+    let targetPid = child.pid;
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    try { targetPid = Number(fs.readFileSync(pidFile, 'utf8')) || child.pid; } catch { /* helper startup failed */ }
+    rt.current.pid = targetPid;
+    try { cap = psProc('capture', { id: targetPid }); } catch (e) { cap = { result: 'error', message: e.message }; }
     if (cap.result === 'ok') {
       rt.current.phase = 'RUNNING';
       rt.current.creationFileTime = cap.creationFileTime;
@@ -1543,9 +1556,10 @@ function listSources(home, ref) {
   const runDir = path.join(home, 'logs', appId);
   if (fs.existsSync(runDir)) {
     for (const name of fs.readdirSync(runDir)) {
-      const m = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log$/.exec(name);
+      const m = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/.exec(name);
       if (!m) continue;
-      push({ src: `run:${m[1]}.${m[2]}`, kind: 'run', label: `${m[1]} · ${m[2]}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
+      const rotated = name.endsWith('.log.1');
+      push({ src: `run:${m[1]}.${m[2]}${rotated ? '.1' : ''}`, kind: 'run', label: `${m[1]} · ${m[2]}${rotated ? ' · 轮转前' : ''}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
     }
   }
   (rt?.current?.logHints ?? []).forEach((hint, i) => {
@@ -1575,8 +1589,11 @@ function resolveSource(home, ref, src) {
   const rt = readRuntimeStrict(home, appId);
   if (typeof src !== 'string' || src.length > 200) throw usageError('日志源标识无效');
   let m;
-  if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)$/.exec(src))) {
-    return { appId, alias: app.alias, runId: m[1], stream: m[2], file: uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log`) };
+  if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)(\.1)?$/.exec(src))) {
+    const suffix = m[3] ?? '';
+    const file = uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log${suffix}`);
+    if (suffix && !fs.existsSync(file)) throw notFoundError('轮转日志不存在');
+    return { appId, alias: app.alias, runId: m[1], stream: m[2], file };
   }
   if ((m = /^hint:(\d{1,3})$/.exec(src))) {
     const hint = (rt?.current?.logHints ?? [])[Number(m[1])];
