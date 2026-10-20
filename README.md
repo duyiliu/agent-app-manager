@@ -22,7 +22,7 @@ npx skills add duyiliu/project-runner --skill project-runner -g
 
 - **当前项目启动**：读取 `AGENTS.md`、已有脚本及 Maven/Gradle 配置，确定 JDK、模块、入口、profile、端口、启动参数。
 - **JRebel**：初始化 / 检查 standalone JRebel、许可与 `rebel.xml`，按已有项目约定启动，验证加载与热更新证据。
-- **日志工作台**：单项目只读 Viewer，位于 `skills/project-runner/scripts/log-viewer/`；在目标项目目录下启动，默认监听本机 `127.0.0.1:8199`。
+- **日志工作台**：单项目只读 Viewer，位于 `skills/project-runner/scripts/log-viewer/`；在目标项目目录下启动，默认监听本机 `127.0.0.1:8199`。适用于非受管/脚本启动与项目文件树预览；**受管启动（`manager start`）的日志默认用 `manager ui` 全局查看**（受管日志在数据目录，Viewer 读不到）。
 - **跨项目运行管理**：`manager.mjs` 统一登记并管理**本 Skill 启动且具有可信进程身份**的 Java 应用；支持全局 `list`/`status`、已登记应用从任意目录 `start`、受管实例 `stop`/`restart`、按运行批次 `logs`，以及跨 Agent 会话核验。只管理本 Skill 启动并记录的应用，**不接管 IDEA / 手工启动的外部进程**；`stop` 为有界强制终止，不承诺优雅关机。
 - **本地运行管理台**：`manager ui` 按需启动只读网页（仅 127.0.0.1 + 一次性令牌，Ctrl+C 即退出，无常驻服务），查看全局应用状态、未结记录证据与按批次日志；不提供启停操作，启停走 CLI/Agent。
 - **非受管启动**：无法安全定位目标 JVM 的项目脚本仍可按原授权执行，但只记录启动尝试与日志线索并标记为非受管，不承诺跨会话启停。
