@@ -1267,7 +1267,7 @@ async function cmdUi(ctx) {
         listSources: (ref) => listSources(ctx.home, ref),
         resolveSource: (ref, src) => resolveSource(ctx.home, ref, src),
         listTree: (ref, p) => listTree(ctx.home, ref, p),
-        readFile: (ref, p) => readProjectFile(ctx.home, ref, p),
+        readFile: (ref, p, offset) => readProjectFile(ctx.home, ref, p, offset),
       },
     });
   } catch (e) {
