@@ -958,10 +958,10 @@ function resolveLogFile(home, ref, run, stream = 'stdout') {
   // 非受管记录没有批次日志（设计边界：只记录日志线索，不接管日志）；报错要说清去哪找，不伪装成日志丢失
   if (!run && cur && !cur.managed) {
     const hints = (cur.logHints ?? []).filter((h) => typeof h === 'string' && h);
-    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（直接读取线索路径，或用单项 viewer 查看）`);
+    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（直接读取线索路径，或在 manager ui 的日志源中选择）`);
   }
   if (prev && !prev.managed) {
-    throw notFoundError(`runId=${runId} 为非受管记录，无批次日志；请按项目脚本输出路径或单项 viewer 查看`);
+    throw notFoundError(`runId=${runId} 为非受管记录，无批次日志；请按项目脚本输出路径或在 manager ui 的日志源中选择`);
   }
   if (!runId) throw notFoundError(`${app.alias} 无运行批次`);
   if (!ID_RE.test(runId)) throw usageError(`runId 非法：${runId}`);
@@ -989,6 +989,154 @@ function listRuns(home, ref) {
       endedAt: p.endedAt ?? null, archivedAt: p.archivedAt ?? null, archiveReason: p.archiveReason ?? null,
     })),
   };
+}
+
+// ---------- ui 统一日志源与项目文件浏览（只读，替代原单项 viewer） ----------
+// 日志源三类：受管批次 logs/<appId>/<runId>.<stream>.log、非受管登记的 logHints、
+// 应用 root/.tmp 下 jrebel-local-* 兼容扫描。文件树/预览限定在应用 root 内。
+
+const TMP_NAME_RE = /^jrebel-local-[^/\\]+\.(stdout|stderr)\.log$/;
+const UI_FILE_CHUNK = 256 * 1024;
+const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
+  || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
+  || /^(id_rsa|id_ed25519|credentials)(\..*)?$/i.test(name);
+const uiFail = (status, message) => Object.assign(new Error(message), { status });
+const uiInside = (base, file) => {
+  const rel = path.relative(base, file);
+  return rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + path.sep));
+};
+
+// 相对路径、无穿越、逐段非符号链接、realpath 仍在 base 内
+function uiResolveFile(base, rel = '') {
+  if (rel.includes('\\') || rel.includes('\0') || path.isAbsolute(rel)
+    || rel.split('/').some((p) => p === '..' || uiBlocked(p))) throw uiFail(403, '此路径不允许访问');
+  const candidate = path.resolve(base, rel);
+  if (!uiInside(base, candidate)) throw uiFail(403, '此路径不允许访问');
+  let walk = base;
+  for (const part of rel.split('/').filter(Boolean)) {
+    walk = path.join(walk, part);
+    if (fs.lstatSync(walk).isSymbolicLink()) throw uiFail(403, '不支持浏览符号链接');
+  }
+  const real = fs.realpathSync(candidate);
+  if (!uiInside(base, real)) throw uiFail(403, '此路径不允许访问');
+  return real;
+}
+
+function appRootOf(home, ref) {
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const app = reg.apps[appId];
+  try {
+    return { appId, app, root: fs.realpathSync.native(app.root) };
+  } catch {
+    throw notFoundError(`${app.alias} 的项目目录不存在或不可访问：${app.root}`);
+  }
+}
+
+// 统一日志源列表：src 为不透明定位符（run:/hint:/tmp:），tail 时回传并重新校验
+function listSources(home, ref) {
+  if (!ref) throw usageError('需要 <alias|appId>');
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const app = reg.apps[appId];
+  const rt = readRuntimeStrict(home, appId);
+  const curRunId = rt?.current?.runId ?? null;
+  const sources = [];
+  const seen = new Set();
+  const push = (s, file) => {
+    try {
+      const real = fs.realpathSync(file);
+      if (seen.has(real)) return;
+      const stat = fs.statSync(real);
+      if (!stat.isFile()) return;
+      seen.add(real);
+      sources.push({ ...s, size: stat.size, mtimeMs: Math.round(stat.mtimeMs) });
+    } catch { /* 文件可能刚被清理或不可读，跳过 */ }
+  };
+  const runDir = path.join(home, 'logs', appId);
+  if (fs.existsSync(runDir)) {
+    for (const name of fs.readdirSync(runDir)) {
+      const m = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log$/.exec(name);
+      if (!m) continue;
+      push({ src: `run:${m[1]}.${m[2]}`, kind: 'run', label: `${m[1]} · ${m[2]}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
+    }
+  }
+  (rt?.current?.logHints ?? []).forEach((hint, i) => {
+    if (typeof hint !== 'string' || !path.isAbsolute(hint)) return;
+    push({ src: `hint:${i}`, kind: 'hint', label: `线索 · ${path.basename(hint)}`, current: true, stream: null }, hint);
+  });
+  try {
+    const tmpDir = uiResolveFile(app.root, '.tmp');
+    if (fs.statSync(tmpDir).isDirectory()) {
+      for (const name of fs.readdirSync(tmpDir)) {
+        if (!TMP_NAME_RE.test(name)) continue;
+        push({ src: `tmp:${name}`, kind: 'tmp', label: name.replace(/^jrebel-local-/, '').replace(/\.log$/, ''), current: false, stream: name.endsWith('.stdout.log') ? 'stdout' : 'stderr' }, path.join(tmpDir, name));
+      }
+    }
+  } catch { /* .tmp 缺失或为符号链接：无兼容日志 */ }
+  // 默认排序：当前运行 stdout > 当前运行其余 > 历史源按 mtime
+  const rank = (s) => (s.current ? (s.stream === 'stderr' ? 1 : 0) : 2);
+  sources.sort((a, b) => rank(a) - rank(b) || b.mtimeMs - a.mtimeMs || Number(b.stream === 'stdout') - Number(a.stream === 'stdout'));
+  return { appId, alias: app.alias, sources };
+}
+
+function resolveSource(home, ref, src) {
+  if (!ref) throw usageError('需要 <alias|appId>');
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const app = reg.apps[appId];
+  const rt = readRuntimeStrict(home, appId);
+  if (typeof src !== 'string' || src.length > 200) throw usageError('日志源标识无效');
+  let m;
+  if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)$/.exec(src))) {
+    return { appId, alias: app.alias, runId: m[1], stream: m[2], file: uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log`) };
+  }
+  if ((m = /^hint:(\d{1,3})$/.exec(src))) {
+    const hint = (rt?.current?.logHints ?? [])[Number(m[1])];
+    if (typeof hint !== 'string' || !path.isAbsolute(hint)) throw notFoundError('日志线索不存在');
+    const real = fs.realpathSync(hint);
+    if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
+    return { appId, alias: app.alias, runId: null, stream: null, file: real };
+  }
+  if ((m = /^tmp:(.+)$/.exec(src)) && TMP_NAME_RE.test(m[1])) {
+    return { appId, alias: app.alias, runId: null, stream: m[1].endsWith('.stdout.log') ? 'stdout' : 'stderr', file: uiResolveFile(app.root, `.tmp/${m[1]}`) };
+  }
+  throw usageError('日志源标识无效');
+}
+
+function listTree(home, ref, rel = '') {
+  const { app, root } = appRootOf(home, ref);
+  const dir = uiResolveFile(root, rel);
+  if (!fs.statSync(dir).isDirectory()) throw uiFail(400, '不是目录');
+  const entries = [];
+  for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (uiBlocked(item.name) || item.isSymbolicLink() || (!item.isDirectory() && !item.isFile())) continue;
+    entries.push({ name: item.name, path: path.posix.join(rel, item.name), directory: item.isDirectory() });
+  }
+  entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
+  return { alias: app.alias, root, path: rel, entries };
+}
+
+function readProjectFile(home, ref, rel = '') {
+  const { root } = appRootOf(home, ref);
+  const file = uiResolveFile(root, rel);
+  const stat = fs.statSync(file);
+  if (!stat.isFile()) throw uiFail(400, '不是普通文件');
+  const chunk = Math.min(stat.size, UI_FILE_CHUNK);
+  const fd = fs.openSync(file, 'r');
+  let buf;
+  try {
+    buf = Buffer.alloc(chunk);
+    const read = fs.readSync(fd, buf, 0, chunk, 0);
+    buf = buf.subarray(0, read);
+  } finally { fs.closeSync(fd); }
+  let text = null;
+  try {
+    if (buf.includes(0)) throw new Error('binary');
+    text = new TextDecoder('utf-8', { fatal: true }).decode(buf, { stream: stat.size > buf.length });
+    if (/[\x01-\x08\x0e-\x1f]/.test(text)) text = null;
+  } catch { text = null; }
+  return { path: rel, size: stat.size, truncated: stat.size > buf.length, binary: text === null, text };
 }
 
 function cmdLogs(ctx, ref) {
@@ -1107,6 +1255,10 @@ async function cmdUi(ctx) {
         status: (ref) => cmdStatus(ctx, ref),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
+        listSources: (ref) => listSources(ctx.home, ref),
+        resolveSource: (ref, src) => resolveSource(ctx.home, ref, src),
+        listTree: (ref, p) => listTree(ctx.home, ref, p),
+        readFile: (ref, p) => readProjectFile(ctx.home, ref, p),
       },
     });
   } catch (e) {
@@ -1217,7 +1369,7 @@ function renderHuman(command, data) {
       return [
         `已记录非受管启动 ${data.alias} (${data.appId}) run=${data.runId}`,
         data.logHints?.length ? `日志线索: ${data.logHints.join(', ')}` : null,
-        '观察：非受管日志在项目 .tmp 下，可用单项目 viewer（log-viewer/server.mjs）查看',
+        '观察：非受管日志在项目 .tmp 下，可在 manager ui 的日志源中选择查看',
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'stop':

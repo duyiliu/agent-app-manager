@@ -60,12 +60,24 @@ export async function startUiServer({ home, port = 0, api }) {
     if (u.pathname === '/api/runs') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listRuns(u.searchParams.get('app') || '') });
     }
+    if (u.pathname === '/api/sources') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listSources(u.searchParams.get('app') || '') });
+    }
+    if (u.pathname === '/api/tree') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listTree(u.searchParams.get('app') || '', u.searchParams.get('path') || '') });
+    }
+    if (u.pathname === '/api/file') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.readFile(u.searchParams.get('app') || '', u.searchParams.get('path') || '') });
+    }
     if (u.pathname === '/api/tail') {
-      const t = api.resolveLogFile(
-        u.searchParams.get('app') || '',
-        u.searchParams.get('run') || null,
-        u.searchParams.get('stream') === 'stderr' ? 'stderr' : 'stdout');
-      if (!fs.existsSync(t.file)) throw fail(404, `日志不存在（runId=${t.runId}, stream=${t.stream}）`);
+      const src = u.searchParams.get('src');
+      const t = src
+        ? api.resolveSource(u.searchParams.get('app') || '', src)
+        : api.resolveLogFile(
+          u.searchParams.get('app') || '',
+          u.searchParams.get('run') || null,
+          u.searchParams.get('stream') === 'stderr' ? 'stderr' : 'stdout');
+      if (!fs.existsSync(t.file)) throw fail(404, `日志不存在（${t.runId ? `runId=${t.runId}, ` : ''}stream=${t.stream ?? '?'}）`);
       const size = fs.statSync(t.file).size;
       let offset = Number(u.searchParams.get('offset'));
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > size) offset = Math.max(0, size - TAIL_CHUNK);
@@ -80,7 +92,7 @@ export async function startUiServer({ home, port = 0, api }) {
       }
       return sendJson(res, 200, {
         schemaVersion: SCHEMA_VERSION, ok: true,
-        data: { appId: t.appId, alias: t.alias, runId: t.runId, stream: t.stream, start: offset, offset: offset + read, size, b64: buf.subarray(0, read).toString('base64') },
+        data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, start: offset, offset: offset + read, size, b64: buf.subarray(0, read).toString('base64') },
       });
     }
     throw fail(404, '接口不存在');

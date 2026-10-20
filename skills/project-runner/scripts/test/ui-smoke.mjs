@@ -16,13 +16,16 @@ const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ui-smoke-'));
 const home = path.join(base, 'home');
 const proj = path.join(base, 'proj');
 const hintFile = path.join(base, 'hint', 'nohup.out');
-for (const d of [path.join(home, 'runtime'), path.join(home, 'logs', 'ahis'), path.join(home, 'locks'), proj, path.dirname(hintFile)]) {
+for (const d of [path.join(home, 'runtime'), path.join(home, 'logs', 'ahis'), path.join(home, 'locks'), path.join(proj, '.tmp'), path.dirname(hintFile)]) {
   fs.mkdirSync(d, { recursive: true });
 }
 const w = (f, c) => fs.writeFileSync(f, c, 'utf8');
 w(path.join(home, 'logs', 'ahis', 'rtest1.stdout.log'), 'JRebel:  on\nINFO started\nERROR boom\n    at x.y(Z.java:1)\n');
 w(path.join(home, 'logs', 'ahis', 'rtest1.stderr.log'), 'stderr line\n');
 w(path.join(home, 'logs', 'ahis', 'rold1.stdout.log'), 'old run line\n');
+w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line A\n');
+w(path.join(proj, 'pom.xml'), '<project/>\n');
+w(path.join(proj, '.env'), 'SECRET=x\n');
 w(hintFile, 'hint 1\n');
 const root = fs.realpathSync(proj);
 
@@ -124,6 +127,28 @@ try {
     assert.equal(runs.current.runId, 'rtest1');
     assert(runs.prevRuns.some((p) => p.runId === 'rold1'));
   });
+
+  const sources = (await get('/api/sources?app=his')).json.data.sources;
+  await check('统一日志源（当前 stdout 优先 + 历史 + .tmp）', () => {
+    assert.equal(sources[0].src, 'run:rtest1.stdout');
+    assert(sources.some((s) => s.src === 'run:rold1.stdout'));
+    assert(sources.some((s) => s.src.startsWith('tmp:')));
+  });
+  const repSources = (await get('/api/sources?app=report')).json.data.sources;
+  await check('非受管应用日志源=登记线索', () => assert.equal(repSources[0].src, 'hint:0'));
+  const hintTail = (await get(`/api/tail?app=report&src=${encodeURIComponent('hint:0')}`)).json.data;
+  await check('hint 源 tail 内容', () => assert(Buffer.from(hintTail.b64, 'base64').toString('utf8').includes('hint 1')));
+
+  const tree = (await get('/api/tree?app=his&path=')).json.data;
+  await check('文件树：列出 pom.xml，隐藏 .env', () => {
+    assert(tree.entries.some((e) => e.name === 'pom.xml'));
+    assert(!tree.entries.some((e) => e.name === '.env'));
+  });
+  const file = (await get('/api/file?app=his&path=pom.xml')).json.data;
+  await check('文件预览内容', () => assert(file.text.includes('<project/>')));
+  await check('.env 拒绝（403）', async () => assert.equal((await get('/api/file?app=his&path=.env')).status, 403));
+  await check('路径穿越拒绝（403）', async () => assert.equal((await get('/api/file?app=his&path=..%2Fregistry.json')).status, 403));
+  await check('ghost 项目目录缺失 tree 404', async () => assert.equal((await get('/api/tree?app=ghost&path=')).status, 404));
 
   const tail = (await get('/api/tail?app=his&run=rtest1&stream=stdout')).json.data;
   await check('tail 批次日志内容', () => assert(Buffer.from(tail.b64, 'base64').toString('utf8').includes('ERROR boom')));
