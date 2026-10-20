@@ -69,7 +69,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 定位：给"不开 Agent、不开终端"的场景一个本机可视化入口，查看全局应用与实时状态、按批次查看日志。它是 `manager.mjs` 的一个子命令，不是独立产品：
 
-- **按需启动、非常驻**：`manager ui [--port N]` 前台运行，Ctrl+C 即退出；不注册开机自启、不拉起守护进程、崩溃不自动重启。默认固定 `127.0.0.1:8199`（`--port 0` 为随机端口），端口被占用时按启动提示复用已有实例或换端口。**ui 实例数量与项目数无关**：启动项目不自动拉起任何 Web 进程，并行多项目共用同一个实例（读共享数据目录，天然全局视角）。
+- **按需启动、非常驻**：`manager ui [--port N] [--open]` 前台运行，Ctrl+C 即退出；不注册开机自启、不拉起守护进程、崩溃不自动重启。默认固定 `127.0.0.1:8199`（`--port 0` 为随机端口），端口被占用时按启动提示复用已有实例或换端口。`--open` 在监听成功后用默认浏览器打开带令牌 URL（默认不开：Agent 前台拉起场景不期望弹浏览器；打开失败降级为仅打印 URL，不阻塞 ui）。**ui 实例数量与项目数无关**：启动项目不自动拉起任何 Web 进程，并行多项目共用同一个实例（读共享数据目录，天然全局视角）。
 - **只读**：v1 提供 list、status（含未结记录证据与 prevRuns）、统一日志源 tail（受管批次、非受管线索、项目 `.tmp` 兼容日志）与所选应用的项目文件只读浏览；不提供启动/停止/重启操作——stop 是有界强制终止，网页误触风险高于显式 CLI 调用。后续如要开放操作，必须在服务端同级复刻 CLI 的全部防护（身份核验、未结记录拒绝、显式确认），不得绕过 manager 直接改运行数据。
 - **访问控制**：仅绑定 `127.0.0.1`；启动时生成一次性随机令牌并打印在带令牌的 URL 里，无令牌或令牌不符一律 403；校验 Host 头防 DNS rebinding；仅允许 GET。令牌不落盘。
 - **实现边界**：复用 manager 的数据层与命令实现（list/status 的状态计算、日志目标校验），不在 UI 里复制业务逻辑；损坏或不兼容数据按既有契约原样报错，不静默当空数据。页面为随 Skill 分发的单文件静态页，无外部资源。
@@ -110,14 +110,16 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ~~~text
 list [--json]
-status <alias|appId> [--json]
-start <alias|appId> [--json]             # 已登记应用，复用有效配置
+status <alias|appId> [--probe] [--json]  # --probe 附加本机 TCP 监听探测
+port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
+doctor [--json]                          # 只读自检（不修复）
+start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
 stop <alias|appId> [--json]              # 仅 Managed
-restart <alias|appId> [--json]           # 仅 Managed
+restart <alias|appId> [--force] [--json] # 仅 Managed
 remove <alias|appId> [--ack-unresolved <runId>] [--json]   # 移除登记：仅无存活受管实例；只删注册表条目，运行记录与日志证据保留
 prune [--dry-run] [--apply] [--json]     # 回收三类残留：超保留期批次日志（对齐 PREV_RUNS_KEEP=20）、locks/*.stale-*、.tmp-* 孤儿临时文件；默认 dry-run
 logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--src <run:…|hint:N|tmp:…>] [--list-sources] [--follow] [--json]
-ui [--port N]                             # 本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）
+ui [--port N] [--open]                      # 本地只读 Web 管理台（127.0.0.1 + 一次性令牌，--open 自动打开；Ctrl+C 退出）
 ~~~
 
 首次启动需要 Skill 调用的**内部登记与启动入口**：传递结构化启动描述并以原子流程“保存启动意图 → 启动 → 完成登记”；可以实现为内部子命令/参数文件，**不对用户暴露额外的手动注册 CRUD**。不可要求用户手写 `registry.json`。当一次普通项目脚本启动不能托管时，用同一内部入口记录尝试及日志线索。
@@ -186,4 +188,6 @@ Job Object 观测旁证（2026-10-19/20 两次实测合并；不构成 L3 通过
 
 **v2.2（2026-10-20）**：移除按项目启动的单项目 `log-viewer`，日志与文件浏览能力并入 `manager ui` 统一入口——日志源选择器覆盖受管批次、非受管登记线索与 `root/.tmp` 兼容扫描；新增所选应用的项目文件只读浏览（路径白名单、拒绝穿越/符号链接、UTF-8 前 256 KB）；`manager ui` 默认固定 `127.0.0.1:8199`（`--port 0` 随机），重复启动探测已有实例并提示复用。这样保持“只有一个统一管理入口”的定位，避免同一机器上两套 Web 界面与端口竞争。
 
-**v2.3（2026-10-20）**：CLI 能力补齐——新增 `remove`（移除登记：仅无存活受管实例时允许，RUNNING 核验存活一律拒绝（退出码 3），STARTING/UNKNOWN 未结记录按既有 ack 流程；只删注册表条目，runtime 记录与日志证据保留）与 `prune`（默认 dry-run，`--apply` 才删除；回收 `logs/<appId>/` 超保留期历史批次日志（与 PREV_RUNS_KEEP=20 对齐）、`locks/*.stale-*` 死锁残留与 `.tmp-*` 原子写孤儿临时文件；不删 current 运行日志与证据，不触碰 home 之外文件，损坏数据按 DATA_* 契约整体拒绝）；`logs` 接入与 ui 相同的统一日志源（`--src run:…|hint:N|tmp:…` 复用 `resolveSource`、`--list-sources` 列出日志源、`--stream both` 双流合并）。
+**v2.5（2026-10-20）**：CLI 能力补齐——新增 `remove`（移除登记：仅无存活受管实例时允许，RUNNING 核验存活一律拒绝（退出码 3），STARTING/UNKNOWN 未结记录按既有 ack 流程；只删注册表条目，runtime 记录与日志证据保留）与 `prune`（默认 dry-run，`--apply` 才删除；回收 `logs/<appId>/` 超保留期历史批次日志（与 PREV_RUNS_KEEP=20 对齐）、`locks/*.stale-*` 死锁残留与 `.tmp-*` 原子写孤儿临时文件；不删 current 运行日志与证据，不触碰 home 之外文件，损坏数据按 DATA_* 契约整体拒绝）；`logs` 接入与 ui 相同的统一日志源（`--src run:…|hint:N|tmp:…` 复用 `resolveSource`、`--list-sources` 列出日志源、`--stream both` 双流合并）。
+
+**v2.6（2026-10-20，issue #12 管理台体验增强）**：① `ui` 新增 `--open`：监听成功后用默认浏览器打开带令牌 URL；默认不开（Agent 前台拉起场景不期望弹浏览器），打开失败降级为仅打印 URL，不阻塞 ui；端口冲突时不拉浏览器。② 日志面板新增渲染层正则过滤输入框与「只看错误」开关（等价内置 errorPattern）：`lines` 数组保留全量、清空条件即恢复，增量 poll 新行按当前条件入视图，follow/滚动停止语义不变；无效正则给出标红与 meta 提示而非静默失效。③ 页面选择应用后 `history.replaceState` 回写 `?app=<别名>`，刷新保持选中。④ 未结记录（UNRESOLVED_RUN）告警中的 `start <alias> --ack-unresolved <runId>` 提供一键复制（`navigator.clipboard` 优先，选区 + `execCommand` 降级）。⑤ `document.title` 显示运行中应用数，如 `(2) Project Runner · 运行管理台`。
