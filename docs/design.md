@@ -61,7 +61,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 运行记录至少包括：`appId`、唯一 `runId`、启动意图/阶段、可用时的目标进程 PID、OS 创建时间、可核验的唯一进程标识（映像+创建时间）、`managed`、已知日志路径、时间及最近操作结果。
 
 - 一个仓库可有多个应用；按规范化仓库真实路径 + 应用入口去重，别名不区分 Windows 大小写。
-- 保留已经由 Skill 登记、但现在停止的项目；`list` 不等于“只列正在运行”。
+- 保留已经由 Skill 登记、但现在停止的项目；`list` 不等于“只列正在运行”。不再需要的登记由用户显式 `remove` 移除：仅允许无存活受管实例时移除（RUNNING 一律拒绝，STARTING/UNKNOWN 未结记录按既有 ack 流程）；只删注册表条目，`runtime/<appId>.json` 与 `logs/<appId>/` 证据保留，供事后追溯与 `prune` 按保留期回收。
 - 不存许可证内容、Token、明文密码、完整原始进程命令行或展开后的秘密；含敏感信息的参数应使用启动时解析的环境引用。
 - 不使用别名拼接可信文件路径；`appId`、`runId` 由脚本生成且严格校验。原子写文件，冲突写入不覆盖。
 
@@ -114,7 +114,9 @@ status <alias|appId> [--json]
 start <alias|appId> [--json]             # 已登记应用，复用有效配置
 stop <alias|appId> [--json]              # 仅 Managed
 restart <alias|appId> [--json]           # 仅 Managed
-logs <alias|appId> [--lines N] [--follow] [--json]
+remove <alias|appId> [--ack-unresolved <runId>] [--json]   # 移除登记：仅无存活受管实例；只删注册表条目，运行记录与日志证据保留
+prune [--dry-run] [--apply] [--json]     # 回收三类残留：超保留期批次日志（对齐 PREV_RUNS_KEEP=20）、locks/*.stale-*、.tmp-* 孤儿临时文件；默认 dry-run
+logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--src <run:…|hint:N|tmp:…>] [--list-sources] [--follow] [--json]
 ui [--port N]                             # 本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）
 ~~~
 
@@ -122,7 +124,7 @@ ui [--port N]                             # 本地只读 Web 管理台（127.0.0
 
 `list/status` 读取注册表，实时核验受管 JVM 身份；区分 RUNNING、STOPPED、STARTING、UNKNOWN，以及独立的 `managed` 状态。未注册项目不在列表；历史 Unmanaged 记录不得凭端口扫描宣称 STOPPED 或 RUNNING。输出项目别名、来源、状态、PID/端口（有证据才填写）、托管能力、日志位置。
 
-输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI，受管批次）提供。
+输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
 
 ## 5. 最小可靠性要求
 
@@ -183,3 +185,5 @@ Job Object 观测旁证（2026-10-19/20 两次实测合并；不构成 L3 通过
 本 v2 来源于 `duyiliu/agent-skills` PR #6，按“只管理本 Skill 启动的项目、跨项目可见、避免另造 CLI 产品”收敛；删除全机发现、手动注册 CRUD、IDEA 接管与复杂通用恢复设计。本仓库为设计与实现的唯一维护源。管理器已按本设计实现并于 2026-10-17 完成合并后验收；后续修订以本文件为基线。
 
 **v2.2（2026-10-20）**：移除按项目启动的单项目 `log-viewer`，日志与文件浏览能力并入 `manager ui` 统一入口——日志源选择器覆盖受管批次、非受管登记线索与 `root/.tmp` 兼容扫描；新增所选应用的项目文件只读浏览（路径白名单、拒绝穿越/符号链接、UTF-8 前 256 KB）；`manager ui` 默认固定 `127.0.0.1:8199`（`--port 0` 随机），重复启动探测已有实例并提示复用。这样保持“只有一个统一管理入口”的定位，避免同一机器上两套 Web 界面与端口竞争。
+
+**v2.3（2026-10-20）**：CLI 能力补齐——新增 `remove`（移除登记：仅无存活受管实例时允许，RUNNING 核验存活一律拒绝（退出码 3），STARTING/UNKNOWN 未结记录按既有 ack 流程；只删注册表条目，runtime 记录与日志证据保留）与 `prune`（默认 dry-run，`--apply` 才删除；回收 `logs/<appId>/` 超保留期历史批次日志（与 PREV_RUNS_KEEP=20 对齐）、`locks/*.stale-*` 死锁残留与 `.tmp-*` 原子写孤儿临时文件；不删 current 运行日志与证据，不触碰 home 之外文件，损坏数据按 DATA_* 契约整体拒绝）；`logs` 接入与 ui 相同的统一日志源（`--src run:…|hint:N|tmp:…` 复用 `resolveSource`、`--list-sources` 列出日志源、`--stream both` 双流合并）。

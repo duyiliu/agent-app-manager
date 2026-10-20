@@ -1107,6 +1107,199 @@ function cmdRestart(ctx, ref) {
   });
 }
 
+// 移除注册表条目；运行记录与日志证据一律保留。仅允许无存活受管实例时移除：
+// RUNNING 核验存活一律拒绝（CONFLICT）；STARTING/UNKNOWN 未结记录按既有 ack 流程（核验已退出才可放弃）。
+function cmdRemove(ctx, ref) {
+  if (!ref) throw usageError('remove 需要 <alias|appId>');
+  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
+  const reg0 = readRegistry(ctx.home);
+  const appId = resolveAppId(reg0, ref);
+  return withLock(ctx.home, appId, 'remove', () => {
+    const reg = readRegistry(ctx.home);
+    const app = reg.apps[appId];
+    if (!app) throw notFoundError(`未找到应用：${ref}（可用 list 查看）`);
+    const rt = readRuntimeStrict(ctx.home, appId);
+    let abandonedRunId = null;
+    if (rt && rt.current && rt.current.managed) {
+      const st = computeStatus(ctx.home, appId, rt);
+      if (st.writeback && rt.current) writeRuntime(ctx.home, appId, rt); // RUNNING→STOPPED 按 OS 事实落账（已在应用锁内）
+      if (st.status === 'RUNNING') {
+        throw conflictError('INSTANCE_RUNNING',
+          `${app.alias} 有受管实例在运行（pid=${st.pid ?? rt.current.pid}），拒绝移除；先 stop 确认退出后再 remove`,
+          { runId: rt.current.runId, pid: st.pid ?? rt.current.pid });
+      }
+      if (st.status !== 'STOPPED') {
+        // STARTING/UNKNOWN/无法识别的 phase：未结记录，默认拒绝；显式 ack 且复核通过才归档旧账
+        const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
+        if (abandon) {
+          archiveCurrent(rt, { reason: 'abandoned-by-ack' }); // 完整身份与日志证据保留在 prevRuns 并注明原因
+          writeRuntime(ctx.home, appId, rt);
+          abandonedRunId = abandon.runId;
+        }
+      }
+    }
+    delete reg.apps[appId];
+    atomicWriteJson(registryPath(ctx.home), reg);
+    return {
+      appId, alias: app.alias, removed: true,
+      runtimeFile: runtimePath(ctx.home, appId),
+      logsDir: path.join(ctx.home, 'logs', appId),
+      ...(abandonedRunId ? { abandonedRunId, abandonedReason: 'abandoned-by-ack' } : {}),
+      note: '注册表条目已移除；运行记录与日志证据保留。超保留期历史批次日志可用 prune 回收',
+    };
+  });
+}
+
+// ---------- prune：回收三类残留（默认 dry-run，--apply 才真正删除） ----------
+// 1) logs/<appId>/ 超保留期历史批次日志：保留 current + prevRuns（≤PREV_RUNS_KEEP）引用的 runId，其余回收；
+//    逐应用在应用锁内判定，避免与并发启动/停止竞争（锁忙/损坏/缺 pwsh 时跳过该应用并注明）。
+// 2) locks/*.lock.stale-* 死锁回收残留。
+// 3) 数据目录内 .tmp-<pid>-<hex> 原子写孤儿临时文件（近期修改的可能是进行中的原子写，跳过）。
+// 边界：绝不删 current 运行日志与 runtime/registry 证据；不跟随符号链接、不触碰 home 之外的文件；
+// 运行记录损坏按 DATA_* 契约整体拒绝（无法判定保留范围时绝不删任何文件）。
+
+const STALE_LOCK_RE = /^[A-Za-z0-9._-]+\.lock\.stale-\d+$/;
+const TMP_ORPHAN_RE = /^\.tmp-\d+-[0-9a-f]+$/;
+const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log$/;
+const TMP_ORPHAN_RECENT_MS = 60 * 1000;
+
+const fileSizeOf = (p) => { try { return fs.statSync(p).size; } catch { return 0; } };
+
+// 只收集 home 内的普通文件；不跟随任何符号链接，绝不触碰 home 之外的文件
+function walkHomeFiles(root) {
+  const out = [];
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      const p = path.join(dir, name);
+      let st;
+      try {
+        st = fs.lstatSync(p);
+      } catch {
+        continue;
+      }
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) visit(p);
+      else if (st.isFile()) out.push(p);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+function planPrune(home) {
+  const plan = { logs: [], staleLocks: [], tmpOrphans: [], skipped: [] };
+  const logsDir = path.join(home, 'logs');
+  for (const appId of fs.existsSync(logsDir) ? fs.readdirSync(logsDir) : []) {
+    const dir = path.join(logsDir, appId);
+    let st;
+    try {
+      st = fs.statSync(dir);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    if (!ID_RE.test(appId)) {
+      plan.skipped.push({ kind: 'logs', target: dir, reason: '目录名不是合法 appId，跳过' });
+      continue;
+    }
+    if (!fs.existsSync(runtimePath(home, appId))) {
+      plan.skipped.push({ kind: 'logs', target: dir, reason: '无运行记录可判定保留范围，跳过' });
+      continue;
+    }
+    try {
+      withLock(home, appId, 'prune', () => {
+        const rt = readRuntimeStrict(home, appId); // 损坏/不兼容 → DATA_* 向上抛，prune 整体拒绝
+        const retain = new Set((rt?.prevRuns ?? []).map((p) => p.runId));
+        if (rt?.current?.runId) retain.add(rt.current.runId);
+        const files = [];
+        for (const name of fs.readdirSync(dir)) {
+          const m = RUN_LOG_FILE_RE.exec(name);
+          if (!m || retain.has(m[1])) continue;
+          const file = path.join(dir, name);
+          files.push({ runId: m[1], stream: m[2], file, size: fileSizeOf(file) });
+        }
+        if (files.length) plan.logs.push({ appId, files });
+      });
+    } catch (e) {
+      // 锁忙/锁损坏/缺 pwsh：只跳过该应用的日志回收，不阻塞其余残留清理
+      if (e instanceof ManagerError && ['LOCK_BUSY', 'LOCK_CORRUPT', 'PWSH_MISSING'].includes(e.code)) {
+        plan.skipped.push({ kind: 'logs', target: dir, reason: `${e.code}: ${e.message}` });
+        continue;
+      }
+      throw e;
+    }
+  }
+  const locksDir = path.join(home, 'locks');
+  for (const name of fs.existsSync(locksDir) ? fs.readdirSync(locksDir) : []) {
+    if (!STALE_LOCK_RE.test(name)) continue;
+    const file = path.join(locksDir, name);
+    plan.staleLocks.push({ file, size: fileSizeOf(file) });
+  }
+  const recentCutoff = Date.now() - TMP_ORPHAN_RECENT_MS;
+  for (const file of walkHomeFiles(home)) {
+    if (!TMP_ORPHAN_RE.test(path.basename(file))) continue;
+    let mtimeMs = 0;
+    try {
+      mtimeMs = fs.statSync(file).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (mtimeMs >= recentCutoff) {
+      plan.skipped.push({ kind: 'tmp', target: file, reason: '近期修改，可能是进行中的原子写，跳过' });
+      continue;
+    }
+    plan.tmpOrphans.push({ file, size: fileSizeOf(file) });
+  }
+  return plan;
+}
+
+function applyPrune(plan) {
+  const apply = (items, kind) => {
+    const removed = [];
+    for (const item of items) {
+      try {
+        fs.unlinkSync(item.file);
+        removed.push(item);
+      } catch (e) {
+        if (e.code === 'ENOENT') plan.skipped.push({ kind, target: item.file, reason: '删除时已不存在（可能已被并发操作清理）' });
+        else throw dataError('DATA_UNWRITABLE', `回收失败（${item.file}）：${e.message}`);
+      }
+    }
+    return removed;
+  };
+  for (const app of plan.logs) app.files = apply(app.files, 'logs');
+  plan.logs = plan.logs.filter((a) => a.files.length);
+  plan.staleLocks = apply(plan.staleLocks, 'locks');
+  plan.tmpOrphans = apply(plan.tmpOrphans, 'tmp');
+}
+
+function cmdPrune(ctx) {
+  const opts = parseNamed(ctx.rest, { '--dry-run': 'flag', '--apply': 'flag' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  if (opts.has('--dry-run') && opts.has('--apply')) throw usageError('--dry-run 与 --apply 不能同时使用');
+  const dryRun = !opts.has('--apply'); // 默认 dry-run：只打印将删内容，--apply 才真正删除
+  const plan = planPrune(ctx.home);
+  if (!dryRun) applyPrune(plan);
+  const all = [...plan.logs.flatMap((a) => a.files), ...plan.staleLocks, ...plan.tmpOrphans];
+  return {
+    dryRun,
+    logs: plan.logs,
+    staleLocks: plan.staleLocks,
+    tmpOrphans: plan.tmpOrphans,
+    skipped: plan.skipped,
+    summary: { files: all.length, bytes: all.reduce((n, f) => n + (f.size ?? 0), 0) },
+    note: dryRun ? '默认 dry-run：未删除任何文件；确认后加 --apply 执行删除' : '已删除以上文件；current 运行日志与 runtime/registry 证据一律保留',
+  };
+}
+
 function readTailLines(file, n) {
   const want = Math.min(Math.max(1, n), MAX_LOG_LINES);
   const size = fs.statSync(file).size;
@@ -1142,7 +1335,7 @@ function resolveLogFile(home, ref, run, stream = 'stdout') {
   // 非受管记录没有批次日志（设计边界：只记录日志线索，不接管日志）；报错要说清去哪找，不伪装成日志丢失
   if (!run && cur && !cur.managed) {
     const hints = (cur.logHints ?? []).filter((h) => typeof h === 'string' && h);
-    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（直接读取线索路径，或在 manager ui 的日志源中选择）`);
+    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（可用 logs ${ref} --src hint:N 读取线索，或在 manager ui 的日志源中选择）`);
   }
   if (prev && !prev.managed) {
     throw notFoundError(`runId=${runId} 为非受管记录，无批次日志；请按项目脚本输出路径或在 manager ui 的日志源中选择`);
@@ -1329,10 +1522,57 @@ function readProjectFile(home, ref, rel = '', offset = 0) {
 
 function cmdLogs(ctx, ref) {
   if (!ref) throw usageError('logs 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--lines': 'value', '--run': 'value', '--stream': 'value', '--follow': 'flag' });
+  const opts = parseNamed(ctx.rest.slice(1), { '--lines': 'value', '--run': 'value', '--stream': 'value', '--follow': 'flag', '--src': 'value', '--list-sources': 'flag' });
   const lines = opts.has('--lines') ? Number.parseInt(opts.get('--lines'), 10) : 200;
   if (!Number.isInteger(lines) || lines < 1) throw usageError('--lines 需要正整数');
-  const t = resolveLogFile(ctx.home, ref, opts.get('--run'), opts.get('--stream') ?? 'stdout');
+
+  // 统一日志源列表：与 ui 的日志源选择器同一数据（run:批次 / hint:非受管线索 / tmp:.tmp 兼容日志）
+  if (opts.has('--list-sources')) {
+    if (opts.has('--src') || opts.has('--run') || opts.has('--stream') || opts.has('--follow')) {
+      throw usageError('--list-sources 只列出日志源，不能与 --src/--run/--stream/--follow 同时使用');
+    }
+    return { ...listSources(ctx.home, ref), note: '用 logs <alias|appId> --src <src> 读取对应日志源（可配合 --lines/--follow）' };
+  }
+
+  // 统一日志源读取：复用 ui 的 resolveSource，--src 已完整定位文件，与 --run/--stream 互斥
+  const src = opts.get('--src');
+  if (src != null) {
+    if (opts.has('--run') || opts.has('--stream')) throw usageError('--src 已指定日志源，不能与 --run/--stream 同时使用');
+    const t = resolveSource(ctx.home, ref, src);
+    if (!fs.existsSync(t.file)) throw notFoundError(`日志不存在（src=${src}）`);
+    if (opts.has('--follow')) {
+      if (ctx.json) throw usageError('--follow 与 --json 不兼容');
+      const reg = readRegistry(ctx.home);
+      const rt = readRuntimeStrict(ctx.home, t.appId);
+      // hint/tmp 源没有受管身份，followLogs 会提示无法自动结束，直到 Ctrl+C
+      followLogs(ctx, t.appId, reg.apps[t.appId], rt, t.runId, t.stream, t.file, lines);
+      return { following: true };
+    }
+    const r = readTailLines(t.file, lines);
+    return { appId: t.appId, alias: t.alias, src, runId: t.runId, stream: t.stream, lines: r.lines, truncated: r.truncated, skippedBytes: r.skippedBytes, file: t.file };
+  }
+
+  const stream = opts.get('--stream') ?? 'stdout';
+  if (!['stdout', 'stderr', 'both'].includes(stream)) throw usageError('--stream 只能是 stdout、stderr 或 both');
+  // 双流合并：复用 stdout 路径的校验（应用/runId 归属/非受管拒绝），stderr 按同批次路径派生
+  if (stream === 'both') {
+    if (opts.has('--follow')) throw usageError('--stream both 不支持 --follow；请选择单一数据流跟随');
+    const t = resolveLogFile(ctx.home, ref, opts.get('--run'), 'stdout');
+    const files = { stdout: t.file, stderr: path.join(path.dirname(t.file), `${t.runId}.stderr.log`) };
+    const has = { stdout: fs.existsSync(files.stdout), stderr: fs.existsSync(files.stderr) };
+    if (!has.stdout && !has.stderr) throw notFoundError(`日志不存在（runId=${t.runId}, stream=stdout/stderr）`);
+    const parts = {};
+    for (const s of ['stdout', 'stderr']) if (has[s]) parts[s] = readTailLines(files[s], lines);
+    return {
+      appId: t.appId, alias: t.alias, runId: t.runId, stream: 'both',
+      lines: mergeStreamTails(parts.stdout?.lines ?? [], parts.stderr?.lines ?? []),
+      truncated: { stdout: parts.stdout?.truncated ?? false, stderr: parts.stderr?.truncated ?? false },
+      skippedBytes: { stdout: parts.stdout?.skippedBytes ?? 0, stderr: parts.stderr?.skippedBytes ?? 0 },
+      files,
+      missingStreams: Object.keys(has).filter((s) => !has[s]),
+    };
+  }
+  const t = resolveLogFile(ctx.home, ref, opts.get('--run'), stream);
   if (!fs.existsSync(t.file)) throw notFoundError(`日志不存在（runId=${t.runId}, stream=${t.stream}）`);
   if (opts.has('--follow')) {
     if (ctx.json) throw usageError('--follow 与 --json 不兼容');
@@ -1343,6 +1583,19 @@ function cmdLogs(ctx, ref) {
   }
   const r = readTailLines(t.file, lines);
   return { appId: t.appId, alias: t.alias, runId: t.runId, stream: t.stream, lines: r.lines, truncated: r.truncated, skippedBytes: r.skippedBytes, file: t.file };
+}
+
+// 双流合并：批次日志没有统一时间戳，按各自行在尾部中的相对位置比例交替归并；
+// 只保证各流内顺序稳定、整体确定性（相同输入必得相同输出），不冒充精确时间序
+function mergeStreamTails(a, b) {
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (j >= b.length || (i < a.length && (i + 1) / a.length <= (j + 1) / b.length)) out.push({ stream: 'stdout', line: a[i++] });
+    else out.push({ stream: 'stderr', line: b[j++] });
+  }
+  return out;
 }
 
 function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
@@ -1566,14 +1819,47 @@ function renderHuman(command, data) {
       ].filter(Boolean).join('\n');
     case 'stop':
       return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.note ? `；${data.note}` : ''}`;
+    case 'remove':
+      return [
+        `已移除登记 ${data.alias} (${data.appId})`,
+        data.abandonedRunId ? `已显式放弃未结记录 run=${data.abandonedRunId}（${data.abandonedReason}），证据保留在 prevRuns` : null,
+        `运行记录保留: ${data.runtimeFile}`,
+        `日志目录保留: ${data.logsDir}`,
+        data.note ?? '',
+      ].filter(Boolean).join('\n');
+    case 'prune': {
+      const lines = [data.dryRun
+        ? 'prune 预览（默认 dry-run，未删除任何文件；确认后加 --apply 执行）'
+        : 'prune 完成，已删除以下文件'];
+      let any = false;
+      for (const a of data.logs) for (const f of a.files) { any = true; lines.push(`- [超保留期批次日志] ${f.file}（${f.size} 字节，run=${f.runId}.${f.stream}，appId=${a.appId}）`); }
+      for (const f of data.staleLocks) { any = true; lines.push(`- [死锁残留] ${f.file}（${f.size} 字节）`); }
+      for (const f of data.tmpOrphans) { any = true; lines.push(`- [孤儿临时文件] ${f.file}（${f.size} 字节）`); }
+      for (const s of data.skipped) lines.push(`  跳过 ${s.target}：${s.reason}`);
+      if (!any) lines.push(data.dryRun ? '无可回收残留' : '无文件被删除');
+      lines.push(`共 ${data.summary.files} 个文件 / ${data.summary.bytes} 字节${data.dryRun ? '可回收' : '已删除'}`);
+      return lines.join('\n');
+    }
     case 'restart':
       return [
         `restart ${data.alias}: stop=${data.stop.result} → start run=${data.start.runId} pid=${data.start.pid} status=${data.start.status}`,
         `stdout=${data.start.logPaths.stdout}`,
         data.note ?? '',
       ].filter(Boolean).join('\n');
-    case 'logs':
+    case 'logs': {
+      if (data.sources) {
+        return [
+          `${data.alias} (${data.appId}) 的日志源（* 为当前运行）：`,
+          ...data.sources.map((s) => `${s.current ? '*' : ' '} ${s.src}  ${s.kind}${s.stream ? `/${s.stream}` : ''}  ${s.size} 字节  ${s.label}`),
+          data.note ?? null,
+        ].filter(Boolean).join('\n');
+      }
+      if (data.stream === 'both') {
+        const body = data.lines.map((l) => `[${l.stream}] ${l.line}`).join('\n');
+        return data.missingStreams?.length ? `${body}${body ? '\n' : ''}（无 ${data.missingStreams.join('/')} 日志文件）` : body;
+      }
       return data.lines.join('\n');
+    }
     default:
       return JSON.stringify(data, null, 2);
   }
@@ -1589,7 +1875,10 @@ function usageText() {
     '  start <alias|appId> [--ack-unresolved <runId>]   用已保存配置启动（任意目录可用）',
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
-    '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
+    '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
+    '       [--src <run:…|hint:N|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
+    '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
+    '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
     '  ui [--port N]                     本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌，Ctrl+C 退出）',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
@@ -1604,8 +1893,8 @@ function usageText() {
     '                           manager 拉起 cmd wrapper 后在后代中按映像基名发现',
     '                           唯一真实目标并托管；多个匹配拒绝任选（discoverTimeoutMs 可调）',
     '',
-    'STARTING/UNKNOWN 未结记录默认拒绝启动（UNRESOLVED_RUN）；人工核验进程已退出后，',
-    '用 --ack-unresolved <runId> 显式放弃旧账并重启：start <ref> --ack-unresolved <runId>',
+    'STARTING/UNKNOWN 未结记录默认拒绝启动或移除（UNRESOLVED_RUN）；人工核验进程已退出后，',
+    '用 --ack-unresolved <runId> 显式放弃旧账：start <ref> --ack-unresolved <runId> 重启，或 remove <ref> --ack-unresolved <runId> 移除登记',
     '',
     '退出码：0 成功 | 1 用法 | 2 未找到 | 3 状态冲突 | 4 环境依赖 | 5 数据损坏',
   ].join('\n');
@@ -1613,7 +1902,7 @@ function usageText() {
 
 // ---------- 供 manager-ui 复用的只读数据层 ----------
 
-export { resolveHome, cmdList, cmdStatus, listRuns, resolveLogFile };
+export { resolveHome, cmdList, cmdStatus, listRuns, resolveLogFile, listSources, resolveSource };
 
 // ---------- 入口 ----------
 
@@ -1632,8 +1921,8 @@ async function main() {
   try {
     let data;
     const refCommands = new Set(['status', 'stop', 'restart']);
-    if (command === 'start') {
-      if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError('start 需要 <alias|appId>');
+    if (command === 'start' || command === 'remove') {
+      if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
     } else if (refCommands.has(command)) {
       const bad = ctx.rest.find((a, i) => i > 0 || a.startsWith('--'));
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
@@ -1645,6 +1934,8 @@ async function main() {
       case 'start': data = cmdStart(ctx, ctx.rest[0]); break;
       case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
       case 'restart': data = cmdRestart(ctx, ctx.rest[0]); break;
+      case 'remove': data = cmdRemove(ctx, ctx.rest[0]); break;
+      case 'prune': data = cmdPrune(ctx); break;
       case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;
       case 'start-new': data = cmdStartNew(ctx); break;
       case 'record-unmanaged': data = cmdRecordUnmanaged(ctx); break;
