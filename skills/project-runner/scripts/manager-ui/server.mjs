@@ -129,14 +129,23 @@ export async function startUiServer({ home, port = 0, openBrowser = false, idleE
   const server = http.createServer(handle);
   server.on('error', (e) => console.error(`[project-runner ui] ${e.message}`));
   server.on('close', () => { try { fs.unlinkSync(uiStateFile); } catch { /* 已清 */ } });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
-      server.removeListener('error', reject);
-      boundPort = server.address().port;
-      resolve();
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        server.removeListener('error', reject);
+        boundPort = server.address().port;
+        resolve();
+      });
     });
-  });
+  } catch (e) {
+    if (e.code === 'EADDRINUSE') {
+      console.error(`[project-runner ui] 端口 ${port} 被占用：可能已有管理台在运行（用当时的带令牌地址访问），或改用 --port 指定其他端口`);
+      process.exitCode = 3;
+      return;
+    }
+    throw e;
+  }
   const url = `http://127.0.0.1:${boundPort}/?token=${token}`;
   // ui.json 供 start 类命令判重（存活则复用不重复拉起）；令牌仅存于本机数据目录
   fs.writeFileSync(uiStateFile, JSON.stringify({ schemaVersion: SCHEMA_VERSION, port: boundPort, token, pid: process.pid, startedAt: new Date().toISOString() }, null, 2) + '\n');

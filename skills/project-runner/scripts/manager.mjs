@@ -1060,7 +1060,7 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
 async function cmdUi(ctx) {
   const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag', '--no-open': 'flag', '--idle-exit': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
-  let port = 0;
+  let port = 8198; // 默认固定端口（与单项目 Viewer 8199 相邻）；被占用时给出友好提示，--port 0 可显式随机
   if (opts.has('--port')) {
     port = Number.parseInt(opts.get('--port'), 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError('--port 需要 0-65535 的整数（0 为随机端口）');
@@ -1111,10 +1111,15 @@ async function autoLaunchUi(ctx) {
     process.stdout.write(`管理台已在运行：http://127.0.0.1:${state.port}/?token=${state.token}\n`);
     return;
   }
-  spawn(process.execPath, [fileURLToPath(import.meta.url), '--home', ctx.home, 'ui', '--open', '--idle-exit', '30'], {
-    detached: true, stdio: 'ignore', windowsHide: true,
-  }).unref();
-  process.stdout.write('已自动拉起管理台（空闲 30 分钟自动退出），浏览器将自动打开\n');
+  // 默认端口被非本 home 的实例占用时，自动回退随机端口，保证拉起成功
+  const spawnArgs = [fileURLToPath(import.meta.url), '--home', ctx.home, 'ui', '--open', '--idle-exit', '30'];
+  let note = '已自动拉起管理台（默认端口 8198，空闲 30 分钟自动退出），浏览器将自动打开';
+  if (await probeUi(8198)) {
+    spawnArgs.push('--port', '0');
+    note = '默认端口 8198 被占用，已自动拉起管理台（改用随机端口，空闲 30 分钟自动退出）';
+  }
+  spawn(process.execPath, spawnArgs, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  process.stdout.write(note + '\n');
 }
 
 // ---------- 简单选项解析 ----------
@@ -1245,7 +1250,7 @@ function usageText() {
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
-    '  ui [--port N] [--idle-exit <分钟>] [--no-open]   本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）',
+    '  ui [--port N] [--idle-exit <分钟>] [--no-open]   本地只读 Web 管理台（默认端口 8198；--port 0 随机；Ctrl+C 退出）',
     '',
     'start 类命令在人工模式（非 --json）成功后默认自动拉起管理台；--no-ui 可关闭。',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
