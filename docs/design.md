@@ -1,7 +1,7 @@
 # Project Runner 跨项目运行管理
 
 > 设计版本：v2（收敛版，替代 v1）
-> 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过。**AC03 分层结论（2026-10-19 隔离环境实测）**：L1（manager 进程退出后受管 JVM 存活）与 L2（全新 node 进程核验现状/读日志/停止/再启动）已通过；**L3（真实 pi/Agent 会话退出后的存活）仍为开放项**，需在 run 结束后的宿主/后续会话中按 §7.1 的判据补验，未补验前不得宣称 AC03 全量通过。实测命令与原始输出见 `docs/verification/ac03-l1-l2-evidence.md`。2026-10-20 新增 `manager ui` 本地只读管理台（§2.2、AC08），"简单部署"原则、非目标与 P2 表述已同步调整。
+> 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过。**AC03 分层结论：全量通过**（L1/L2 于 2026-10-19 隔离环境实测；L3「真实 pi 会话退出后的存活」于 2026-10-20 按同判据补验通过——真实嵌套 pi 会话正常退出后，会话外全新进程实测 status/logs/stop 四项判据全过，Managed 启动路径无需阻塞）。实测命令与原始输出见 `docs/verification/ac03-l1-l2-evidence.md`（L3 见其 §4.5）。若未来更换运行器或宿主调度层（尤其新增 `KILL_ON_JOB_CLOSE` 包裹），须按同一判据重验后方可宣称 AC03 兼容。2026-10-20 新增 `manager ui` 本地只读管理台（§2.2、AC08），"简单部署"原则、非目标与 P2 表述已同步调整。
 > **v2.3（2026-10-21，多语言）**：受管范围由 JVM 推广到任意真实可执行进程——desc `mode` 扩展为 `java|jrebel|python|node|proc`；`resolveExe` 收紧为"必须解析为 .exe/.com 真实可执行文件"，拒绝 `.cmd`/`.bat`/`.ps1` 包装与 `Microsoft\WindowsApps` 应用执行别名 reparse point（npm/pnpm 等 shim 场景须先解析到底层 `node <entry>.js`）；`.tmp` 兼容日志新增 `runner-local-*` 通用名。生命周期、未结记录、锁与 ui 机制全部不变；冒烟见 `scripts/test/runtime-smoke.mjs`。
 > **v2.4（2026-10-21，命令模式）**：desc 新增 `command` + `expectedImage`（+可选 `discoverTimeoutMs`），与 `exe/args` 二选一。manager 亲自用 `cmd /d /s /c <command>` 拉起脚本/复合命令（`npm run dev`、`mvn spring-boot:run`、`*.cmd` 编排等），再按 PPID 链在后代进程中有界轮询匹配 `expectedImage` 映像基名：首次匹配后再观察 ~1.5s 取最终清单（防"假唯一"），恰好 1 个 → 采集 pid+创建时间+映像进既有受管模型（kind=`command`，wrapper 身份一并记录供清理佐证）；≥2 个 → `DISCOVERY_AMBIGUOUS` 拒绝并列候选，wrapper 留证标 UNKNOWN；wrapper 先退出且无目标 → `SPAWN_FAILED`；超时 → UNKNOWN。`stop` 终止目标进程（同句柄核验不变）并尽力终止残留 wrapper；`restart`=`stop`+重放命令+重新发现。**实测约束**：detached（无控制台）cmd wrapper 的后代 stdout 句柄全部失效（echo/node/ping 写入丢失），故命令模式 wrapper **不 detach**，共享 manager 控制台——agent 管道调用下 manager 本无控制台不受影响；交互终端启动则终端关闭会带走应用（命令模式已知边界）。安全边界不变：管理目标仍只能是 manager 自己启动的后代，不凭端口/事后断言认领外部进程。
 > 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill；日志查看能力自 v2.2 起并入 `manager ui`（原单项目 Viewer 已移除）
@@ -172,11 +172,11 @@ AC03 按三层递进取证，结论必须分层表述，不得用低层级证据
 | --- | --- | --- |
 | L1 父子脱离 | `start-new` 的 manager 进程退出后，`Get-Process -Id <pid>` 仍可查到受管 JVM，且其父 PID 已不存在 | **通过**（2026-10-19 实测） |
 | L2 新会话核验 | manager 已退出时，用全新 node 进程执行 `status`（RUNNING + 创建时间/映像核验）、`logs`（读到本批次日志）、`stop`（进程消失、再查为 STOPPED）、`start`（重新起实例） | **通过**（2026-10-19 实测） |
-| L3 真实会话退出 | 真实 pi/Agent 会话（run）结束后，受管 JVM 仍存活，且后续会话可核验/看日志/控制 | **未验证（开放）**：本次运行内无法观察 run 结束后的进程状态 |
+| L3 真实会话退出 | 真实 pi/Agent 会话（run）结束后，受管 JVM 仍存活，且后续会话可核验/看日志/控制 | **通过**（2026-10-20 实测：真实嵌套 pi 会话 `pi --print` 内受管启动，会话正常退出后，会话外全新进程实测进程存活、`status=RUNNING` 身份一致、心跳日志跨退出连续、`stop` 生效转 STOPPED——四项判据全过，详见 evidence §4.5） |
 
-L3 补验由宿主/后续会话执行，判据与命令见 `docs/verification/ac03-l1-l2-evidence.md` §4。若实测发现该运行器用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 包裹命令导致受管 JVM 一并被回收，应结论为「该运行器不具备 AC03 能力」，并按 §5 阻塞 Managed 启动，不得假报兼容。
+L3 补验已于 2026-10-20 完成（执行方式、时间线与逐项证据见 `docs/verification/ac03-l1-l2-evidence.md` §4.5）：会话 A 为真实嵌套 pi 会话（`pi --print --no-session --tools bash`，真实模型+工具调用+正常退出），受管启动探针 JVM（runId=rmvghsoag-2e3f7277，pid=32908）；会话 A 正常退出后，会话外全新进程按 §4.3 判据 (a)–(d) 逐项实测全部满足。**AC03 三层全部通过，Managed 启动路径无需阻塞**。若未来更换运行器或宿主调度层（尤其新增 `KILL_ON_JOB_CLOSE` 包裹），须按同一判据重验后方可宣称 AC03 兼容。
 
-已观测到的旁证（不构成 L3 通过）：本次运行的 pi 运行器（shell 侧）所在 Job 的 `LimitFlags=0x800`（仅 `BREAKAWAY_OK`，无 `KILL_ON_JOB_CLOSE`），且受管 JVM 不是该 Job 成员。但受管 JVM 仍归属于**另一个尚未识别**的 Job（`IsProcessInJob(any job)=yes`），本次未能取得该 Job 的 `LimitFlags`；因此该旁证只能说明「当前 shell 所在 Job 不会连带回收后代」，仍需 run 结束后实测确认。
+Job Object 观测旁证（2026-10-19/20 两次实测合并；不构成 L3 通过依据，仅解释机制）：2026-10-19 观测到运行器 shell 所在 Job 的 `LimitFlags=0x800`（仅 `BREAKAWAY_OK`，无 `KILL_ON_JOB_CLOSE`），且受管 JVM 不是该 Job 成员；2026-10-20 L3 期间进一步用系统句柄表枚举取得全部可复制 Job 句柄（115 个），其 `LimitFlags=0x0`（均无 `KILL_ON_JOB_CLOSE`）且均不包含受管 JVM；包含受管 JVM 的 Job 属主为受保护进程，`LimitFlags` 仍不可读。各已知 Job 层均不连带回收后代；run 结束后的进程实测（存活且可控）为最终判据，已通过。
 
 ## 8. 决策记录
 
