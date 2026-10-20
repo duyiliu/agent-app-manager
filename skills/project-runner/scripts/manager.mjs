@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -669,7 +670,7 @@ function statusWithFacts(home, appId) {
 // ---------- 命令实现 ----------
 
 function cmdStartNew(ctx) {
-  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value' });
+  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value', '--no-ui': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
@@ -803,7 +804,7 @@ function cmdStatus(ctx, ref) {
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
 function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value' });
+  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value', '--no-ui': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
@@ -1057,17 +1058,24 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
 // ---------- 本地只读 Web 管理台（ui，design.md §2.2 / AC08） ----------
 
 async function cmdUi(ctx) {
-  const opts = parseNamed(ctx.rest, { '--port': 'value' });
+  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag', '--no-open': 'flag', '--idle-exit': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   let port = 0;
   if (opts.has('--port')) {
     port = Number.parseInt(opts.get('--port'), 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError('--port 需要 0-65535 的整数（0 为随机端口）');
   }
+  let idleExitMinutes = 0; // 手动启动默认常驻到 Ctrl+C
+  if (opts.has('--idle-exit')) {
+    idleExitMinutes = Number.parseInt(opts.get('--idle-exit'), 10);
+    if (!Number.isInteger(idleExitMinutes) || idleExitMinutes < 0 || idleExitMinutes > 10080) throw usageError('--idle-exit 需要 0-10080 的整数分钟（0 为不自动退出）');
+  }
   const { startUiServer } = await import('./manager-ui/server.mjs');
   await startUiServer({
     home: ctx.home,
     port,
+    openBrowser: !opts.has('--no-open'),
+    idleExitMinutes,
     api: {
       list: () => cmdList(ctx),
       status: (ref) => cmdStatus(ctx, ref),
@@ -1075,6 +1083,38 @@ async function cmdUi(ctx) {
       resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
     },
   });
+}
+
+// start 类命令的人工模式默认拉起 ui：幂等（同 home 已有存活实例则只提示地址），
+// 拉起 detached 子进程自动开浏览器、空闲 30 分钟自退；--json / --no-ui 永不拉起。
+function readUiState(home) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(home, 'ui.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+function probeUi(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/', timeout: 1500 }, (res) => {
+      res.resume();
+      resolve(res.statusCode > 0);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+async function autoLaunchUi(ctx) {
+  if (ctx.json || ctx.rest.includes('--no-ui')) return;
+  const state = readUiState(ctx.home);
+  if (state?.port && await probeUi(state.port)) {
+    process.stdout.write(`管理台已在运行：http://127.0.0.1:${state.port}/?token=${state.token}\n`);
+    return;
+  }
+  spawn(process.execPath, [fileURLToPath(import.meta.url), '--home', ctx.home, 'ui', '--open', '--idle-exit', '30'], {
+    detached: true, stdio: 'ignore', windowsHide: true,
+  }).unref();
+  process.stdout.write('已自动拉起管理台（空闲 30 分钟自动退出），浏览器将自动打开\n');
 }
 
 // ---------- 简单选项解析 ----------
@@ -1205,8 +1245,9 @@ function usageText() {
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
-    '  ui [--port N]                     本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）',
+    '  ui [--port N] [--idle-exit <分钟>] [--no-open]   本地只读 Web 管理台（127.0.0.1 + 一次性令牌，Ctrl+C 退出）',
     '',
+    'start 类命令在人工模式（非 --json）成功后默认自动拉起管理台；--no-ui 可关闭。',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
     '  record-unmanaged --desc <file> [--log-hints p1,p2]   记录非受管启动尝试',
@@ -1242,7 +1283,7 @@ async function main() {
     if (command === 'start') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError('start 需要 <alias|appId>');
     } else if (refCommands.has(command)) {
-      const bad = ctx.rest.find((a, i) => i > 0 || a.startsWith('--'));
+      const bad = ctx.rest.find((a, i) => i > 0 || (a.startsWith('--') && a !== '--no-ui'));
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
       if (!ctx.rest[0]) throw usageError(`${command} 需要 <alias|appId>`);
     }
@@ -1258,6 +1299,7 @@ async function main() {
       case 'ui': await cmdUi(ctx); return; // 前台常驻直到 Ctrl+C，不走 emitOk
       default: throw usageError(`未知命令：${command}\n${usageText()}`);
     }
+    if (command === 'start' || command === 'start-new' || command === 'restart') await autoLaunchUi(ctx);
     emitOk(ctx, command, data);
   } catch (e) {
     if (e instanceof ManagerError) emitErr(ctx, command, e);

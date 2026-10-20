@@ -6,6 +6,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -39,10 +40,24 @@ function errorStatus(e) {
   }
 }
 
-export async function startUiServer({ home, port = 0, api }) {
+export async function startUiServer({ home, port = 0, openBrowser = false, idleExitMinutes = 0, api }) {
   const token = crypto.randomBytes(24).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(token).digest();
+  const uiStateFile = path.join(home, 'ui.json');
   let boundPort = port;
+  let idleTimer = null;
+  const clearIdleTimer = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
+  // 空闲自退：任何请求都会续期；浏览器标签关闭后不再有轮询，超时自动退出并清 ui.json
+  const armIdleExit = () => {
+    if (!idleExitMinutes) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      console.error(`[project-runner ui] ${idleExitMinutes} 分钟无访问，自动退出`);
+      try { fs.unlinkSync(uiStateFile); } catch { /* 已清 */ }
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 1500).unref();
+    }, idleExitMinutes * 60 * 1000);
+  };
 
   async function route(res, u) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
@@ -100,6 +115,7 @@ export async function startUiServer({ home, port = 0, api }) {
       if (!tokenOk(tokenHash, u.searchParams.get('token'))) {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '缺少或错误的访问令牌；请使用启动时打印的完整地址' } });
       }
+      armIdleExit();
     } catch (e) {
       return sendJson(res, errorStatus(e), { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: e.message } });
     }
@@ -112,6 +128,7 @@ export async function startUiServer({ home, port = 0, api }) {
 
   const server = http.createServer(handle);
   server.on('error', (e) => console.error(`[project-runner ui] ${e.message}`));
+  server.on('close', () => { try { fs.unlinkSync(uiStateFile); } catch { /* 已清 */ } });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {
@@ -120,12 +137,19 @@ export async function startUiServer({ home, port = 0, api }) {
       resolve();
     });
   });
+  const url = `http://127.0.0.1:${boundPort}/?token=${token}`;
+  // ui.json 供 start 类命令判重（存活则复用不重复拉起）；令牌仅存于本机数据目录
+  fs.writeFileSync(uiStateFile, JSON.stringify({ schemaVersion: SCHEMA_VERSION, port: boundPort, token, pid: process.pid, startedAt: new Date().toISOString() }, null, 2) + '\n');
+  if (openBrowser) {
+    spawn('cmd.exe', ['/c', 'start', '', url], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+  }
+  armIdleExit();
   process.stdout.write([
     '',
-    `[project-runner] 运行管理台（只读）: http://127.0.0.1:${boundPort}/?token=${token}`,
+    `[project-runner] 运行管理台（只读）: ${url}`,
     `  数据目录: ${home}`,
+    idleExitMinutes ? `  空闲 ${idleExitMinutes} 分钟无访问将自动退出。` : '  Ctrl+C 退出（无常驻服务，退出即停止）。',
     '  该地址包含访问令牌，请勿转发给他人；页面展示的日志可能含敏感信息。',
-    '  Ctrl+C 退出（无常驻服务，退出即停止）。',
     '',
   ].join('\n') + '\n');
   await new Promise(() => { /* 常驻直到进程被终止 */ });
