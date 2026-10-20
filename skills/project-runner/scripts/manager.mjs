@@ -1238,7 +1238,7 @@ function probeManagerUi(port) {
 }
 
 async function cmdUi(ctx) {
-  const opts = parseNamed(ctx.rest, { '--port': 'value' });
+  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   let port = 8199; // 固定端口契约；--port 0 使用随机端口
   if (opts.has('--port')) {
@@ -1250,6 +1250,7 @@ async function cmdUi(ctx) {
     await startUiServer({
       home: ctx.home,
       port,
+      open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         list: () => cmdList(ctx),
         status: (ref) => cmdStatus(ctx, ref),
@@ -1398,7 +1399,7 @@ function usageText() {
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId>             确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr] [--run <runId>] [--follow]',
-    '  ui [--port N]                     本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌，Ctrl+C 退出）',
+    '  ui [--port N] [--open]              本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌；--open 监听成功后用默认浏览器打开带令牌 URL，失败仅打印地址；Ctrl+C 退出）',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
