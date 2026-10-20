@@ -57,7 +57,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ## 1A. 非 Java 项目识别与启动（Python / Node 前端与后端 / 其他栈）
 
-非 Java 项目遵循同一证据纪律：先项目事实、再本机事实、端口不猜默认值、歧义即停。受管要求与 Java 完全一致——manager 只对**真实可执行进程**（解析为 `.exe`/`.com`）做托管：脚本包装（`.cmd`/`.bat`/`.ps1`）、转发 shim、WindowsApps 应用执行别名（AppX reparse point，含未安装应用的 0 字节 stub）会被 `start-new` 以 `CONFIG_INVALID` 拒绝，遇到它们必须先解析到底层真实进程，解析不了就按第 8 节非受管路径登记，不得伪造托管。desc 的 `mode` 取值：`python`、`node`、`proc`（其他真实进程，如 Go 产物、dotnet、php）。
+非 Java 项目遵循同一证据纪律：先项目事实、再本机事实、端口不猜默认值、歧义即停。受管按优先级三选一——① **exe 直连**（`exe`+`args` 解析为真实 `.exe`/`.com`，detached 最干净）；② **命令模式**（`command`+`expectedImage`：manager 拉起 cmd wrapper 执行脚本/复合命令，再按 PPID 后代发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run`、`.cmd`/`.ps1` 编排、turbo/nx 等解析不了唯一入口的场景；后代多候选 `DISCOVERY_AMBIGUOUS` 拒绝任选）；③ **非受管登记**（前两者都不行才走，不得伪造托管）。脚本包装、转发 shim、WindowsApps 应用执行别名直接填 `exe` 会被 `CONFIG_INVALID` 拒绝。desc 的 `mode` 取值：`python`、`node`、`proc`（其他真实进程，如 Go 产物、dotnet、php）。
 
 ### Python
 
@@ -75,15 +75,16 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 4. **受管启动形态（关键）**：`npm run dev`/`pnpm dev`/`yarn dev` 在 Windows 下经 `.cmd` shim + cmd 包装拉起真实 node——包装进程不是受管目标，`.cmd` 也会被 manager 直接拒绝。**受管做法是把 script 映射为真实 node 入口**：
    - script 形如 `<bin> <args…>`：读 `node_modules/.bin/<bin>.cmd` 里被调用的 js 入口（`%dp0%` 相对路径），或读对应包的 `package.json` `bin` 字段解析。常见映射：vite→`node_modules/vite/bin/vite.js`，vue-cli-service→`node_modules/@vue/cli-service/bin/vue-cli-service.js`，react-scripts→`node_modules/react-scripts/scripts/start.js`，next→`node_modules/next/dist/bin/next`，nuxt→`node_modules/nuxt/bin/nuxt.mjs`，ng→`node_modules/@angular/cli/bin/ng.js`（`.mjs`/`.cjs` 同理）。
    - script 形如 `node <file>`（Node 后端）→ 该文件即 args[0]。
-   - 复合命令（`&&` 串联、`cross-env KEY=V <bin>`）：把最终真正拉起服务的那个进程解析出来；`cross-env` 注入的**非敏感字面值**（如 `PORT=3001`）在调用 `start-new` 的进程环境里设置同名变量即可（manager 会把当前环境整体传给子进程），敏感值用 `envRefs` 只记名称；解析不了就转非受管。
-   - desc：`exe`=真实 `node.exe`（`where node` 解析；agent 自身运行在 Node 上时直接用 `process.execPath` 更可靠），`args`=[入口 js 路径, 其余参数]，`cwd`=项目根，`mode`=`node`。
-   - 无法解析唯一入口（turbo/nx 并行编排、自定义 shell 串联等）→ 报 `UNSUPPORTED_LAUNCH` 类限制说明后按原授权执行项目命令，`record-unmanaged` 登记日志线索（`--log-hints` 指向 `.tmp/runner-local-*` 日志），不伪造托管。
+   - 复合命令（`&&` 串联、`cross-env KEY=V <bin>`）：把最终真正拉起服务的那个进程解析出来；`cross-env` 注入的**非敏感字面值**（如 `PORT=3001`）在调用 `start-new` 的进程环境里设置同名变量即可（manager 会把当前环境整体传给子进程），敏感值用 `envRefs` 只记名称。
+   - desc（直连）：`exe`=真实 `node.exe`（`where node` 解析；agent 自身运行在 Node 上时直接用 `process.execPath` 更可靠），`args`=[入口 js 路径, 其余参数]，`cwd`=项目根，`mode`=`node`。
+   - **解析不了唯一入口时的命令模式**：`command`=`npm run dev`/`pnpm dev`/原始项目命令原样，`expectedImage`=`node.exe`，`mode`=`node`——manager 拉 cmd wrapper 后在后代中自动定位真实 node 进程托管（含 turbo/nx、自定义串联）。若后代出现多个 node.exe（并行编排多服务）→ `DISCOVERY_AMBIGUOUS` 拒绝并报候选，此时才转非受管。
+   - 命令模式与直连都不可行 → 报 `UNSUPPORTED_LAUNCH` 类限制说明后按原授权执行项目命令，`record-unmanaged` 登记日志线索（`--log-hints` 指向 `.tmp/runner-local-*` 日志），不伪造托管。
 5. **[比对] 端口**：以实际输出/配置为准；`vite.config.*`/`vue.config.js`/`next.config.*`/`.env*` 中的 `server.port`/`PORT` 优先于框架默认（vite 5173、next 3000、ng 4200、vue-cli 8080）。注意 vite 等在端口被占用时可能自动换用下一个端口并在输出中说明——就绪端口以实际输出为准，不是配置文件。`.env*` 只读取值，不改写、不外泄。
 6. **热更新**：前端 dev server 的 HMR/文件监听是框架能力，不是本 Skill 承诺；验证方式=改动源文件后看 dev server 输出或页面。Python 同理（uvicorn `--reload`、flask debug 等由项目配置决定，不擅自添加参数）。
 
 ### 其他栈（Go / .NET / PHP / Rust 等）
 
-唯一要求是解析出**真实可执行进程**：`go run`、`dotnet run`、`npm run` 这类工具链命令的目标进程是它们的子进程，受管形态应是编译产物 exe、`dotnet <app>.dll`、`php -S`/`php artisan serve`（真实 `php.exe`+参数）这类"运行时+产物"形态。解析不出唯一目标进程就走非受管登记，`mode`=`proc`。
+受管形态首选**真实可执行进程**直连：编译产物 exe、`dotnet <app>.dll`、`php -S`/`php artisan serve`（真实 `php.exe`+参数）这类"运行时+产物"形态。`go run`、`dotnet run` 这类工具链命令的目标是子进程——可直接用命令模式（`command`=原命令，`expectedImage`=最终服务进程映像基名如 `dotnet.exe`/`app.exe`/`php.exe`）托管；两者都不行才走非受管登记，`mode`=`proc`。
 
 ## 2. 展示匹配结果与处理不确定项
 
@@ -183,8 +184,11 @@ node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json]
 
 Agent 使用规程：
 
-1. **首次启动（受管登记）**：按第 1/1A 节完成项目识别、第 3/4 节完成命令匹配与启动前检查后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`|`python`|`node`|`proc`）、`exe`（**必须解析为真实可执行进程**：Java 为真实 JDK bin 的 `java.exe`——裸名 `java` 先取 `JAVA_HOME` 再查 PATH，解析到 Oracle javapath 转发 shim 会被拒绝，shim 会让真实 JVM 变成子进程导致日志句柄不落地、终止错位；Python 为 venv/真实 `python.exe`；Node 前端/后端为 `node.exe`+入口 js。`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps 0 字节 stub 一律拒绝——先按第 1A 节解析到底层真实进程再登记）、`args`（字符串数组：Java 为 `-cp`/`-jar`+主类/参数含 JRebel agent 参数；Python/Node 为脚本/模块与参数）、`envRefs`（仅环境变量**名称**数组，值不落注册表；manager 启动子进程时把当前环境整体传入，`envRefs` 仅作已解析名称的证据记录——需要注入非敏感字面值时在调用 `start-new` 的进程环境里设置同名变量）、`expectedPort`。manager 按“持久化意图 → detached 启动 → 同句柄身份采集 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定。
-2. **非受管启动**：项目只有启动脚本且无法安全定位目标进程（包装进程、多进程编排、远端拉起）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移；非 Java 项目脚本日志按第 4 节放到 `.tmp/runner-local-*`）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
+1. **首次启动（受管登记）**：按第 1/1A 节完成项目识别、第 3/4 节完成命令匹配与启动前检查后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`|`python`|`node`|`proc`），受管形态二选一——**直连** `exe`+`args`，或**命令模式** `command`+`expectedImage`：
+   - `exe`：**必须解析为真实可执行进程**。Java 为真实 JDK bin 的 `java.exe`（裸名 `java` 先取 `JAVA_HOME` 再查 PATH，Oracle javapath 转发 shim 会被拒绝——shim 让真实 JVM 变成子进程导致日志句柄不落地、终止错位）；Python 为 venv/真实 `python.exe`；Node 为 `node.exe`+入口 js。`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps 0 字节 stub 一律拒绝。
+   - `command`：完整命令行字符串（`npm run dev`、`mvn spring-boot:run`、`.cmd`/`.ps1` 脚本、复合命令），manager 经 `cmd /d /s /c` 拉起 wrapper 后按 PPID 后代发现目标；`expectedImage` 为目标进程映像基名（`node.exe`/`java.exe`/`dotnet.exe` 等）；可选 `discoverTimeoutMs`（默认 45000，慢启动可调大至 120000）。后代唯一匹配 → 托管；多候选 → `DISCOVERY_AMBIGUOUS` 拒绝并列清单（此时收编命令或转非受管）；wrapper 已退无目标 → `SPAWN_FAILED`；超时 → `DISCOVERY_TIMEOUT` 留证 UNKNOWN。命令模式 wrapper 不 detach，交互终端启动时应用随控制台生命周期；**不接受 args**（参数写进 command 本身）。
+   - `args`（仅直连，字符串数组：Java 为 `-cp`/`-jar`+主类/参数含 JRebel agent 参数；Python/Node 为脚本/模块与参数）、`envRefs`（仅环境变量**名称**数组，值不落注册表；manager 启动子进程时把当前环境整体传入，`envRefs` 仅作已解析名称的证据记录——需要注入非敏感字面值时在调用 `start-new` 的进程环境里设置同名变量）、`expectedPort`。manager 按“持久化意图 → 启动 → 同句柄身份采集/后代发现 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定。
+2. **非受管启动**：连命令模式都无法安全定位唯一目标进程（多服务编排触发 `DISCOVERY_AMBIGUOUS`、远端拉起、容器等）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移；非 Java 项目脚本日志按第 4 节放到 `.tmp/runner-local-*`）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
 3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
 4. **停止/重启**：仅受管实例可用。语义是**有界强制终止**（Windows 同句柄核验后 TerminateProcess，退出码 137，不杀进程树、无优雅关机），执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
 4.1 **未结记录与恢复（AC04，不得删账后再起）**：`current` 存在且 `phase` 为 `STARTING`（启动中断/pid 未采集）、`UNKNOWN`（如 `identity_capture_failed`，进程实际可能存活），或任何无法识别的 `phase`（记录被外部改坏等）时，`start`/`start-new` **默认拒绝**，退出码 3、错误码 `UNRESOLVED_RUN`，**不产生任何新进程**（runtime/registry 文件也不被改写）；错误信息给出 `runId`、证据文件（`--home` 下 `runtime/<appId>.json`）与日志路径，以及恢复指引。此时 `status` 仍展示未结记录全量证据（pid/创建时间/映像/日志/`lastError`），文本模式还会列出 `prevRuns` 及 `archiveReason`；`logs --run <旧runId>` 仍可查；**不要删除 runtime 记录或日志来绕过**。

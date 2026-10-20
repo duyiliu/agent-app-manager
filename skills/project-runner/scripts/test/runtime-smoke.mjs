@@ -15,10 +15,19 @@ const home = path.join(base, 'home');
 const projNode = path.join(base, 'node-app');
 const projPy = path.join(base, 'py-app');
 const projUm = path.join(base, 'um-app');
-for (const d of [projNode, projPy, projUm]) fs.mkdirSync(d, { recursive: true });
+const projCmd = path.join(base, 'cmd-app');
+const projAmb = path.join(base, 'amb-app');
+for (const d of [projNode, projPy, projUm, projCmd, projAmb]) fs.mkdirSync(d, { recursive: true });
 
 fs.writeFileSync(path.join(projNode, 'srv.js'),
   'console.log("node-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
+fs.writeFileSync(path.join(projCmd, 'srv.js'),
+  'console.log("cmd-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
+fs.writeFileSync(path.join(projAmb, 'srv.js'),
+  'console.log("amb-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
+// 自身再 spawn 一个 node 子进程 → wrapper 后代中稳定出现 2 个 node.exe，用于歧义拒绝
+fs.writeFileSync(path.join(projAmb, 'two.js'),
+  'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1e3)"],{stdio:"ignore"});\nsetInterval(() => {}, 1000);\n', 'utf8');
 fs.writeFileSync(path.join(projPy, 'srv.py'),
   'import time\nprint("py-ready", flush=True)\nwhile True:\n    time.sleep(1)\n', 'utf8');
 
@@ -45,6 +54,7 @@ const logHas = async (file, needle) => {
 
 let failed = 0;
 let skipped = false;
+let strayWrapperPids = []; // 歧义/超时场景残留的命令模式 wrapper，兜底 taskkill
 const check = async (name, fn) => {
   try { await fn(); console.log(`  ok  ${name}`); }
   catch (e) {
@@ -122,6 +132,76 @@ try {
     assert.equal(cli('status', 'pyapp').json.data.status, 'STOPPED');
   });
 
+  // ---------- 命令模式受管（cmd wrapper + 后代发现） ----------
+  let cmdRunId = null;
+  await check('command 模式 start-new：cmd wrapper → 后代发现 node → 受管', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdapp', root: projCmd, mode: 'node',
+      command: 'node srv.js', expectedImage: 'node.exe',
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    assert.equal(r.json.data.status, 'RUNNING');
+    assert.equal(r.json.data.kind, 'command');
+    assert.ok(r.json.data.wrapperPid > 0, '缺少 wrapperPid 证据');
+    cmdRunId = r.json.data.runId;
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
+    assert(await logHas(rt.current.logPaths.stdout, 'cmd-ready'), 'stdout 未见 cmd-ready');
+    assert.equal(cli('status', 'cmdapp').json.data.status, 'RUNNING');
+    assert.equal(cli('status', 'cmdapp').json.data.run.kind, 'command');
+    assert.equal(cli('stop', 'cmdapp').code, 0);
+    assert.equal(cli('status', 'cmdapp').json.data.status, 'STOPPED');
+    // restart 复用 command 配置：重放命令+重新发现
+    assert.equal(cli('restart', 'cmdapp').code, 0);
+    assert.equal(cli('status', 'cmdapp').json.data.status, 'RUNNING');
+    assert.equal(cli('stop', 'cmdapp').code, 0);
+  });
+  await check('command 模式歧义拒绝：多候选 DISCOVERY_AMBIGUOUS 不任选', () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdamb', root: projAmb, entry: 'amb', mode: 'node',
+      command: 'node two.js', expectedImage: 'node.exe', discoverTimeoutMs: 15000,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? r.json.data?.wrapperPid ?? 0);
+    assert.equal(r.code, 3, r.text);
+    assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS');
+    assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
+  });
+  await check('command 模式发现超时：DISCOVERY_TIMEOUT 留证 UNKNOWN', () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdtmo', root: projAmb, entry: 'tmo', mode: 'node',
+      command: 'ping -n 30 127.0.0.1 >nul', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
+    assert.equal(r.code, 3, r.text);
+    assert.equal(r.json.error.code, 'DISCOVERY_TIMEOUT');
+  });
+  await check('command 模式命令即死：wrapperExited → SPAWN_FAILED（可重试）', () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdfail', root: projAmb, entry: 'fail', mode: 'node',
+      command: 'dir', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 3, r.text);
+    assert.equal(r.json.error.code, 'SPAWN_FAILED');
+    assert.equal(cli('status', 'cmdfail').json.data.status, 'STOPPED');
+  });
+  await check('desc 校验：command 缺 expectedImage / 与 exe 混填均拒绝', () => {
+    const r1 = cli('start-new', '--desc', descFile({
+      alias: 'nocmd', root: projAmb, mode: 'node', command: 'node srv.js',
+    }));
+    assert.equal(r1.code, 1, r1.text);
+    const r2 = cli('start-new', '--desc', descFile({
+      alias: 'both', root: projAmb, mode: 'node', exe: 'node', command: 'node srv.js', expectedImage: 'node.exe',
+    }));
+    assert.equal(r2.code, 1, r2.text);
+  });
+
   // ---------- 拒绝路径 ----------
   await check('非法 mode 拒绝（USAGE 退出码 1）', () => {
     const r = cli('start-new', '--desc', descFile({
@@ -177,9 +257,12 @@ try {
     assert(r.json.data.apps.some((a) => a.mode === 'node'));
   });
 } finally {
-  // 兜底：尽力停掉可能残留的受管进程
-  for (const a of ['nodeapp', 'pyapp']) {
+  // 兜底：尽力停掉可能残留的受管进程与命令模式孤儿 wrapper
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'cmdamb', 'cmdtmo', 'cmdfail']) {
     try { cli('stop', a); } catch { /* 忽略 */ }
+  }
+  for (const p of strayWrapperPids.filter(Boolean)) {
+    try { spawnSync('taskkill', ['/T', '/F', '/PID', String(p)], { windowsHide: true, timeout: 10000 }); } catch { /* 忽略 */ }
   }
   try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* 进程刚退出时日志句柄可能短暂占用，残留由 temp 目录兜底 */ }
 }
