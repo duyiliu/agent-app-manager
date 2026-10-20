@@ -752,15 +752,17 @@ function updateFollow() {
 }
 function renderLines(force = false) {
   const box = $('#log');
-  const firstRendered = Number(box.querySelector('.line')?.dataset.id);
-  const truncated = lines.length && firstRendered && firstRendered < lines[0].id;
-  if (!force && !truncated && renderedId && lines[0]?.id <= renderedId) {
+  if (!force && renderedId && lines[0]?.id <= renderedId) {
     const frag = document.createDocumentFragment();
     for (const l of lines) if (l.id > renderedId) {
       const row = el('div', 'line ' + classify(l.text)); row.dataset.id = l.id;
       row.appendChild(document.createTextNode(l.text || ' ')); frag.appendChild(row);
     }
     box.appendChild(frag);
+    // Keep the DOM window bounded without replacing the remaining nodes, so
+    // selection and scroll position survive once the line cache reaches MAX_LINES.
+    const renderedLines = box.querySelectorAll('.line');
+    for (let i = 0, excess = renderedLines.length - lines.length; i < excess; i++) renderedLines[i].remove();
     renderedId = lines.at(-1)?.id ?? renderedId;
     if (following) box.scrollTop = box.scrollHeight;
     return;

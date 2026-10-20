@@ -93,8 +93,19 @@ export async function startUiServer({ home, port = 0, api }) {
       }
       const bytes = buf.subarray(0, read);
       let encoding = 'utf-8';
-      try { new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, Math.max(0, bytes.length - 4))); }
-      catch { encoding = 'gbk'; }
+      let validUtf8 = false;
+      // Tail offsets/chunk boundaries may split a UTF-8 code point. Ignore only
+      // up to three boundary bytes while still strictly validating the payload.
+      for (let prefix = 0; prefix <= 3 && !validUtf8; prefix++) {
+        for (let suffix = 0; suffix <= 3 && prefix + suffix <= bytes.length; suffix++) {
+          try {
+            new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(prefix, bytes.length - suffix));
+            validUtf8 = true;
+            break;
+          } catch { /* retry after excluding a possible partial boundary code point */ }
+        }
+      }
+      if (!validUtf8) encoding = 'gbk';
       return sendJson(res, 200, {
         schemaVersion: SCHEMA_VERSION, ok: true,
         data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, start: offset, offset: offset + read, size, encoding, b64: bytes.toString('base64') },
