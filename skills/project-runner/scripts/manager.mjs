@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // project-runner 跨项目管理器（P0）
 // 设计基线：docs/design.md v2。要点：
-// - 只管理本 Skill 启动并记录的 Java 应用；外部进程绝不接管或终止。
+// - 只管理本 Skill 启动并记录的应用进程（Java/Python/Node/其他真实可执行进程）；外部进程绝不接管或终止。
 // - 受管启停依赖 ps/proc.ps1 的"同句柄身份核验 + 终止"，防 PID 复用误杀。
 // - 启动前先持久化意图（runId/STARTING），中断保留证据并拒绝自动重试。
 // - 数据目录 ~/.project-runner/（或 --home 绝对路径）；注册表/运行记录带 schemaVersion，
@@ -33,6 +33,13 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
 const ENTRY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// 运行形态标签：java/jrebel 为 JVM 应用；python/node 为对应解释器进程；
+// proc 为其他真实可执行进程（Go/.NET/PHP 等）。仅作登记与展示语义，生命周期机制完全相同。
+const MODES = new Set(['java', 'jrebel', 'python', 'node', 'proc']);
+// 受管 exe 必须是可直接 CreateProcess 的真实可执行文件；脚本包装（cmd/bat/ps1）
+// 与 WindowsApps 应用执行别名 stub（0 字节 reparse point）会让真实进程变成子进程或根本无法启动。
+const WRAPPER_EXT_RE = /\.(cmd|bat|ps1)$/i;
+const EXEC_EXT_RE = /\.(exe|com)$/i;
 
 // ---------- 错误契约 ----------
 
@@ -431,7 +438,7 @@ function loadManagedDesc(file) {
   if (!d.exe || typeof d.exe !== 'string') errs.push('exe 必填');
   if (d.args != null && (!Array.isArray(d.args) || d.args.some((a) => typeof a !== 'string'))) errs.push('args 必须是字符串数组');
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
-  if (d.mode != null && !['java', 'jrebel'].includes(d.mode)) errs.push('mode 只能是 java 或 jrebel');
+  if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
@@ -474,29 +481,73 @@ function realpathOrConflict(label, p) {
   }
 }
 
+// WindowsApps 应用执行别名：Node lstat 视为符号链接（AppX reparse point）。
+// 未安装应用时是 0 字节 stub（运行即打开商店），已安装时也无法预先验证目标进程身份，
+// 一律不作为受管 exe——真实解释器应来自安装目录或项目 venv。
+function isAppExecStub(file) {
+  if (!/\\Microsoft\\WindowsApps\\/i.test(file)) return false;
+  try {
+    const st = fs.lstatSync(file);
+    return st.size === 0 || st.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+// 校验解析出的候选可执行文件：返回 null 表示可用，否则为拒绝原因。
+function exeRejection(resolved) {
+  if (isAppExecStub(resolved)) {
+    return `WindowsApps 应用执行别名（reparse point，无法核验真实目标进程）`;
+  }
+  if (WRAPPER_EXT_RE.test(resolved)) {
+    return `脚本包装（${path.extname(resolved)}），真实进程会变成其子进程：日志句柄不落地、终止目标错位`;
+  }
+  if (/javapath/i.test(resolved)) {
+    return `Oracle javapath 转发 shim，其真实 JVM 为子进程：日志句柄不落地、终止会错位`;
+  }
+  if (!EXEC_EXT_RE.test(resolved)) {
+    return `不是可直接启动的可执行文件（受管要求 .exe/.com）；请解析到底层真实进程`;
+  }
+  return null;
+}
+
 function resolveExe(exe, cwd) {
   if (/[\\/]/.test(exe)) {
     const abs = path.isAbsolute(exe) ? exe : path.resolve(cwd, exe);
+    const rejected = [];
     for (const cand of [abs, `${abs}.exe`]) {
-      if (fs.existsSync(cand)) return path.resolve(cand);
+      if (!fs.existsSync(cand)) continue;
+      const resolved = path.resolve(cand);
+      const why = exeRejection(resolved);
+      if (!why) return resolved;
+      rejected.push(`${resolved}（${why}）`);
+    }
+    if (rejected.length) {
+      throw conflictError('CONFIG_INVALID', `exe 不可用：${rejected.join('；')}。请改用真实可执行文件路径`);
     }
     throw conflictError('CONFIG_INVALID', `exe 不存在：${exe}（Skill 需重新分析该目标项目）`);
   }
   // 裸名 java/javac 优先用 JAVA_HOME 下真实 JDK，绕开 Oracle javapath 转发 shim：
   // shim 会把真实 JVM 拉成子进程，导致重定向句柄不落地、终止目标错位。
-  if (process.env.JAVA_HOME) {
+  if (/^java(c)?$/i.test(exe) && process.env.JAVA_HOME) {
     const jh = path.join(process.env.JAVA_HOME, 'bin', `${exe}.exe`);
     if (fs.existsSync(jh)) return path.resolve(jh);
   }
   const r = spawnSync('where', [exe], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
   if (r.error) return exe; // 无法定位 where 时按原值交给 spawn
   if (r.status !== 0) throw conflictError('CONFIG_INVALID', `exe 不在 PATH 中：${exe}（Skill 需重新分析该目标项目）`);
-  const first = r.stdout.trim().split(/\r?\n/)[0];
-  const resolved = first ? path.resolve(first) : exe;
-  if (/javapath/i.test(resolved)) {
-    throw conflictError('CONFIG_INVALID', `exe 解析到 Oracle javapath 转发 shim（${resolved}），其真实 JVM 为子进程：日志句柄不落地、终止会错位。请提供真实 JDK bin 路径（如 %JAVA_HOME%\\bin\\java.exe）后重试`);
+  const candidates = r.stdout.trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // 按 where 顺序逐个校验：跳过 stub/脚本包装/非 exe，取第一个真实可执行文件；
+  // 全部不可用时报告候选清单与原因，不静默选一个包装进程冒充受管目标。
+  const rejected = [];
+  for (const cand of candidates) {
+    const resolved = path.resolve(cand);
+    const why = exeRejection(resolved);
+    if (!why) return resolved;
+    rejected.push(`${resolved}（${why}）`);
   }
-  return resolved;
+  throw conflictError('CONFIG_INVALID',
+    `exe ${exe} 的 PATH 候选均不可作为受管目标：${rejected.join('；')}。请提供真实可执行文件路径（如真实 python.exe/node.exe）后重试`);
 }
 
 function canonicalizeDesc(desc) {
@@ -586,7 +637,7 @@ function launchManaged(home, appId, app, opts = {}) {
     rt.current.phase = 'UNKNOWN';
     rt.current.lastError = `spawn_failed: ${e.message}`;
     writeRuntime(home, appId, rt);
-    throw conflictError('SPAWN_FAILED', `JVM 启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { runId, logPaths: rt.current.logPaths, cause: e.message });
+    throw conflictError('SPAWN_FAILED', `进程启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { runId, logPaths: rt.current.logPaths, cause: e.message });
   } finally {
     try { if (outFd != null) fs.closeSync(outFd); } catch { /* 忽略 */ }
     try { if (errFd != null) fs.closeSync(errFd); } catch { /* 忽略 */ }
@@ -727,7 +778,7 @@ function cmdRecordUnmanaged(ctx) {
     } else {
       reg.apps[appId] = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
-        cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: d.mode === 'jrebel' ? 'jrebel' : 'java',
+        cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
         exe: null, args: [], envRefs: [], expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
@@ -740,7 +791,7 @@ function cmdRecordUnmanaged(ctx) {
       intentAt: now, startedAt: now, pid: null, creationFileTime: null, image: null,
       envResolved: [], logPaths: null, logHints,
       lastError: null, endedAt: null,
-      note: 'Skill 在既有授权下执行的启动，未托管目标 JVM；仅记录尝试与日志线索',
+      note: 'Skill 在既有授权下执行的启动，未托管目标进程；仅记录尝试与日志线索',
     };
     writeRuntime(ctx.home, appId, rt);
     return {
@@ -995,9 +1046,10 @@ function listRuns(home, ref) {
 
 // ---------- ui 统一日志源与项目文件浏览（只读，替代原单项 viewer） ----------
 // 日志源三类：受管批次 logs/<appId>/<runId>.<stream>.log、非受管登记的 logHints、
-// 应用 root/.tmp 下 jrebel-local-* 兼容扫描。文件树/预览限定在应用 root 内。
+// 应用 root/.tmp 下 jrebel-local-*/runner-local-* 兼容扫描。文件树/预览限定在应用 root 内。
 
-const TMP_NAME_RE = /^jrebel-local-[^/\\]+\.(stdout|stderr)\.log$/;
+// 兼容两类约定名：jrebel-local-*（Java/JRebel 时代沿用）与 runner-local-*（非 Java 项目脚本日志）
+const TMP_NAME_RE = /^(?:jrebel|runner)-local-[^/\\]+\.(stdout|stderr)\.log$/;
 const UI_FILE_CHUNK = 256 * 1024;
 const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
   || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
@@ -1072,7 +1124,7 @@ function listSources(home, ref) {
     if (fs.statSync(tmpDir).isDirectory()) {
       for (const name of fs.readdirSync(tmpDir)) {
         if (!TMP_NAME_RE.test(name)) continue;
-        push({ src: `tmp:${name}`, kind: 'tmp', label: name.replace(/^jrebel-local-/, '').replace(/\.log$/, ''), current: false, stream: name.endsWith('.stdout.log') ? 'stdout' : 'stderr' }, path.join(tmpDir, name));
+        push({ src: `tmp:${name}`, kind: 'tmp', label: name.replace(/^(?:jrebel|runner)-local-/, '').replace(/\.log$/, ''), current: false, stream: name.endsWith('.stdout.log') ? 'stdout' : 'stderr' }, path.join(tmpDir, name));
       }
     }
   } catch { /* .tmp 缺失或为符号链接：无兼容日志 */ }
@@ -1412,6 +1464,10 @@ function usageText() {
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
     '  record-unmanaged --desc <file> [--log-hints p1,p2]   记录非受管启动尝试',
+    '',
+    '启动描述 mode 取值：java | jrebel | python | node | proc（其他真实可执行进程）。',
+    '受管 exe 必须解析为真实可执行文件（.exe/.com）；.cmd/.bat/.ps1 包装与 WindowsApps',
+    '应用执行别名会被拒绝——请先解析到底层真实进程（如 node <entry>.js）再登记。',
     '',
     'STARTING/UNKNOWN 未结记录默认拒绝启动（UNRESOLVED_RUN）；人工核验进程已退出后，',
     '用 --ack-unresolved <runId> 显式放弃旧账并重启：start <ref> --ack-unresolved <runId>',

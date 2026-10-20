@@ -24,6 +24,7 @@ w(path.join(home, 'logs', 'ahis', 'rtest1.stdout.log'), 'JRebel:  on\nINFO start
 w(path.join(home, 'logs', 'ahis', 'rtest1.stderr.log'), 'stderr line\n');
 w(path.join(home, 'logs', 'ahis', 'rold1.stdout.log'), 'old run line\n');
 w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line A\n');
+w(path.join(proj, '.tmp', 'runner-local-20261021-100000.stderr.log'), 'tmp line B\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 w(path.join(proj, '.env'), 'SECRET=x\n');
 w(hintFile, 'hint 1\n');
@@ -132,7 +133,8 @@ try {
   await check('统一日志源（当前 stdout 优先 + 历史 + .tmp）', () => {
     assert.equal(sources[0].src, 'run:rtest1.stdout');
     assert(sources.some((s) => s.src === 'run:rold1.stdout'));
-    assert(sources.some((s) => s.src.startsWith('tmp:')));
+    assert(sources.some((s) => s.src === 'tmp:jrebel-local-20261020-100000.stdout.log'));
+    assert(sources.some((s) => s.src === 'tmp:runner-local-20261021-100000.stderr.log'));
   });
   const repSources = (await get('/api/sources?app=report')).json.data.sources;
   await check('非受管应用日志源=登记线索', () => assert.equal(repSources[0].src, 'hint:0'));

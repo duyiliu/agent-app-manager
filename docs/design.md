@@ -2,12 +2,13 @@
 
 > 设计版本：v2（收敛版，替代 v1）
 > 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过。**AC03 分层结论（2026-10-19 隔离环境实测）**：L1（manager 进程退出后受管 JVM 存活）与 L2（全新 node 进程核验现状/读日志/停止/再启动）已通过；**L3（真实 pi/Agent 会话退出后的存活）仍为开放项**，需在 run 结束后的宿主/后续会话中按 §7.1 的判据补验，未补验前不得宣称 AC03 全量通过。实测命令与原始输出见 `docs/verification/ac03-l1-l2-evidence.md`。2026-10-20 新增 `manager ui` 本地只读管理台（§2.2、AC08），"简单部署"原则、非目标与 P2 表述已同步调整。
+> **v2.3（2026-10-21，多语言）**：受管范围由 JVM 推广到任意真实可执行进程——desc `mode` 扩展为 `java|jrebel|python|node|proc`；`resolveExe` 收紧为"必须解析为 .exe/.com 真实可执行文件"，拒绝 `.cmd`/`.bat`/`.ps1` 包装与 `Microsoft\WindowsApps` 应用执行别名 reparse point（npm/pnpm 等 shim 场景须先解析到底层 `node <entry>.js`）；`.tmp` 兼容日志新增 `runner-local-*` 通用名。生命周期、未结记录、锁与 ui 机制全部不变；冒烟见 `scripts/test/runtime-smoke.mjs`。
 > 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill；日志查看能力自 v2.2 起并入 `manager ui`（原单项目 Viewer 已移除）
 > 评审说明：v1 的 same-context PASS 不继承为 v2 的代码审查或运行验证结论；实施后须按本文件验收。
 
 ## 1. 目标与非目标
 
-**定位**：全局安装一次 `project-runner` Skill，在不同业务目录和不同 Agent 会话中，**统一查看与管理由该 Skill 启动并记录的 Java 应用**。不是 Windows 全机 Java 进程管理器，也不是独立 CLI 产品。
+**定位**：全局安装一次 `project-runner` Skill，在不同业务目录和不同 Agent 会话中，**统一查看与管理由该 Skill 启动并记录的应用进程**（v2.3 起覆盖 Java/Python/Node/其他真实进程）。不是 Windows 全机进程管理器，也不是独立 CLI 产品。
 
 核心体验：
 
@@ -54,9 +55,9 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ### 2.1 应用记录
 
-稳定配置至少包括：不可变 `appId`、别名、仓库真实路径、启动模块/入口、运行模式（JRebel 或普通 Java）、工作目录、可执行文件与参数数组/兼容脚本引用、非敏感环境变量**引用**、预期端口、来源配置指纹及配置修订。
+稳定配置至少包括：不可变 `appId`、别名、仓库真实路径、启动模块/入口、运行模式（`java|jrebel|python|node|proc`，仅标签语义）、工作目录、可执行文件与参数数组/兼容脚本引用、非敏感环境变量**引用**、预期端口、来源配置指纹及配置修订。
 
-运行记录至少包括：`appId`、唯一 `runId`、启动意图/阶段、可用时的目标 JVM PID、OS 创建时间、可核验的唯一 JVM 标识、`managed`、已知日志路径、时间及最近操作结果。
+运行记录至少包括：`appId`、唯一 `runId`、启动意图/阶段、可用时的目标进程 PID、OS 创建时间、可核验的唯一进程标识（映像+创建时间）、`managed`、已知日志路径、时间及最近操作结果。
 
 - 一个仓库可有多个应用；按规范化仓库真实路径 + 应用入口去重，别名不区分 Windows 大小写。
 - 保留已经由 Skill 登记、但现在停止的项目；`list` 不等于“只列正在运行”。
@@ -88,18 +89,18 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ### 3.2 两条启动路径，不强改项目脚本
 
-**受管（Managed）**：脚本可可靠定位并持续核验**目标业务 JVM**（非 Maven/Gradle 启动器、cmd/pwsh 包装进程），有唯一 `runId`、PID、创建时间与其他可信身份证据。P0 保证经过实测的直接 JVM 启动；已有项目脚本只有能交付同等证据、不会开启不可追踪的多 JVM/远端进程时才获得托管能力。受管应用可跨会话 `status/logs/stop/restart`。
+**受管（Managed）**：脚本可可靠定位并持续核验**目标业务进程**（非 Maven/Gradle 启动器、cmd/pwsh/npm.cmd 等包装进程），有唯一 `runId`、PID、创建时间与其他可信身份证据。P0 保证经过实测的直接进程启动（v2.3 起 `exe` 必须解析为真实 `.exe`/`.com`）；已有项目脚本只有能交付同等证据、不会开启不可追踪的多进程/远端进程时才获得托管能力。受管应用可跨会话 `status/logs/stop/restart`。
 
-**非受管（Unmanaged）**：Skill 可以按 PR #5 在既有授权下使用经审查的项目脚本；如果不能安全识别目标 JVM，则记录“本 Skill 发起过启动”及可信日志线索，标记 `managed=false`，**不承诺 RUNNING、跨会话启停或可靠的 JVM 日志接管**。执行前要向用户说明能力限制；不为了适配而修改脚本或凭端口猜测 JVM。若无法确认脚本是否启动成功，则记录 UNKNOWN 而非成功。
+**非受管（Unmanaged）**：Skill 可以按 PR #5 在既有授权下使用经审查的项目脚本；如果不能安全识别目标进程，则记录“本 Skill 发起过启动”及可信日志线索，标记 `managed=false`，**不承诺 RUNNING、跨会话启停或可靠的日志接管**。执行前要向用户说明能力限制；不为了适配而修改脚本或凭端口猜测 JVM。若无法确认脚本是否启动成功，则记录 UNKNOWN 而非成功。
 
 如果用户明确要求“可自动托管”而当前启动方式无法满足要求，必须在执行前报告 `UNSUPPORTED_LAUNCH`，不能偷偷降级后声称可管理。
 
 ### 3.3 停止与重启原则
 
-- 仅对 `managed=true`、本 Skill 留存的受管 JVM 执行停止/重启；不能用 `runId`、端口或主类去认领外部进程。
+- 仅对 `managed=true`、本 Skill 留存的受管进程执行停止/重启；不能用 `runId`、端口或主类去认领外部进程。
 - 停止前验证目标 PID、OS 创建时间、唯一 `runId` 与可执行文件身份；Windows 上要确保**身份核验与终止针对同一进程句柄**，避免“先查 PID 再按 PID 杀”的复用竞态。环境做不到可靠操作则拒绝。
-- P0 只支持**有界强制停止**，不承诺 Spring/JVM 优雅关机或 shutdown hook；执行前说明，不执行 `taskkill /T` 或盲目终止整棵进程树。
-- `restart` 必须先确认旧 JVM 已退出，才启动新实例；重复停止可返回 alreadyStopped。UNKNOWN、身份无法验证或外部进程一律拒绝停止/重启。
+- P0 只支持**有界强制停止**，不承诺优雅关机或 shutdown hook；执行前说明，不执行 `taskkill /T` 或盲目终止整棵进程树。
+- `restart` 必须先确认旧进程已退出，才启动新实例；重复停止可返回 alreadyStopped。UNKNOWN、身份无法验证或外部进程一律拒绝停止/重启。
 - 用户明确要求单个目标的启动/重启可按已授权流程执行；不提供 `all`、通配符或自动批量重启。
 
 ## 4. 最小命令接口
