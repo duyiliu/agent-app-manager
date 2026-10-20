@@ -372,7 +372,7 @@ function acquireLock(home, name, op) {
       fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
       const me = selfIdentityCapture();
       fs.ftruncateSync(fd, 0);
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 'utf8');
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 0, 'utf8');
       wrote = true;
     } finally {
       try { fs.closeSync(fd); } catch { /* 忽略 */ }
