@@ -2,11 +2,9 @@
 
 **Agent-native 本地开发项目启动与运行管理 Skill**
 
-> 当前可用：Java / Spring Boot 项目识别、Standalone JRebel 环境初始化、按项目启动和热加载验证，以及 `manager.mjs` 跨项目运行管理 P0 与其 `ui` 统一只读 Web 管理台（日志 + 项目文件；命令与使用规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节，能力与验收基线见 [design.md](docs/design.md)）。
+> 当前可用：Java / Spring Boot、Python、Vue/React/Vite 等 Node 前端及其他主流栈的项目识别与启动、Standalone JRebel 环境初始化、热加载验证，以及 `manager.mjs` 跨项目运行管理 P0 与其 `ui` 统一只读 Web 管理台（日志 + 项目文件；命令与使用规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节，能力与验收基线见 [design.md](docs/design.md)）。
 >
-> 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管 JVM 跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的 Java 应用，**不接管 IDEA / 手工启动的外部进程**。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
->
-> 未来可扩展其他语言，但**当前不提供 Node/Python/Go 运行托管能力**。
+> 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管进程跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的应用进程，**不接管 IDEA / 手工启动的外部进程**。受管两种形态：直连真实可执行进程（`.exe`/`.com`），或命令模式（`command`+`expectedImage`——manager 拉起脚本命令后在后代中发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run` 等脚本/复合命令）。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
 
 ## 安装
 
@@ -20,11 +18,11 @@ npx skills add duyiliu/project-runner --skill project-runner -g
 
 ## 用途
 
-- **当前项目启动**：读取 `AGENTS.md`、已有脚本及 Maven/Gradle 配置，确定 JDK、模块、入口、profile、端口、启动参数。
-- **JRebel**：初始化 / 检查 standalone JRebel、许可与 `rebel.xml`，按已有项目约定启动，验证加载与热更新证据。
-- **跨项目运行管理**：`manager.mjs` 统一登记并管理**本 Skill 启动且具有可信进程身份**的 Java 应用；支持全局 `list`/`status`、已登记应用从任意目录 `start`、受管实例 `stop`/`restart`、按运行批次 `logs`，以及跨 Agent 会话核验。只管理本 Skill 启动并记录的应用，**不接管 IDEA / 手工启动的外部进程**；`stop` 为有界强制终止，不承诺优雅关机。
+- **当前项目启动**：读取 `AGENTS.md`、已有脚本及构建配置，确定运行时、模块、入口、profile、端口、启动参数。Java 走 Maven/Gradle 识别；Python 走 venv/依赖声明识别；Vue/React/Vite 等前端把 `package.json` script 解析为真实 `node` 入口进程后受管启动。
+- **JRebel**：初始化 / 检查 standalone JRebel、许可与 `rebel.xml`，按已有项目约定启动，验证加载与热更新证据（仅 Java）。
+- **跨项目运行管理**：`manager.mjs` 统一登记并管理**本 Skill 启动且具有可信进程身份**的应用进程；支持全局 `list`/`status`、已登记应用从任意目录 `start`、受管实例 `stop`/`restart`、按运行批次 `logs`，以及跨 Agent 会话核验。只管理本 Skill 启动并记录的应用，**不接管 IDEA / 手工启动的外部进程**；`stop` 为有界强制终止，不承诺优雅关机。
 - **本地运行管理台**：`manager ui` 按需启动只读网页（默认固定 `127.0.0.1:8199` + 一次性令牌，`--port 0` 随机端口；Ctrl+C 即退出，无常驻服务），查看全局应用状态、未结记录证据与日志（受管批次、非受管线索、项目 `.tmp` 兼容日志），并浏览所选应用的项目文件；原单项目 Viewer 已移除，能力并入本台。不提供启停操作，启停走 CLI/Agent。
-- **非受管启动**：无法安全定位目标 JVM 的项目脚本仍可按原授权执行，但只记录启动尝试与日志线索并标记为非受管，不承诺跨会话启停。
+- **非受管启动**：连命令模式也无法定位唯一目标进程的项目脚本仍可按原授权执行，但只记录启动尝试与日志线索并标记为非受管，不承诺跨会话启停。
 
 ## 目录
 
@@ -41,7 +39,8 @@ skills/project-runner/
     ├── ps/
     │   └── proc.ps1             # 受管进程身份核验与终止适配
     └── test/
-        └── ui-smoke.mjs         # manager ui 冒烟测试（隔离 --home，不碰真实数据）
+        ├── ui-smoke.mjs         # manager ui 冒烟测试（隔离 --home，不碰真实数据）
+        └── runtime-smoke.mjs    # 受管生命周期冒烟（真实 node/python 直连 + 命令模式 + 拒绝路径）
 ```
 
 ## 来源与兼容性
@@ -56,4 +55,4 @@ skills/project-runner/
 
 Skill 负责理解目标项目，确定性脚本只负责需要可靠重复执行的操作。不要为了支持更多语言预先引入通用适配框架、Daemon、数据库或 MCP。跨项目能力的验收要求见 [design.md](docs/design.md)。
 
-改动 `manager.mjs` / `manager-ui` 后运行冒烟测试：`node skills/project-runner/scripts/test/ui-smoke.mjs`。
+改动 `manager.mjs` / `manager-ui` 后运行冒烟测试：`node skills/project-runner/scripts/test/ui-smoke.mjs` 与 `node skills/project-runner/scripts/test/runtime-smoke.mjs`。

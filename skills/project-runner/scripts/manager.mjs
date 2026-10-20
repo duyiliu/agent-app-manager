@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // project-runner 跨项目管理器（P0）
 // 设计基线：docs/design.md v2。要点：
-// - 只管理本 Skill 启动并记录的 Java 应用；外部进程绝不接管或终止。
+// - 只管理本 Skill 启动并记录的应用进程（Java/Python/Node/其他真实可执行进程）；外部进程绝不接管或终止。
 // - 受管启停依赖 ps/proc.ps1 的"同句柄身份核验 + 终止"，防 PID 复用误杀。
 // - 启动前先持久化意图（runId/STARTING），中断保留证据并拒绝自动重试。
 // - 数据目录 ~/.project-runner/（或 --home 绝对路径）；注册表/运行记录带 schemaVersion，
@@ -33,6 +33,16 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
 const ENTRY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// 运行形态标签：java/jrebel 为 JVM 应用；python/node 为对应解释器进程；
+// proc 为其他真实可执行进程（Go/.NET/PHP 等）。仅作登记与展示语义，生命周期机制完全相同。
+const MODES = new Set(['java', 'jrebel', 'python', 'node', 'proc']);
+// 受管 exe 必须是可直接 CreateProcess 的真实可执行文件；脚本包装（cmd/bat/ps1）
+// 与 WindowsApps 应用执行别名 stub（0 字节 reparse point）会让真实进程变成子进程或根本无法启动。
+const WRAPPER_EXT_RE = /\.(cmd|bat|ps1)$/i;
+const EXEC_EXT_RE = /\.(exe|com)$/i;
+// 命令模式：expectedImage 必须是映像基名（node.exe/java.exe 等），不允许路径分隔符
+const IMAGE_NAME_RE = /^[^\\/]+\.(exe|com)$/i;
+const COMMAND_DISCOVER_TIMEOUT_MS = 45000; // 命令模式后代发现默认上限
 
 // ---------- 错误契约 ----------
 
@@ -87,8 +97,10 @@ function psProcOnce(action, params) {
   if (params.id != null) args.push('-Id', String(params.id));
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
   if (params.image != null) args.push('-Image', params.image);
-  if (action === 'terminate') args.push('-WaitMs', String(params.waitMs ?? TERMINATE_WAIT_MS));
-  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  if (action === 'terminate' || action === 'discover') args.push('-WaitMs', String(params.waitMs ?? (action === 'discover' ? COMMAND_DISCOVER_TIMEOUT_MS : TERMINATE_WAIT_MS)));
+  // discover 在单个 pwsh 进程内轮询等待目标出现，超时上限 = 发现窗口 + 启动余量
+  const timeout = action === 'discover' ? (params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS) + 15000 : 30000;
+  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
     throw dependencyError(`pwsh 调用失败：${r.error.message}`);
@@ -206,7 +218,7 @@ function archiveCurrent(rt, opts = {}) {
   if (rt.current) {
     const cur = rt.current;
     const entry = {
-      runId: cur.runId, phase: cur.phase, managed: cur.managed,
+      runId: cur.runId, phase: cur.phase, managed: cur.managed, kind: cur.kind ?? 'direct',
       startedAt: cur.startedAt, endedAt: cur.endedAt ?? null,
       lastError: cur.lastError ?? null, archivedAt: new Date().toISOString(),
     };
@@ -217,6 +229,7 @@ function archiveCurrent(rt, opts = {}) {
       entry.pid = cur.pid ?? null;
       entry.creationFileTime = cur.creationFileTime ?? null;
       entry.image = cur.image ?? null;
+      entry.wrapperPid = cur.wrapperPid ?? null;
       entry.logPaths = cur.logPaths ?? null;
       entry.exitNote = cur.exitNote ?? null;
       entry.envResolved = cur.envResolved ?? [];
@@ -428,10 +441,19 @@ function loadManagedDesc(file) {
   if (!ALIAS_RE.test(d.alias ?? '')) errs.push(`alias 需匹配 ${ALIAS_RE}`);
   if (!d.root || !path.isAbsolute(d.root)) errs.push('root 必须是绝对路径');
   if (d.entry != null && !ENTRY_RE.test(d.entry)) errs.push(`entry 需匹配 ${ENTRY_RE}`);
-  if (!d.exe || typeof d.exe !== 'string') errs.push('exe 必填');
+  const hasExe = typeof d.exe === 'string' && d.exe;
+  const hasCmd = typeof d.command === 'string' && d.command.trim();
+  // 两种受管形态：exe+args（真实可执行进程）或 command+expectedImage（脚本/复合命令，wrapper+后代发现）
+  if (!hasExe && !hasCmd) errs.push('exe 或 command 必填其一');
+  if (hasExe && hasCmd) errs.push('exe 与 command 只能填一个（command 已是完整命令行）');
+  if (hasCmd && d.command.length > 2000) errs.push('command 不超过 2000 字符');
+  if (hasCmd && d.args != null) errs.push('command 模式不接受 args（参数写入 command 本身）');
+  if (hasCmd && !IMAGE_NAME_RE.test(d.expectedImage ?? '')) errs.push('command 模式需要 expectedImage（目标进程映像基名，如 node.exe/java.exe）');
+  if (hasExe && (d.expectedImage != null || d.discoverTimeoutMs != null)) errs.push('expectedImage/discoverTimeoutMs 仅 command 模式使用');
+  if (d.discoverTimeoutMs != null && (!Number.isInteger(d.discoverTimeoutMs) || d.discoverTimeoutMs < 1000 || d.discoverTimeoutMs > 120000)) errs.push('discoverTimeoutMs 需为 1000-120000 整数');
   if (d.args != null && (!Array.isArray(d.args) || d.args.some((a) => typeof a !== 'string'))) errs.push('args 必须是字符串数组');
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
-  if (d.mode != null && !['java', 'jrebel'].includes(d.mode)) errs.push('mode 只能是 java 或 jrebel');
+  if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
@@ -441,8 +463,11 @@ function loadManagedDesc(file) {
     entry: d.entry ?? 'default',
     cwd: d.cwd ?? d.root,
     mode: d.mode ?? 'java',
-    exe: d.exe,
+    exe: d.exe ?? null,
     args: d.args ?? [],
+    command: d.command ?? null,
+    expectedImage: d.expectedImage ?? null,
+    discoverTimeoutMs: d.discoverTimeoutMs ?? null,
     envRefs: d.envRefs ?? [],
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
@@ -474,35 +499,87 @@ function realpathOrConflict(label, p) {
   }
 }
 
+// WindowsApps 应用执行别名：Node lstat 视为符号链接（AppX reparse point）。
+// 未安装应用时是 0 字节 stub（运行即打开商店），已安装时也无法预先验证目标进程身份，
+// 一律不作为受管 exe——真实解释器应来自安装目录或项目 venv。
+function isAppExecAlias(file) {
+  if (!/\\Microsoft\\WindowsApps\\/i.test(file)) return false;
+  try {
+    const st = fs.lstatSync(file);
+    return st.size === 0 || st.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+// 校验解析出的候选可执行文件：返回 null 表示可用，否则为拒绝原因。
+function exeRejection(resolved) {
+  if (isAppExecAlias(resolved)) {
+    return `WindowsApps 应用执行别名（reparse point，无法核验真实目标进程）`;
+  }
+  if (WRAPPER_EXT_RE.test(resolved)) {
+    return `脚本包装（${path.extname(resolved)}），真实进程会变成其子进程：日志句柄不落地、终止目标错位`;
+  }
+  if (/javapath/i.test(resolved)) {
+    return `Oracle javapath 转发 shim，其真实 JVM 为子进程：日志句柄不落地、终止会错位`;
+  }
+  if (!EXEC_EXT_RE.test(resolved)) {
+    return `不是可直接启动的可执行文件（受管要求 .exe/.com）；请解析到底层真实进程`;
+  }
+  return null;
+}
+
+// where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：UTF-8 解码失败回退 GBK，
+// 避免非 ASCII 用户名路径乱码后把真实候选误判为不可用。
+function decodeCmdOutput(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { return new TextDecoder('gbk').decode(buf); }
+}
+
 function resolveExe(exe, cwd) {
   if (/[\\/]/.test(exe)) {
     const abs = path.isAbsolute(exe) ? exe : path.resolve(cwd, exe);
+    const rejected = [];
     for (const cand of [abs, `${abs}.exe`]) {
-      if (fs.existsSync(cand)) return path.resolve(cand);
+      if (!fs.existsSync(cand)) continue;
+      const resolved = path.resolve(cand);
+      const why = exeRejection(resolved);
+      if (!why) return resolved;
+      rejected.push(`${resolved}（${why}）`);
+    }
+    if (rejected.length) {
+      throw conflictError('CONFIG_INVALID', `exe 不可用：${rejected.join('；')}。请改用真实可执行文件路径`);
     }
     throw conflictError('CONFIG_INVALID', `exe 不存在：${exe}（Skill 需重新分析该目标项目）`);
   }
   // 裸名 java/javac 优先用 JAVA_HOME 下真实 JDK，绕开 Oracle javapath 转发 shim：
   // shim 会把真实 JVM 拉成子进程，导致重定向句柄不落地、终止目标错位。
-  if (process.env.JAVA_HOME) {
+  if (/^java(c)?$/i.test(exe) && process.env.JAVA_HOME) {
     const jh = path.join(process.env.JAVA_HOME, 'bin', `${exe}.exe`);
     if (fs.existsSync(jh)) return path.resolve(jh);
   }
-  const r = spawnSync('where', [exe], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  const r = spawnSync('where', [exe], { encoding: 'buffer', windowsHide: true, timeout: 10000 });
   if (r.error) return exe; // 无法定位 where 时按原值交给 spawn
   if (r.status !== 0) throw conflictError('CONFIG_INVALID', `exe 不在 PATH 中：${exe}（Skill 需重新分析该目标项目）`);
-  const first = r.stdout.trim().split(/\r?\n/)[0];
-  const resolved = first ? path.resolve(first) : exe;
-  if (/javapath/i.test(resolved)) {
-    throw conflictError('CONFIG_INVALID', `exe 解析到 Oracle javapath 转发 shim（${resolved}），其真实 JVM 为子进程：日志句柄不落地、终止会错位。请提供真实 JDK bin 路径（如 %JAVA_HOME%\\bin\\java.exe）后重试`);
+  const candidates = decodeCmdOutput(r.stdout).trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // 按 where 顺序逐个校验：跳过 stub/脚本包装/非 exe，取第一个真实可执行文件；
+  // 全部不可用时报告候选清单与原因，不静默选一个包装进程冒充受管目标。
+  const rejected = [];
+  for (const cand of candidates) {
+    const resolved = path.resolve(cand);
+    const why = exeRejection(resolved);
+    if (!why) return resolved;
+    rejected.push(`${resolved}（${why}）`);
   }
-  return resolved;
+  throw conflictError('CONFIG_INVALID',
+    `exe ${exe} 的 PATH 候选均不可作为受管目标：${rejected.join('；')}。请提供真实可执行文件路径（如真实 python.exe/node.exe）后重试`);
 }
 
 function canonicalizeDesc(desc) {
   const root = realpathOrConflict('root', desc.root);
   const cwd = realpathOrConflict('cwd', desc.cwd);
-  const exe = resolveExe(desc.exe, cwd);
+  // 命令模式不解析 exe——cmd wrapper 与真实目标进程都在 launchManaged 内确认
+  const exe = desc.command ? null : resolveExe(desc.exe, cwd);
   return { ...desc, root, cwd, exe };
 }
 
@@ -523,6 +600,9 @@ function upsertApp(reg, appId, desc) {
     existing.mode = desc.mode;
     existing.exe = desc.exe;
     existing.args = desc.args;
+    existing.command = desc.command ?? null;
+    existing.expectedImage = desc.expectedImage ?? null;
+    existing.discoverTimeoutMs = desc.discoverTimeoutMs ?? null;
     existing.envRefs = desc.envRefs;
     existing.expectedPort = desc.expectedPort ?? null;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
@@ -532,7 +612,9 @@ function upsertApp(reg, appId, desc) {
   }
   const app = {
     appId, alias: desc.alias, displayName: desc.displayName, root: desc.root, entry: desc.entry,
-    cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args, envRefs: desc.envRefs,
+    cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
+    command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
+    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
     expectedPort: desc.expectedPort ?? null, sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };
@@ -541,6 +623,21 @@ function upsertApp(reg, appId, desc) {
 }
 
 // ---------- 受管启动（意图先行 → detached 启动 → 身份采集 → 登记） ----------
+
+// 命令模式的顶层 wrapper：cmd.exe 是真实 exe，同样走候选校验保证不被 shim 冒充
+function resolveComspec(cwd) {
+  return resolveExe(process.env.ComSpec || 'cmd.exe', cwd);
+}
+
+// 目标进程终止后尽力清理仍存活的 cmd wrapper（多数会随子进程退出自然消亡）。
+// wrapper 身份在启动时已采集，同句柄核验+终止，失败仅作留证不影响主结果。
+function cleanupWrapper(rt) {
+  const cur = rt.current;
+  if (!cur?.wrapperPid || !cur.wrapperCreationFileTime || !cur.wrapperImage) return;
+  try {
+    psProc('terminate', { id: cur.wrapperPid, creationFileTime: cur.wrapperCreationFileTime, image: cur.wrapperImage });
+  } catch { /* best-effort */ }
+}
 
 function launchManaged(home, appId, app, opts = {}) {
   const runId = newRunId();
@@ -556,15 +653,23 @@ function launchManaged(home, appId, app, opts = {}) {
     archiveCurrent(rt); // 旧运行证据归档保留，绝不删账
   }
 
+  const isCommand = !!app.command;
   rt.current = {
     runId, phase: 'STARTING', managed: true, mode: app.mode,
+    kind: isCommand ? 'command' : 'direct',
     intentAt: new Date().toISOString(), startedAt: null,
     pid: null, creationFileTime: null, image: null,
+    wrapperPid: null, wrapperCreationFileTime: null, wrapperImage: null,
     envResolved: app.envRefs.filter((n) => n in process.env),
     logPaths: { stdout: outPath, stderr: errPath },
     lastError: null, endedAt: null, exitNote: null,
   };
   writeRuntime(home, appId, rt);
+
+  const failUnresolved = (code, message, detail) => {
+    writeRuntime(home, appId, rt);
+    throw conflictError(code, message, { runId, logPaths: rt.current.logPaths, ...detail });
+  };
 
   let child;
   let outFd;
@@ -573,27 +678,37 @@ function launchManaged(home, appId, app, opts = {}) {
   try {
     outFd = fs.openSync(outPath, 'a');
     errFd = fs.openSync(errPath, 'a');
-    child = spawn(app.exe, app.args, {
-      cwd: app.cwd, detached: true, windowsHide: true,
+    // 命令模式：拉起 cmd wrapper 执行完整命令行；真实目标进程稍后按后代发现确定。
+    // 注意 wrapper 不能 detach——Windows 下 detached(无控制台) wrapper 的后代进程
+    // stdout 句柄全部失效（实测 echo/node/ping 写入丢失），必须共享父进程控制台。
+    // Windows 父退出不杀子进程，wrapper/目标仍会存活；代价是交互终端启动时
+    // 共享其控制台（典型 agent 管道调用下 manager 本无控制台，不受影响）。
+    const file = isCommand ? resolveComspec(app.cwd) : app.exe;
+    const argv = isCommand ? ['/d', '/s', '/c', app.command] : app.args;
+    child = spawn(file, argv, {
+      cwd: app.cwd, detached: !isCommand, windowsHide: true,
       stdio: ['ignore', outFd, errFd],
       env: { ...process.env },
     });
     // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
-    // 具体失败仍由下方身份采集路径统一落 UNKNOWN 并保留证据
+    // 具体失败仍由下方身份采集/发现路径统一落账并保留证据
     child.on('error', (err) => { spawnError = err.message; });
     child.unref();
   } catch (e) {
     rt.current.phase = 'UNKNOWN';
     rt.current.lastError = `spawn_failed: ${e.message}`;
-    writeRuntime(home, appId, rt);
-    throw conflictError('SPAWN_FAILED', `JVM 启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { runId, logPaths: rt.current.logPaths, cause: e.message });
+    failUnresolved('SPAWN_FAILED', `进程启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: e.message });
   } finally {
     try { if (outFd != null) fs.closeSync(outFd); } catch { /* 忽略 */ }
     try { if (errFd != null) fs.closeSync(errFd); } catch { /* 忽略 */ }
   }
 
   rt.current.startedAt = new Date().toISOString();
-  rt.current.pid = child.pid;
+  if (isCommand) {
+    rt.current.wrapperPid = child.pid;
+  } else {
+    rt.current.pid = child.pid;
+  }
 
   let cap;
   try {
@@ -601,17 +716,78 @@ function launchManaged(home, appId, app, opts = {}) {
   } catch (e) {
     cap = { result: 'error', message: e.message };
   }
-  if (cap.result === 'ok') {
-    rt.current.phase = 'RUNNING';
-    rt.current.creationFileTime = cap.creationFileTime;
-    rt.current.image = cap.image;
-    writeRuntime(home, appId, rt);
-    return rt.current;
+
+  if (!isCommand) {
+    if (cap.result === 'ok') {
+      rt.current.phase = 'RUNNING';
+      rt.current.creationFileTime = cap.creationFileTime;
+      rt.current.image = cap.image;
+      writeRuntime(home, appId, rt);
+      return rt.current;
+    }
+    rt.current.phase = 'UNKNOWN';
+    rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
+    failUnresolved('IDENTITY_CAPTURE_FAILED', `已拉起（pid=${child.pid}）但身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { pid: child.pid, capture: cap });
   }
+
+  // ---- 命令模式：wrapper 身份留证，随后在后代中发现唯一真实目标 ----
+  if (cap.result === 'ok') {
+    rt.current.wrapperCreationFileTime = cap.creationFileTime;
+    rt.current.wrapperImage = cap.image;
+  }
+
+  const waitMs = app.discoverTimeoutMs ?? COMMAND_DISCOVER_TIMEOUT_MS;
+  let d;
+  try {
+    d = psProc('discover', { id: child.pid, image: app.expectedImage, waitMs });
+  } catch (e) {
+    d = { result: 'error', code: 'discover_failed', message: e.message };
+  }
+
+  if (d.result === 'found' && d.candidates.length === 1) {
+    let t;
+    try {
+      t = psProc('capture', { id: d.candidates[0].pid });
+    } catch (e) {
+      t = { result: 'error', message: e.message };
+    }
+    if (t.result === 'ok') {
+      rt.current.phase = 'RUNNING';
+      rt.current.pid = d.candidates[0].pid;
+      rt.current.creationFileTime = t.creationFileTime;
+      rt.current.image = t.image;
+      writeRuntime(home, appId, rt);
+      return rt.current;
+    }
+    rt.current.phase = 'UNKNOWN';
+    rt.current.lastError = `identity_capture_failed(target=${d.candidates[0].pid}): ${JSON.stringify(t)}`;
+    failUnresolved('IDENTITY_CAPTURE_FAILED', `已发现目标进程（pid=${d.candidates[0].pid}）但身份采集失败，标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { pid: d.candidates[0].pid, wrapperPid: child.pid, capture: t });
+  }
+
+  if (d.result === 'found') {
+    // 歧义即拒绝：候选清单留证，wrapper 仍在运行由人工决定处置
+    rt.current.phase = 'UNKNOWN';
+    rt.current.lastError = `discovery_ambiguous: ${JSON.stringify(d.candidates)}`;
+    failUnresolved('DISCOVERY_AMBIGUOUS', `wrapper(pid=${child.pid}) 后代中匹配 ${app.expectedImage} 的进程有 ${d.candidates.length} 个，拒绝任选一个；wrapper 仍在运行，证据已保留`, { wrapperPid: child.pid, expectedImage: app.expectedImage, candidates: d.candidates });
+  }
+
+  if (d.result === 'wrapperExited') {
+    // wrapper 死了且无目标：命令大概率失败——没有存活进程，落 STOPPED 可直接重试
+    rt.current.phase = 'STOPPED';
+    rt.current.endedAt = new Date().toISOString();
+    rt.current.exitNote = `command wrapper(pid=${child.pid}) 已退出且未发现匹配 ${app.expectedImage} 的目标进程`;
+    failUnresolved('SPAWN_FAILED', `命令已退出且未发现目标进程（expectedImage=${app.expectedImage}，详见 stderr 日志）`, { wrapperPid: child.pid });
+  }
+
+  if (d.result === 'timeout') {
+    rt.current.phase = 'UNKNOWN';
+    rt.current.lastError = `discovery_timeout: ${waitMs}ms 内未发现匹配 ${app.expectedImage} 的后代（wrapper pid=${child.pid}）`;
+    failUnresolved('DISCOVERY_TIMEOUT', `${waitMs}ms 内未发现匹配 ${app.expectedImage} 的后代进程；wrapper(pid=${child.pid}) 可能仍在启动中，证据保留，拒绝自动重试`, { wrapperPid: child.pid, expectedImage: app.expectedImage });
+  }
+
   rt.current.phase = 'UNKNOWN';
-  rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
-  writeRuntime(home, appId, rt);
-  throw conflictError('IDENTITY_CAPTURE_FAILED', `已拉起（pid=${child.pid}）但身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { runId, pid: child.pid, capture: cap, logPaths: rt.current.logPaths });
+  rt.current.lastError = `discovery_failed: ${JSON.stringify(d)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
+  failUnresolved('DISCOVERY_FAILED', `后代发现失败（${d.code ?? d.result}），标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { wrapperPid: child.pid, detail: d });
 }
 
 function writeRuntime(home, appId, rt) {
@@ -695,8 +871,9 @@ function cmdStartNew(ctx) {
     atomicWriteJson(registryPath(ctx.home), reg);
     const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
-      appId, alias: app.alias, entry: app.entry, mode: app.mode,
+      appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
+      ...(cur.wrapperPid ? { wrapperPid: cur.wrapperPid } : {}),
       readinessUntested: true, logPaths: cur.logPaths,
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
@@ -727,8 +904,9 @@ function cmdRecordUnmanaged(ctx) {
     } else {
       reg.apps[appId] = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
-        cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: d.mode === 'jrebel' ? 'jrebel' : 'java',
-        exe: null, args: [], envRefs: [], expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+        cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
+        exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
+        envRefs: [], expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
     }
@@ -740,7 +918,7 @@ function cmdRecordUnmanaged(ctx) {
       intentAt: now, startedAt: now, pid: null, creationFileTime: null, image: null,
       envResolved: [], logPaths: null, logHints,
       lastError: null, endedAt: null,
-      note: 'Skill 在既有授权下执行的启动，未托管目标 JVM；仅记录尝试与日志线索',
+      note: 'Skill 在既有授权下执行的启动，未托管目标进程；仅记录尝试与日志线索',
     };
     writeRuntime(ctx.home, appId, rt);
     return {
@@ -791,6 +969,7 @@ function cmdStatus(ctx, ref) {
     portNote: 'expectedPort 为配置预期值，P0 不做实际监听探测',
     run: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, mode: cur.mode,
+      kind: cur.kind ?? 'direct', wrapperPid: cur.wrapperPid ?? null,
       intentAt: cur.intentAt ?? null, startedAt: cur.startedAt ?? cur.intentAt,
       endedAt: cur.endedAt, pid: cur.pid ?? null,
       creationFileTime: cur.creationFileTime ?? null, image: cur.image ?? null,
@@ -816,12 +995,12 @@ function cmdStart(ctx, ref) {
   return withLock(ctx.home, appId, 'start', () => {
     const reg = readRegistry(ctx.home);
     const app = reg.apps[appId];
-    if (!app.exe) {
+    if (!app.exe && !app.command) {
       throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置；需 Skill 重新分析该项目并走 start-new`);
     }
     // 结构性检查：路径/产物失效只报该应用，不做全盘扫描（AC02）
     const cwd = realpathOrConflict('cwd', app.cwd);
-    const exe = resolveExe(app.exe, cwd);
+    const exe = app.command ? null : resolveExe(app.exe, cwd);
     const rt = readRuntimeStrict(ctx.home, appId);
     if (rt && rt.current && rt.current.managed && rt.current.phase === 'RUNNING') {
       const v = verifyRun(rt.current);
@@ -835,7 +1014,7 @@ function cmdStart(ctx, ref) {
     atomicWriteJson(registryPath(ctx.home), reg);
     const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
-      appId, alias: app.alias, entry: app.entry, mode: app.mode, source: 'saved-config',
+      appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       readinessUntested: true, logPaths: cur.logPaths,
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
@@ -856,6 +1035,7 @@ function stopCurrent(home, appId, app, rt) {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = 'terminated(137) 有界强制停止；不保证优雅关机';
+    cleanupWrapper(rt); // 命令模式：目标死后尽力清理残留 cmd wrapper
     writeRuntime(home, appId, rt);
     return { result: 'stopped', runId: cur.runId, pid: cur.pid };
   }
@@ -863,6 +1043,7 @@ function stopCurrent(home, appId, app, rt) {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = '进程已自行退出';
+    cleanupWrapper(rt);
     writeRuntime(home, appId, rt);
     return { result: 'alreadyStopped', runId: cur.runId };
   }
@@ -871,6 +1052,7 @@ function stopCurrent(home, appId, app, rt) {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = '进程退出后 PID 被复用；未触碰新进程';
+    cleanupWrapper(rt);
     writeRuntime(home, appId, rt);
     return { result: 'alreadyStopped', runId: cur.runId, note: '原实例已退出，PID 已被其他进程复用，未触碰新进程' };
   }
@@ -906,12 +1088,12 @@ function cmdRestart(ctx, ref) {
   return withLock(ctx.home, appId, 'restart', () => {
     const reg = readRegistry(ctx.home);
     const app = reg.apps[appId];
-    if (!app.exe) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
+    if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
     const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
     const cwd = realpathOrConflict('cwd', app.cwd);
-    const exe = resolveExe(app.exe, cwd);
+    const exe = app.command ? null : resolveExe(app.exe, cwd);
     app.cwd = cwd;
     app.exe = exe;
     app.updatedAt = new Date().toISOString();
@@ -995,9 +1177,10 @@ function listRuns(home, ref) {
 
 // ---------- ui 统一日志源与项目文件浏览（只读，替代原单项 viewer） ----------
 // 日志源三类：受管批次 logs/<appId>/<runId>.<stream>.log、非受管登记的 logHints、
-// 应用 root/.tmp 下 jrebel-local-* 兼容扫描。文件树/预览限定在应用 root 内。
+// 应用 root/.tmp 下 jrebel-local-*/runner-local-* 兼容扫描。文件树/预览限定在应用 root 内。
 
-const TMP_NAME_RE = /^jrebel-local-[^/\\]+\.(stdout|stderr)\.log$/;
+// 兼容两类约定名：jrebel-local-*（Java/JRebel 时代沿用）与 runner-local-*（非 Java 项目脚本日志）
+const TMP_NAME_RE = /^(?:jrebel|runner)-local-[^/\\]+\.(stdout|stderr)\.log$/;
 const UI_FILE_CHUNK = 256 * 1024;
 const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
   || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
@@ -1072,7 +1255,7 @@ function listSources(home, ref) {
     if (fs.statSync(tmpDir).isDirectory()) {
       for (const name of fs.readdirSync(tmpDir)) {
         if (!TMP_NAME_RE.test(name)) continue;
-        push({ src: `tmp:${name}`, kind: 'tmp', label: name.replace(/^jrebel-local-/, '').replace(/\.log$/, ''), current: false, stream: name.endsWith('.stdout.log') ? 'stdout' : 'stderr' }, path.join(tmpDir, name));
+        push({ src: `tmp:${name}`, kind: 'tmp', label: name.replace(/^(?:jrebel|runner)-local-/, '').replace(/\.log$/, ''), current: false, stream: name.endsWith('.stdout.log') ? 'stdout' : 'stderr' }, path.join(tmpDir, name));
       }
     }
   } catch { /* .tmp 缺失或为符号链接：无兼容日志 */ }
@@ -1412,6 +1595,14 @@ function usageText() {
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
     '  record-unmanaged --desc <file> [--log-hints p1,p2]   记录非受管启动尝试',
+    '',
+    '启动描述 mode 取值：java | jrebel | python | node | proc（其他真实可执行进程）。',
+    '受管目标两种形态（desc 二选一）：',
+    '  exe+args                 真实可执行文件（.exe/.com）；.cmd/.bat/.ps1 包装与',
+    '                           WindowsApps 应用执行别名会被拒绝',
+    '  command+expectedImage    脚本/复合命令（npm run dev、mvn spring-boot:run 等）；',
+    '                           manager 拉起 cmd wrapper 后在后代中按映像基名发现',
+    '                           唯一真实目标并托管；多个匹配拒绝任选（discoverTimeoutMs 可调）',
     '',
     'STARTING/UNKNOWN 未结记录默认拒绝启动（UNRESOLVED_RUN）；人工核验进程已退出后，',
     '用 --ack-unresolved <runId> 显式放弃旧账并重启：start <ref> --ack-unresolved <runId>',
