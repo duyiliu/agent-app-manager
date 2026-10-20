@@ -113,6 +113,47 @@ const check = async (name, fn) => {
 
 console.log(pwshOk ? 'pwsh 7 可用：执行全部检查' : '未检测到 pwsh 7：跳过依赖应用锁/身份核验的生命周期检查');
 
+// ---------- detect 只读启动描述候选 ----------
+const detectRoot = path.join(base, 'detect-fixtures');
+const viteRoot = path.join(detectRoot, 'vite-app');
+const mavenRoot = path.join(detectRoot, 'maven-app');
+const flaskRoot = path.join(detectRoot, 'flask-app');
+const emptyRoot = path.join(detectRoot, 'empty');
+for (const d of [viteRoot, mavenRoot, flaskRoot, emptyRoot]) fs.mkdirSync(d, { recursive: true });
+w(path.join(viteRoot, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' }, devDependencies: { vite: '^6' } }));
+w(path.join(mavenRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>');
+w(path.join(mavenRoot, 'mvnw'), '');
+w(path.join(flaskRoot, 'requirements.txt'), 'Flask==3.0\n');
+w(path.join(flaskRoot, 'app.py'), 'app = None\n');
+await check('detect vite/maven/flask 生成与 start-new schema 对齐的候选', async () => {
+  const before = fs.readFileSync(path.join(home, 'registry.json'), 'utf8');
+  const r = await run(['detect', '--root', detectRoot, '--json']);
+  assert.equal(r.code, 0, r.text);
+  const rows = r.json.data.candidates;
+  assert.equal(rows.length, 3);
+  const vite = rows.find((x) => x.evidence.rule.includes('package-script:dev'));
+  assert.equal(vite.desc.command, 'npm run dev');
+  assert.equal(vite.desc.expectedImage, 'node.exe');
+  const maven = rows.find((x) => x.evidence.rule.startsWith('maven-spring-boot'));
+  assert.equal(maven.desc.command, 'mvnw.cmd spring-boot:run');
+  assert.equal(maven.desc.mode, 'java');
+  const flask = rows.find((x) => x.evidence.rule === 'flask-app.py');
+  assert.equal(flask.desc.command, 'python -m flask --app app run');
+  assert.equal(flask.desc.mode, 'python');
+  assert(rows.every((x) => x.confidence && x.evidence.file));
+  assert.equal(fs.readFileSync(path.join(home, 'registry.json'), 'utf8'), before, 'detect 不得修改注册表');
+  assert.equal(fs.readdirSync(home, { recursive: true }).some((x) => String(x).includes('locks')), true);
+});
+await check('detect 空目录返回空数组和建议，不报错', async () => {
+  const r = await run(['detect', '--root', emptyRoot, '--json']);
+  assert.equal(r.code, 0, r.text);
+  assert.deepEqual(r.json.data.candidates, []);
+  assert(r.json.data.suggestion);
+});
+await check('detect 缺 root 使用参数错误契约', async () => {
+  assert.equal((await run(['detect', '--json'])).code, 1);
+});
+
 // ---------- logs 统一日志源 ----------
 
 await check('list-sources：JSON 输出与 ui 同一数据（hint + .tmp + 批次）', async () => {
