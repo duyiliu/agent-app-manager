@@ -1170,11 +1170,13 @@ function renderHuman(command, data) {
         `stdout=${data.logPaths.stdout}`,
         `stderr=${data.logPaths.stderr}`,
         data.note ?? '',
+        '观察：manager ui 可在浏览器只读查看全部受管应用与日志（Ctrl+C 退出）',
       ].filter(Boolean).join('\n');
     case 'record-unmanaged':
       return [
         `已记录非受管启动 ${data.alias} (${data.appId}) run=${data.runId}`,
         data.logHints?.length ? `日志线索: ${data.logHints.join(', ')}` : null,
+        '观察：非受管日志在项目 .tmp 下，可用单项目 viewer（log-viewer/server.mjs）查看',
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'stop':
