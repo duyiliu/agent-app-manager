@@ -20,7 +20,7 @@ const projAmb = path.join(base, 'amb-app');
 for (const d of [projNode, projPy, projUm, projCmd, projAmb]) fs.mkdirSync(d, { recursive: true });
 
 fs.writeFileSync(path.join(projNode, 'srv.js'),
-  'console.log("node-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
+  'console.log("node-ready PORT=" + (process.env.PORT ?? "<unset>"));\nsetInterval(() => {}, 1000);\n', 'utf8');
 fs.writeFileSync(path.join(projCmd, 'srv.js'),
   'console.log("cmd-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
 fs.writeFileSync(path.join(projAmb, 'srv.js'),
@@ -79,10 +79,18 @@ const winAppsStub = pyCandidates.find((p) => isWinAppsAlias(p));
 try {
   // ---------- node 受管生命周期 ----------
   let nodeRunId = null;
-  await check('node start-new 受管启动（裸名 node 解析为真实 exe）', () => {
-    const r = cli('start-new', '--desc', descFile({
-      alias: 'nodeapp', root: projNode, mode: 'node', exe: 'node', args: ['srv.js'], expectedPort: null,
-    }));
+  await check('node start-new 持久化 env，desc 值覆盖当前进程环境', () => {
+    const previousPort = process.env.PORT;
+    process.env.PORT = '9999';
+    let r;
+    try {
+      r = cli('start-new', '--desc', descFile({
+        alias: 'nodeapp', root: projNode, mode: 'node', exe: 'node', args: ['srv.js'], env: { PORT: '3001' }, expectedPort: null,
+      }));
+    } finally {
+      if (previousPort === undefined) delete process.env.PORT;
+      else process.env.PORT = previousPort;
+    }
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 0, r.text);
     assert.equal(r.json.data.status, 'RUNNING');
@@ -90,9 +98,11 @@ try {
     nodeRunId = r.json.data.runId;
   });
   if (nodeRunId) {
-    await check('node 日志出现就绪标记', async () => {
+    await check('node 日志出现就绪标记与 desc 环境值', async () => {
       const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${cli('status', 'nodeapp').json.data.appId}.json`), 'utf8'));
-      assert(await logHas(rt.current.logPaths.stdout, 'node-ready'), 'stdout 未见 node-ready');
+      assert(await logHas(rt.current.logPaths.stdout, 'node-ready PORT=3001'), 'stdout 未见 PORT=3001');
+      const reg = JSON.parse(fs.readFileSync(path.join(home, 'registry.json'), 'utf8'));
+      assert.equal(Object.values(reg.apps)[0].env.PORT, '3001');
     });
     await check('node status=RUNNING 且 logs 可读', () => {
       const s = cli('status', 'nodeapp');
@@ -105,6 +115,17 @@ try {
       const r = cli('stop', 'nodeapp');
       assert.equal(r.code, 0, r.text);
       assert.equal(cli('status', 'nodeapp').json.data.status, 'STOPPED');
+    });
+    await check('跨 node 进程 start 在 PORT 未设置时仍传递持久化值', async () => {
+      const childEnv = { ...process.env };
+      delete childEnv.PORT;
+      const start = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', 'start', 'nodeapp'],
+        { encoding: 'utf8', windowsHide: true, timeout: 60000, env: childEnv });
+      assert.equal(start.status, 0, `${start.stdout}${start.stderr}`);
+      assert.equal(cli('status', 'nodeapp').json.data.env.PORT, '3001');
+      const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${cli('status', 'nodeapp').json.data.appId}.json`), 'utf8'));
+      assert(await logHas(rt.current.logPaths.stdout, 'node-ready PORT=3001'), '跨进程 start 未见 PORT=3001');
+      assert.equal(cli('stop', 'nodeapp').code, 0);
     });
     await check('node restart 复用配置再启动 → 再停', () => {
       const r = cli('restart', 'nodeapp');
@@ -203,6 +224,14 @@ try {
   });
 
   // ---------- 拒绝路径 ----------
+  await check('非法 env 键名或非字符串值拒绝（USAGE 退出码 1）', () => {
+    for (const env of [{ 'BAD-NAME': 'x' }, { PORT: 3001 }]) {
+      const r = cli('start-new', '--desc', descFile({
+        alias: `badenv${Object.keys(env)[0].length}`, root: projNode, mode: 'node', exe: 'node', args: ['srv.js'], env,
+      }));
+      assert.equal(r.code, 1, r.text);
+    }
+  });
   await check('非法 mode 拒绝（USAGE 退出码 1）', () => {
     const r = cli('start-new', '--desc', descFile({
       alias: 'badmode', root: projNode, mode: 'jvm', exe: 'node', args: ['srv.js'],
