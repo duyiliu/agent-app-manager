@@ -3,10 +3,10 @@ import fs from 'node:fs';
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 export const MAX_LOG_LINES = 5000;
 
-export function readTailLines(file, n) {
+export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
   const want = Math.min(Math.max(1, n), MAX_LOG_LINES);
   const size = fs.statSync(file).size;
-  const start = Math.max(0, size - MAX_LOG_BYTES);
+  const start = Math.max(0, size - maxBytes);
   const fd = fs.openSync(file, 'r');
   let buf;
   try {

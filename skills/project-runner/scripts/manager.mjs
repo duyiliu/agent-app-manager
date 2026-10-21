@@ -649,7 +649,8 @@ function launchManaged(home, appId, app, opts = {}) {
 
   const failUnresolved = (code, message, detail) => {
     writeRuntime(home, appId, rt);
-    throw conflictError(code, message, { runId, logPaths: rt.current.logPaths, ...detail });
+    const stderrTail = readStderrTailSafe(rt.current.logPaths.stderr);
+    throw conflictError(code, message, { runId, logPaths: rt.current.logPaths, ...detail, stderrTail });
   };
 
   let child;
@@ -1375,7 +1376,13 @@ function cmdPrune(ctx) {
   };
 }
 
-
+function readStderrTailSafe(file) {
+  try {
+    return readTailLines(file, 20, 4 * 1024).lines.join('\n');
+  } catch {
+    return '';
+  }
+}
 
 // 解析 logs 与 ui 共用的日志目标：校验应用、runId 归属与流名，返回绝对路径（不读内容）
 function resolveLogFile(home, ref, run, stream = 'stdout') {
@@ -1797,7 +1804,10 @@ function emitErr(ctx, command, e) {
     process.stdout.write(`${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: false, command, error: err }, null, 2)}\n`);
   } else {
     let text = `错误[${e.code ?? 'UNKNOWN'}] ${e.message}`;
-    if (e.detail) text += `\n详情: ${typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)}`;
+    if (e.detail) {
+      text += `\n详情: ${typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)}`;
+      if (typeof e.detail.stderrTail === 'string' && e.detail.stderrTail) text += `\nstderr 尾部:\n${e.detail.stderrTail}`;
+    }
     process.stderr.write(`${text}\n`);
   }
   process.exit(e.exitCode ?? 1);
