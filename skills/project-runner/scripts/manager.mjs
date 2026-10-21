@@ -1284,7 +1284,7 @@ function cmdRemove(ctx, ref) {
 
 const STALE_LOCK_RE = /^[A-Za-z0-9._-]+\.lock\.stale-\d+$/;
 const TMP_ORPHAN_RE = /^\.tmp-\d+-[0-9a-f]+$/;
-const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log$/;
+const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/;
 const TMP_ORPHAN_RECENT_MS = 60 * 1000;
 
 const fileSizeOf = (p) => { try { return fs.statSync(p).size; } catch { return 0; } };
