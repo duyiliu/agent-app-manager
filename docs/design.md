@@ -112,7 +112,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 list [--json]
 status <alias|appId> [--probe] [--json]  # --probe 附加本机 TCP 监听探测
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
-doctor [--json]                          # 只读自检（不修复）
+doctor [--json]                          # 只读自检（不修复；损坏项收集到 problems[] 并继续，正常退出 0）
 start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
 stop <alias|appId> [--json]              # 仅 Managed
 restart <alias|appId> [--force] [--json] # 仅 Managed

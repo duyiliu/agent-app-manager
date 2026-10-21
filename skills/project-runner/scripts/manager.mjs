@@ -80,12 +80,28 @@ function parseArgv(argv) {
 function resolveHome(argHome, readOnly = false) {
   const raw = argHome || path.join(os.homedir(), '.project-runner');
   if (!path.isAbsolute(raw)) throw usageError(`--home 需要绝对路径：${raw}`);
-  if (readOnly) return fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
+  if (readOnly) {
+    try {
+      fs.statSync(raw);
+    } catch (e) {
+      if (e.code === 'ENOENT') return path.resolve(raw);
+      throw dataError('DATA_UNREADABLE', `数据目录不可访问（${raw}）：${e.message}`);
+    }
+    try {
+      return fs.realpathSync.native(raw);
+    } catch (e) {
+      throw dataError('DATA_UNREADABLE', `数据目录不可访问（${raw}）：${e.message}`);
+    }
+  }
   fs.mkdirSync(raw, { recursive: true });
   const home = fs.realpathSync.native(raw);
   for (const d of ['runtime', 'logs', 'locks']) fs.mkdirSync(path.join(home, d), { recursive: true });
   return home;
 }
+
+// 只读命令绝不创建 home/子目录；runtime、registry 缺失时由数据层按空数据处理。
+// 需要写回的场景（status 发现进程退出）在 home 不存在时本就无可写记录。
+const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune']);
 
 // ---------- PowerShell 进程适配 ----------
 
@@ -940,13 +956,52 @@ function cmdPort(ctx, value) {
 
 function cmdDoctor(ctx) {
   const home = ctx.home;
-  const reg = readRegistry(home);
+  const problems = [];
+  const addProblem = (file, e) => {
+    const code = e.code ?? 'UNKNOWN';
+    if (problems.some((p) => p.file === file && p.code === code)) return;
+    problems.push({ file, code, message: e.message });
+  };
+  // home 本身不存在视为空数据目录（只读诊断）；存在但不可访问才按数据错误拒绝。
+  let homeExists = false;
+  try {
+    homeExists = fs.existsSync(home);
+    if (homeExists) {
+      if (!fs.statSync(home).isDirectory()) throw dataError('DATA_UNREADABLE', `数据目录不是目录（${home}）`);
+      fs.accessSync(home, fs.constants.R_OK | fs.constants.X_OK);
+    }
+  } catch (e) {
+    if (e instanceof ManagerError) throw e;
+    throw dataError('DATA_UNREADABLE', `数据目录不可访问（${home}）：${e.message}`);
+  }
+
+  // 注册表损坏不阻塞其余独立诊断项；错误显式列入 problems，绝不静默当空注册表。
+  let reg = { schemaVersion: null, apps: {} };
+  try {
+    reg = readRegistry(home);
+  } catch (e) {
+    addProblem(registryPath(home), e);
+  }
+
   const runtimes = [];
   const runtimeDir = path.join(home, 'runtime');
-  if (fs.existsSync(runtimeDir)) for (const name of fs.readdirSync(runtimeDir)) {
+  let runtimeNames = [];
+  try {
+    if (homeExists && fs.existsSync(runtimeDir)) runtimeNames = fs.readdirSync(runtimeDir);
+  } catch (e) {
+    addProblem(runtimeDir, e);
+  }
+  for (const name of runtimeNames) {
     if (!/^[a-z0-9][a-z0-9-]{0,47}\.json$/.test(name)) continue;
     const appId = name.slice(0, -5);
-    const rt = readRuntimeStrict(home, appId);
+    let rt;
+    try {
+      rt = readRuntimeStrict(home, appId);
+    } catch (e) {
+      addProblem(runtimePath(home, appId), e);
+      runtimes.push({ appId, schemaVersion: null, prevRuns: 0, logs: [], error: e.code ?? 'UNKNOWN' });
+      continue;
+    }
     const logChecks = [];
     for (const run of [rt?.current, ...(rt?.prevRuns ?? [])].filter(Boolean)) {
       if (!run.runId || !run.managed) continue;
@@ -956,11 +1011,24 @@ function cmdDoctor(ctx) {
     runtimes.push({ appId, schemaVersion: rt.schemaVersion, prevRuns: rt.prevRuns?.length ?? 0, logs: logChecks });
   }
   const locksDir = path.join(home, 'locks');
-  const locks = fs.existsSync(locksDir) ? fs.readdirSync(locksDir).filter((n) => n.endsWith('.lock')) : [];
+  let locks = [];
+  try {
+    locks = homeExists && fs.existsSync(locksDir) ? fs.readdirSync(locksDir).filter((n) => n.endsWith('.lock')) : [];
+  } catch (e) {
+    addProblem(locksDir, e);
+  }
   const tempFiles = [];
   const scanTemps = (dir, depth = 0) => {
-    if (!fs.existsSync(dir) || depth > 2) return;
-    for (const name of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!homeExists || depth > 2) return;
+    let entries;
+    try {
+      if (!fs.existsSync(dir)) return;
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      addProblem(dir, e);
+      return;
+    }
+    for (const name of entries) {
       const file = path.join(dir, name.name);
       if (name.name.startsWith('.tmp-')) tempFiles.push(file);
       else if (name.isDirectory()) scanTemps(file, depth + 1);
@@ -968,12 +1036,13 @@ function cmdDoctor(ctx) {
   };
   for (const dir of [home, runtimeDir, path.join(home, 'logs'), locksDir]) scanTemps(dir);
   const pw = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
-  const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
+  const homeWritable = homeExists && (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
   const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
   return Promise.all(portSummary.map(async (p) => ({ ...p, listening: await p.listening }))).then((ports) => ({
     nodeVersion: process.version, pwshVersion: !pw.error && pw.status === 0 ? pw.stdout.trim() : null,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports,
-    note: '只读诊断；locks 项仅列出，不回收；端口监听不代表业务就绪',
+    problems,
+    note: '只读诊断；locks 项仅列出，不回收；端口监听不代表业务就绪；problems 列出损坏/不可读数据项（不修复）',
   }));
 }
 
@@ -2009,7 +2078,7 @@ function usageText() {
     '  list                              列出已登记应用与实时状态',
     '  status <alias|appId> [--probe]    单应用详情；--probe 检测本机 TCP 监听',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
-    '  doctor [--json]                    只读自检（不修复）',
+    '  doctor [--json]                    只读自检（不修复；损坏项记入 problems，正常退出 0）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
@@ -2056,7 +2125,7 @@ async function main() {
   try {
     ctx = parseArgv(process.argv.slice(2));
     command = ctx.command;
-    ctx.home = resolveHome(ctx.home, ['doctor', 'port', 'status', 'detect'].includes(command));
+    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command));
   } catch (e) {
     const c = command ?? 'cli';
     if (e instanceof ManagerError) emitErr({ json: false }, c, e);
