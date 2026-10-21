@@ -63,7 +63,7 @@ function posixCapture(pid) {
   }
   // 已退出但尚未被父进程回收的 zombie 仍留在 /proc；其 exe 链接已失效，
   // 不能靠 comm 把它继续当作存活实例，否则 ack 复核会误拒“已退出”的旧账。
-  if (stat.state === 'Z' || stat.state === 'X') return { result: 'notfound' };
+  if (stat.state === 'Z' || stat.state === 'X' || stat.state === 'x') return { result: 'notfound' };
   const image = readProcImage(pid);
   if (!image) return { result: 'error', code: 'imageUnavailable', message: `无法读取 /proc/${pid}/exe 或 comm` };
   return { result: 'ok', creationFileTime: `${readBootId()}:${stat.starttime}`, image };
@@ -98,7 +98,7 @@ function posixTerminate(params) {
   while (Date.now() < deadline) {
     try {
       const st = readProcStat(params.id);
-      if (st.state === 'Z' || st.state === 'X') return { result: 'terminated' };
+      if (st.state === 'Z' || st.state === 'X' || st.state === 'x') return { result: 'terminated' };
     } catch {
       return { result: 'terminated' };
     }
