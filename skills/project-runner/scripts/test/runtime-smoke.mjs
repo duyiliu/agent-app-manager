@@ -8,7 +8,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { isWindows, findExecutable, killTree } from './platform.mjs';
+import { isWindows, findExecutable, killTree, listDescendants, findProcesses } from './platform.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-runtime-smoke-'));
@@ -22,6 +22,9 @@ for (const d of [projNode, projPy, projUm, projCmd, projAmb]) fs.mkdirSync(d, { 
 
 fs.writeFileSync(path.join(projNode, 'srv.js'),
   'console.log("node-ready PORT=" + (process.env.PORT ?? "<unset>"));\nsetInterval(() => {}, 1000);\n', 'utf8');
+// #50 回归：detached 链路下多行 stdout 是否完整（内建/复合命令同样经过 pipe）
+fs.writeFileSync(path.join(projNode, 'multi.js'),
+  "console.log('multi-line-1');\nconsole.log('multi-line-2');\nconsole.log('multi-line-3');\nsetInterval(() => {}, 1000);\n", 'utf8');
 fs.writeFileSync(path.join(projCmd, 'srv.js'),
   'console.log("cmd-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
 fs.writeFileSync(path.join(projAmb, 'srv.js'),
@@ -55,7 +58,8 @@ const logHas = async (file, needle) => {
 
 let failed = 0;
 let skipped = false;
-let strayWrapperPids = []; // 歧义/超时场景残留的命令模式 wrapper，兜底 taskkill
+let strayWrapperPids = []; // 歧义/超时场景残留的命令模式 wrapper，兜底清理
+const strayPids = [];      // 当时仍在的后代进程（wrapper 可能先死，按 PID 定位更可靠）
 const check = async (name, fn) => {
   try { await fn(); console.log(`  ok  ${name}`); }
   catch (e) {
@@ -193,6 +197,7 @@ try {
       command: 'node two.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
+    for (const c of (r.json.error?.detail?.candidates ?? [])) strayPids.push(c.pid);
     strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? r.json.data?.wrapperPid ?? 0);
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS');
@@ -216,7 +221,10 @@ try {
       command: isWindows ? 'ping -n 30 127.0.0.1 >nul' : 'sleep 30', expectedImage: NODE_IMAGE, discoverTimeoutMs: 5000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
-    strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
+    const tmoWrapper = r.json.error?.detail?.wrapperPid ?? 0;
+    strayWrapperPids.push(tmoWrapper);
+    // 超时场景没有 candidates：枚举 wrapper 当时仍在的后代作为兜底证据（#46）
+    if (tmoWrapper) for (const pid of listDescendants(tmoWrapper)) strayPids.push(pid);
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'DISCOVERY_TIMEOUT');
   });
@@ -231,6 +239,18 @@ try {
     assert.equal(r.json.error.code, 'SPAWN_FAILED');
     assert.match(r.json.error.detail.stderrTail, /Cannot find module/);
     assert.equal(cli('status', 'cmdfail').json.data.status, 'STOPPED');
+  });
+  await check('命令模式多行 stdout 经 detached 链路完整（#50 回归）', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'mline', root: projNode, mode: 'node', command: 'node multi.js', expectedImage: NODE_IMAGE,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
+    assert(await logHas(rt.current.logPaths.stdout, 'multi-line-1'), 'stdout 缺失 multi-line-1');
+    assert(await logHas(rt.current.logPaths.stdout, 'multi-line-3'), 'stdout 缺失 multi-line-3');
+    assert.equal(cli('stop', 'mline').code, 0);
   });
   await check('desc 校验：command 缺 expectedImage / 与 exe 混填均拒绝', () => {
     const r1 = cli('start-new', '--desc', descFile({
@@ -317,12 +337,36 @@ try {
     assert(r.json.data.apps.some((a) => a.mode === 'node'));
   });
 } finally {
-  // 兜底：尽力停掉可能残留的受管进程与命令模式孤儿 wrapper
-  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'cmdamb', 'cmdtmo', 'cmdfail']) {
+  // 兜底：按当时仍在的后代 PID 清理，不只依赖 wrapper PID（wrapper 可能先死，#46）
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'cmdamb', 'cmdtmo', 'cmdfail']) {
     try { cli('stop', a); } catch { /* 忽略 */ }
   }
-  for (const p of strayWrapperPids.filter(Boolean)) killTree(p);
-  try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* 进程刚退出时日志句柄可能短暂占用，残留由 temp 目录兜底 */ }
+  const cleanupFailures = [];
+  for (const p of [...strayWrapperPids, ...strayPids].filter(Boolean)) {
+    if (!killTree(p)) cleanupFailures.push(p); // 多数情况是 wrapper 先死；最终由下方残留断言判定
+  }
+  if (cleanupFailures.length) console.log(`  note 清理未命中（进程可能已退出）：${cleanupFailures.join(', ')}`);
+  // 进程退出后句柄释放需要一点时间：轮询删除，仍失败则显式报告（不静默）
+  let removed = false;
+  for (let i = 0; i < 20 && !removed; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); removed = true; }
+    catch { await wait(100); }
+  }
+  if (!removed) {
+    failed++;
+    console.log(`  FAIL 临时目录未能清理：${base}（进程可能仍占用句柄）`);
+  }
+  // 回归断言：本轮启动的临时进程都已退出（kill 后进程退出需要一点时间，轮询等待）
+  let leftover = [];
+  for (let i = 0; i < 20; i++) {
+    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|setInterval|sleep 30').filter((pid) => pid !== process.pid);
+    if (!leftover.length) break;
+    await wait(250);
+  }
+  if (leftover.length) {
+    failed++;
+    console.log(`  FAIL 残留进程未退出：${leftover.join(', ')}`);
+  }
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }
 console.log('\nruntime smoke ok');
