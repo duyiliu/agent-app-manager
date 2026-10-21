@@ -11,12 +11,12 @@ node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json]
 # prune [--dry-run] [--apply]　回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run，--apply 才删除）
 # logs <别名|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow] [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]
 # ui [--port N] [--open]　本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌；--open 自动打开带令牌 URL，失败仅打印；URL 含令牌勿转发，Ctrl+C 退出）
-# 内部入口（Agent 用）：start-new --desc <file> [--ack-unresolved <runId>] | record-unmanaged --desc <file> [--log-hints p1,p2]
+# 内部入口（Agent 用）：detect --root <dir>（只读候选）| start-new --desc <file> [--ack-unresolved <runId>] | record-unmanaged --desc <file> [--log-hints p1,p2]
 ```
 
 Agent 使用规程：
 
-1. **首次启动（受管登记）**：按第 1/1A 节完成项目识别、第 3/4 节完成命令匹配与启动前检查后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`|`python`|`node`|`proc`），受管形态二选一——**直连** `exe`+`args`，或**命令模式** `command`+`expectedImage`：
+1. **首次启动（受管登记）**：先调用 `node "<安装目录>/scripts/manager.mjs" --json detect --root "<仓库根目录>"` 获取只读候选。detect 只扫描仓库证据，不登记、不启动、不写文件；逐项核对 `evidence`（命中的文件/规则名）与项目实际约定，对候选补齐/修正解释器、命令、入口、端口等尚未确定信息。候选只是草案，不能替代第 1/1A 节发现、第 3/4 节命令匹配与启动前检查；输出空数组时按原规程手工调查，不编造。确认候选适用于目标后，把经用户确认的启动描述写入临时 JSON 文件并调用 `start-new`。描述字段：`alias`（全局唯一别名，Windows 不区分大小写）、`root`/`cwd`（绝对路径）、`entry`（同仓库多应用时的入口标识，默认 `default`）、`mode`（`jrebel`|`java`|`python`|`node`|`proc`），受管形态二选一——**直连** `exe`+`args`，或**命令模式** `command`+`expectedImage`：
    - `exe`：**必须解析为真实可执行进程**。Java 为真实 JDK bin 的 `java.exe`（裸名 `java` 先取 `JAVA_HOME` 再查 PATH，Oracle javapath 转发 shim 会被拒绝——shim 让真实 JVM 变成子进程导致日志句柄不落地、终止错位）；Python 为 venv/真实 `python.exe`；Node 为 `node.exe`+入口 js。`.cmd`/`.bat`/`.ps1` 包装与 WindowsApps 0 字节 stub 一律拒绝。
    - `command`：完整命令行字符串（`npm run dev`、`mvn spring-boot:run`、`.cmd`/`.ps1` 脚本、复合命令），manager 经 `cmd /d /s /c` 拉起 wrapper 后按 PPID 后代发现目标；`expectedImage` 为目标进程映像基名（`node.exe`/`java.exe`/`dotnet.exe` 等）；可选 `discoverTimeoutMs`（默认 45000，慢启动可调大至 120000）。后代唯一匹配 → 托管；多候选 → `DISCOVERY_AMBIGUOUS` 拒绝并列清单（此时收编命令或转非受管）；wrapper 已退无目标 → `SPAWN_FAILED`；超时 → `DISCOVERY_TIMEOUT` 留证 UNKNOWN。命令模式 wrapper 不 detach，交互终端启动时应用随控制台生命周期；**不接受 args**（参数写进 command 本身）。
    - `args`（仅直连，字符串数组：Java 为 `-cp`/`-jar`+主类/参数含 JRebel agent 参数；Python/Node 为脚本/模块与参数）、`envRefs`（仅环境变量**名称**数组，值不落注册表；声明依赖宿主提供的变量）与 `env`（可选对象：合法变量名到字符串字面值，明文持久化到 registry 并在启动时覆盖当前环境同名值；**禁止存放机密**，机密走系统环境变量 + `envRefs`；human/JSON 状态回显值会截断）、`expectedPort`。manager 按“持久化意图 → 启动 → 同句柄身份采集/后代发现 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定。
