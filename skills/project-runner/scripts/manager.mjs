@@ -16,11 +16,14 @@ import http from 'node:http';
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { EXIT, SCHEMA_VERSION, ManagerError } from './lib/constants.mjs';
+import { registryPath, runtimePath, lockPath, readRegistry, readRuntimeStrict, atomicWriteJson } from './lib/store.mjs';
+import { UI_FILE_CHUNK, TMP_NAME_RE, uiBlocked, uiFail, uiResolveFile } from './lib/ui-data.mjs';
+import { readTailLines, MAX_LOG_LINES } from './lib/logs.mjs';
+import { retryProcessProbe } from './lib/proc.mjs';
 
-const SCHEMA_VERSION = 1;
-const EXIT = { OK: 0, USAGE: 1, NOT_FOUND: 2, CONFLICT: 3, DEPENDENCY: 4, DATA: 5 };
+export { SCHEMA_VERSION };
 const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
-const MAX_LOG_LINES = 5000;              // --lines 上限
 const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
 const PREV_RUNS_KEEP = 20;
 // 未结记录：STARTING（启动中断，pid 未采集）、UNKNOWN（身份不明，进程可能仍存活）
@@ -47,14 +50,6 @@ const COMMAND_DISCOVER_TIMEOUT_MS = 45000; // 命令模式后代发现默认上�
 
 // ---------- 错误契约 ----------
 
-class ManagerError extends Error {
-  constructor(code, message, exitCode, detail) {
-    super(message);
-    this.code = code;
-    this.exitCode = exitCode;
-    this.detail = detail;
-  }
-}
 const usageError = (m, d) => new ManagerError('USAGE', m, EXIT.USAGE, d);
 const notFoundError = (m, d) => new ManagerError('NOT_FOUND', m, EXIT.NOT_FOUND, d);
 const conflictError = (code, m, d) => new ManagerError(code, m, EXIT.CONFLICT, d);
@@ -129,17 +124,8 @@ function psProcOnce(action, params) {
   }
 }
 
-const PS_PROBE_ATTEMPTS = 3; // 仅针对 pwsh/Add-Type 编译的瞬时崩溃，不重试语义性失败
-
 function psProc(action, params = {}) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return psProcOnce(action, params);
-    } catch (e) {
-      // terminate 不重试：避免“已终止但响应丢失”后重试带来歧义（重试只会看到 notfound/exited）
-      if (!e.psTransient || action === 'terminate' || attempt >= PS_PROBE_ATTEMPTS) throw e;
-    }
-  }
+  return retryProcessProbe(action, () => psProcOnce(action, params));
 }
 
 function portOccupants(port) {
@@ -176,71 +162,25 @@ function selfIdentityCapture() {
   return selfIdentity;
 }
 
+// 核验结果的统一解释（单条 verify 与批量逐项共用，保证语义一致）。
 // 返回 {alive, reason}；reason: 'gone' | 'pidReused'。核验失败抛错（不猜）。
-function verifyRun(run) {
-  if (run.pid == null || !run.creationFileTime || !run.image) {
-    throw conflictError('IDENTITY_UNKNOWN', '运行记录缺少身份证据（pid/创建时间/映像），无法核验');
-  }
-  const r = psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image });
+function interpretVerifyResult(r) {
   if (r.result === 'ok') return { alive: true };
   if (r.result === 'exited' || r.result === 'notfound') return { alive: false, reason: 'gone' };
   if (r.result === 'mismatch') return { alive: false, reason: 'pidReused' };
   throw conflictError('IDENTITY_UNKNOWN', `身份核验失败（${r.code ?? r.result}），拒绝操作`, r);
 }
 
+function verifyRun(run) {
+  if (run.pid == null || !run.creationFileTime || !run.image) {
+    throw conflictError('IDENTITY_UNKNOWN', '运行记录缺少身份证据（pid/创建时间/映像），无法核验');
+  }
+  return interpretVerifyResult(psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image }));
+}
+
 // ---------- 注册表与运行记录 ----------
 
-function registryPath(home) { return path.join(home, 'registry.json'); }
-function runtimePath(home, appId) { return path.join(home, 'runtime', `${appId}.json`); }
-function lockPath(home, name) { return path.join(home, 'locks', `${name}.lock`); }
-
-function parseStructured(file, label) {
-  let raw;
-  try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (e) {
-    throw dataError('DATA_UNREADABLE', `${label} 不可读（${file}）：${e.message}`);
-  }
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch (e) {
-    throw dataError('DATA_CORRUPT', `${label} 损坏，拒绝覆盖并保留原件（${file}）：${e.message}`);
-  }
-  if (!obj || typeof obj !== 'object' || obj.schemaVersion !== SCHEMA_VERSION) {
-    throw dataError('DATA_UNSUPPORTED', `${label} schemaVersion=${obj && obj.schemaVersion} 不受支持（期望 ${SCHEMA_VERSION}），拒绝覆盖（${file}）`);
-  }
-  return obj;
-}
-
-function readRegistry(home) {
-  const p = registryPath(home);
-  if (!fs.existsSync(p)) return { schemaVersion: SCHEMA_VERSION, apps: {} };
-  const reg = parseStructured(p, '注册表');
-  if (!reg.apps || typeof reg.apps !== 'object') throw dataError('DATA_CORRUPT', `注册表结构无效（缺少 apps，${p}）`);
-  return reg;
-}
-
-function readRuntimeStrict(home, appId) {
-  const p = runtimePath(home, appId);
-  if (!fs.existsSync(p)) return null;
-  const rt = parseStructured(p, `运行记录(${appId})`);
-  if (rt.appId !== appId) throw dataError('DATA_CORRUPT', `运行记录 appId 不匹配（${p}）`);
-  return rt;
-}
-
-function atomicWriteJson(file, obj) {
-  const dir = path.dirname(file);
-  const tmp = path.join(dir, `.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', 'utf8');
-  try {
-    fs.renameSync(tmp, file);
-  } catch (e) {
-    try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }
-    throw dataError('DATA_UNWRITABLE', `写入失败（${file}）：${e.message}`);
-  }
-}
-
+/* Store reads/writes and atomic JSON persistence live in scripts/lib/store.mjs. */
 function archiveCurrent(rt, opts = {}) {
   if (rt.current) {
     const cur = rt.current;
@@ -438,6 +378,16 @@ function newRunId() {
   return `r${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
+function appContext(home, ref) {
+  if (!ref) throw usageError('需要 <alias|appId>');
+  const reg = readRegistry(home);
+  const appId = resolveAppId(reg, ref);
+  const app = reg.apps[appId];
+  const rt = readRuntimeStrict(home, appId);
+  const cur = rt?.current ?? null;
+  return { reg, appId, app, rt, cur };
+}
+
 function resolveAppId(reg, ref) {
   const s = String(ref);
   if (ID_RE.test(s) && reg.apps[s]) return s;
@@ -480,6 +430,8 @@ function loadManagedDesc(file) {
   if (d.discoverTimeoutMs != null && (!Number.isInteger(d.discoverTimeoutMs) || d.discoverTimeoutMs < 1000 || d.discoverTimeoutMs > 120000)) errs.push('discoverTimeoutMs 需为 1000-120000 整数');
   if (d.args != null && (!Array.isArray(d.args) || d.args.some((a) => typeof a !== 'string'))) errs.push('args 必须是字符串数组');
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
+  if (d.env != null && (!d.env || typeof d.env !== 'object' || Array.isArray(d.env))) errs.push('env 必须是环境变量名到字符串值的对象');
+  else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
@@ -496,6 +448,7 @@ function loadManagedDesc(file) {
     expectedImage: d.expectedImage ?? null,
     discoverTimeoutMs: d.discoverTimeoutMs ?? null,
     envRefs: d.envRefs ?? [],
+    env: d.env ?? {},
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
@@ -631,6 +584,7 @@ function upsertApp(reg, appId, desc) {
     existing.expectedImage = desc.expectedImage ?? null;
     existing.discoverTimeoutMs = desc.discoverTimeoutMs ?? null;
     existing.envRefs = desc.envRefs;
+    existing.env = desc.env ?? {};
     existing.expectedPort = desc.expectedPort ?? null;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
@@ -641,7 +595,7 @@ function upsertApp(reg, appId, desc) {
     appId, alias: desc.alias, displayName: desc.displayName, root: desc.root, entry: desc.entry,
     cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
-    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
+    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs, env: desc.env ?? {},
     expectedPort: desc.expectedPort ?? null, sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };
@@ -715,7 +669,7 @@ function launchManaged(home, appId, app, opts = {}) {
     child = spawn(file, argv, {
       cwd: app.cwd, detached: !isCommand, windowsHide: true,
       stdio: ['ignore', outFd, errFd],
-      env: { ...process.env },
+      env: { ...process.env, ...(app.env ?? {}) },
     });
     // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
     // 具体失败仍由下方身份采集/发现路径统一落账并保留证据
@@ -823,6 +777,7 @@ function writeRuntime(home, appId, rt) {
 
 // ---------- 状态计算（只读 + 就地标记；落账由 statusWithFacts 在锁内完成） ----------
 
+// 状态计算（只读 + 就地标记）。
 function computeStatus(home, appId, rt) {
   if (!rt || !rt.current) return { status: 'UNKNOWN', note: '无当前运行记录' };
   const cur = rt.current;
@@ -850,26 +805,30 @@ function computeStatus(home, appId, rt) {
   return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: `未知 phase=${cur.phase}` };
 }
 
-// 查询即核验，并按 OS 事实落账；落账在应用锁内二次确认同一 runId 后写入，
-// 避免与并发启动/停止对运行记录的写入互相覆盖。
+// 查询发现的进程退出落账：在应用锁内二次确认同一 runId 仍为 RUNNING 后写入，
+// 避免与并发启动/停止对运行记录的写入互相覆盖；锁忙或锁损坏时跳过（不阻塞只读命令）
+function settleStoppedWriteback(home, appId, marked) {
+  try {
+    withLock(home, appId, 'status-refresh', () => {
+      const rt2 = readRuntimeStrict(home, appId);
+      if (rt2 && rt2.current && rt2.current.runId === marked.runId && rt2.current.phase === 'RUNNING') {
+        rt2.current.phase = 'STOPPED';
+        rt2.current.endedAt = marked.endedAt;
+        rt2.current.exitNote = marked.exitNote;
+        writeRuntime(home, appId, rt2);
+      }
+    });
+  } catch {
+    // 跳过落账，查询结果照常返回
+  }
+}
+
+// 查询即核验，并按 OS 事实落账
 function statusWithFacts(home, appId) {
   const rt = readRuntimeStrict(home, appId);
   const st = computeStatus(home, appId, rt);
   if (st.writeback && rt && rt.current) {
-    const marked = { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId };
-    try {
-      withLock(home, appId, 'status-refresh', () => {
-        const rt2 = readRuntimeStrict(home, appId);
-        if (rt2 && rt2.current && rt2.current.runId === marked.runId && rt2.current.phase === 'RUNNING') {
-          rt2.current.phase = 'STOPPED';
-          rt2.current.endedAt = marked.endedAt;
-          rt2.current.exitNote = marked.exitNote;
-          writeRuntime(home, appId, rt2);
-        }
-      });
-    } catch {
-      // 锁忙或锁损坏：跳过落账，查询结果照常返回（不阻塞只读命令）
-    }
+    settleStoppedWriteback(home, appId, { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId });
   }
   return { rt, st };
 }
@@ -935,7 +894,7 @@ function cmdRecordUnmanaged(ctx) {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
-        envRefs: [], expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+        envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
     }
@@ -1021,8 +980,7 @@ function cmdList(ctx) {
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
     };
-  });
-  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
+  });  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };
 }
 
@@ -1052,6 +1010,12 @@ function extractJrebelEvidence(home, appId, cur) {
   };
 }
 
+function displayEnv(env = {}) {
+  return Object.fromEntries(Object.entries(env).map(([name, value]) => [
+    name, value.length > 120 ? `${value.slice(0, 120)}… (截断)` : value,
+  ]));
+}
+
 async function cmdStatus(ctx, ref, probeRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
@@ -1065,6 +1029,7 @@ async function cmdStatus(ctx, ref, probeRequested = false) {
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
+    env: displayEnv(app.env ?? {}),
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
@@ -1216,6 +1181,7 @@ function cmdRestart(ctx, ref) {
   });
 }
 
+// Bounded log tail implementation lives in scripts/lib/logs.mjs.
 // 移除注册表条目；运行记录与日志证据一律保留。仅允许无存活受管实例时移除：
 // RUNNING 核验存活一律拒绝（CONFLICT）；STARTING/UNKNOWN 未结记录按既有 ack 流程（核验已退出才可放弃）。
 function cmdRemove(ctx, ref) {
@@ -1409,42 +1375,18 @@ function cmdPrune(ctx) {
   };
 }
 
-function readTailLines(file, n) {
-  const want = Math.min(Math.max(1, n), MAX_LOG_LINES);
-  const size = fs.statSync(file).size;
-  const start = Math.max(0, size - MAX_LOG_BYTES);
-  const fd = fs.openSync(file, 'r');
-  let buf;
-  try {
-    buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-  } finally {
-    fs.closeSync(fd);
-  }
-  let text;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-  catch { text = new TextDecoder('gbk').decode(buf); }
-  let all = text.split(/\r?\n/);
-  if (all.length && all[all.length - 1] === '') all.pop();
-  const lines = all.slice(-want);
-  return { lines, truncated: start > 0 || all.length > want, skippedBytes: start };
-}
+
 
 // 解析 logs 与 ui 共用的日志目标：校验应用、runId 归属与流名，返回绝对路径（不读内容）
 function resolveLogFile(home, ref, run, stream = 'stdout') {
-  if (!ref) throw usageError('需要 <alias|appId>');
   if (!['stdout', 'stderr'].includes(stream)) throw usageError('--stream 只能是 stdout 或 stderr');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(home, appId);
-  const cur = rt && rt.current;
+  const { appId, app, rt, cur } = appContext(home, ref);
   const prev = rt && rt.prevRuns ? rt.prevRuns.find((p) => p.runId === run) : null;
   const runId = run ?? cur?.runId ?? null;
   // 非受管记录没有批次日志（设计边界：只记录日志线索，不接管日志）；报错要说清去哪找，不伪装成日志丢失
   if (!run && cur && !cur.managed) {
     const hints = (cur.logHints ?? []).filter((h) => typeof h === 'string' && h);
-    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（可用 logs ${ref} --src hint:N 读取线索，或在 manager ui 的日志源中选择）`);
+    throw notFoundError(`${app.alias} 为非受管记录，不提供批次日志${hints.length ? `；日志线索：${hints.join(', ')}` : ''}（可用 logs ${ref} --src hint:<hash> 读取线索，或在 manager ui 的日志源中选择）`);
   }
   if (prev && !prev.managed) {
     throw notFoundError(`runId=${runId} 为非受管记录，无批次日志；请按项目脚本输出路径或在 manager ui 的日志源中选择`);
@@ -1459,13 +1401,9 @@ function resolveLogFile(home, ref, run, stream = 'stdout') {
 
 // 运行批次列表（ui 日志选择器用）：当前批次 + prevRuns 全量
 function listRuns(home, ref) {
-  if (!ref) throw usageError('需要 <alias|appId>');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const rt = readRuntimeStrict(home, appId);
-  const cur = rt && rt.current;
+  const { appId, app, rt, cur } = appContext(home, ref);
   return {
-    appId, alias: reg.apps[appId].alias,
+    appId, alias: app.alias,
     current: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed,
       logPaths: cur.logPaths ?? null, logHints: cur.logHints ?? null,
@@ -1481,38 +1419,10 @@ function listRuns(home, ref) {
 // 日志源三类：受管批次 logs/<appId>/<runId>.<stream>.log、非受管登记的 logHints、
 // 应用 root/.tmp 下 jrebel-local-*/runner-local-* 兼容扫描。文件树/预览限定在应用 root 内。
 
-// 兼容两类约定名：jrebel-local-*（Java/JRebel 时代沿用）与 runner-local-*（非 Java 项目脚本日志）
-const TMP_NAME_RE = /^(?:jrebel|runner)-local-[^/\\]+\.(stdout|stderr)\.log$/;
-const UI_FILE_CHUNK = 256 * 1024;
-const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
-  || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
-  || /^(id_rsa|id_ed25519|credentials)(\..*)?$/i.test(name);
-const uiFail = (status, message) => Object.assign(new Error(message), { status });
-const uiInside = (base, file) => {
-  const rel = path.relative(base, file);
-  return rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + path.sep));
-};
-
-// 相对路径、无穿越、逐段非符号链接、realpath 仍在 base 内
-function uiResolveFile(base, rel = '') {
-  if (rel.includes('\\') || rel.includes('\0') || path.isAbsolute(rel)
-    || rel.split('/').some((p) => p === '..' || uiBlocked(p))) throw uiFail(403, '此路径不允许访问');
-  const candidate = path.resolve(base, rel);
-  if (!uiInside(base, candidate)) throw uiFail(403, '此路径不允许访问');
-  let walk = base;
-  for (const part of rel.split('/').filter(Boolean)) {
-    walk = path.join(walk, part);
-    if (fs.lstatSync(walk).isSymbolicLink()) throw uiFail(403, '不支持浏览符号链接');
-  }
-  const real = fs.realpathSync(candidate);
-  if (!uiInside(base, real)) throw uiFail(403, '此路径不允许访问');
-  return real;
-}
+// UI file-path policy and filtering live in scripts/lib/ui-data.mjs.
 
 function appRootOf(home, ref) {
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
+  const { appId, app } = appContext(home, ref);
   try {
     return { appId, app, root: fs.realpathSync.native(app.root) };
   } catch {
@@ -1520,13 +1430,13 @@ function appRootOf(home, ref) {
   }
 }
 
+// 非受管日志线索定位符：hint:<路径 hash>。listSources 与 tail 之间 current.logHints 可能变化，
+// 下标会错位读错文件；hash 定位与内容无关、与顺序无关，错位时明确报错而不是静默读错。
+const hintLocator = (hint) => `hint:${crypto.createHash('sha256').update(hint).digest('hex').slice(0, 12)}`;
+
 // 统一日志源列表：src 为不透明定位符（run:/hint:/tmp:），tail 时回传并重新校验
 function listSources(home, ref) {
-  if (!ref) throw usageError('需要 <alias|appId>');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(home, appId);
+  const { appId, app, rt } = appContext(home, ref);
   const curRunId = rt?.current?.runId ?? null;
   const sources = [];
   const seen = new Set();
@@ -1548,9 +1458,9 @@ function listSources(home, ref) {
       push({ src: `run:${m[1]}.${m[2]}`, kind: 'run', label: `${m[1]} · ${m[2]}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
     }
   }
-  (rt?.current?.logHints ?? []).forEach((hint, i) => {
+  (rt?.current?.logHints ?? []).forEach((hint) => {
     if (typeof hint !== 'string' || !path.isAbsolute(hint)) return;
-    push({ src: `hint:${i}`, kind: 'hint', label: `线索 · ${path.basename(hint)}`, current: true, stream: null }, hint);
+    push({ src: hintLocator(hint), kind: 'hint', label: `线索 · ${path.basename(hint)}`, current: true, stream: null }, hint);
   });
   try {
     const tmpDir = uiResolveFile(app.root, '.tmp');
@@ -1568,22 +1478,23 @@ function listSources(home, ref) {
 }
 
 function resolveSource(home, ref, src) {
-  if (!ref) throw usageError('需要 <alias|appId>');
-  const reg = readRegistry(home);
-  const appId = resolveAppId(reg, ref);
-  const app = reg.apps[appId];
-  const rt = readRuntimeStrict(home, appId);
+  const { appId, app, rt } = appContext(home, ref);
   if (typeof src !== 'string' || src.length > 200) throw usageError('日志源标识无效');
   let m;
   if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)$/.exec(src))) {
     return { appId, alias: app.alias, runId: m[1], stream: m[2], file: uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log`) };
   }
-  if ((m = /^hint:(\d{1,3})$/.exec(src))) {
-    const hint = (rt?.current?.logHints ?? [])[Number(m[1])];
-    if (typeof hint !== 'string' || !path.isAbsolute(hint)) throw notFoundError('日志线索不存在');
-    const real = fs.realpathSync(hint);
-    if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
-    return { appId, alias: app.alias, runId: null, stream: null, file: real };
+  if (src.startsWith('hint:')) {
+    if ((m = /^hint:([0-9a-f]{12})$/.exec(src))) {
+      const hints = (rt?.current?.logHints ?? []).filter((h) => typeof h === 'string' && path.isAbsolute(h));
+      const hint = hints.find((h) => hintLocator(h) === src);
+      if (!hint) throw notFoundError(`日志线索定位符失效（${src}）：登记的日志线索已变化或不存在，请重新拉取日志源列表`);
+      const real = fs.realpathSync(hint);
+      if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
+      return { appId, alias: app.alias, runId: null, stream: null, file: real };
+    }
+    // 旧版下标定位符（hint:0）或其他失效形状：一律明确报错，不静默解析，避免错位读错文件
+    throw notFoundError(`日志线索定位符无效或已失效（${src}）：定位符已改为 hint:<hash>，请重新拉取日志源列表`);
   }
   if ((m = /^tmp:(.+)$/.exec(src)) && TMP_NAME_RE.test(m[1])) {
     return { appId, alias: app.alias, runId: null, stream: m[1].endsWith('.stdout.log') ? 'stdout' : 'stderr', file: uiResolveFile(app.root, `.tmp/${m[1]}`) };
@@ -1752,13 +1663,21 @@ function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
         try {
           const s2 = fs.statSync(file).size;
           if (s2 > pos) {
+            // 最终 drain 与 tick 内读取同一上限：超过 MAX_LOG_BYTES 截断并提示，不无限占内存
+            const len = Math.min(s2 - pos, MAX_LOG_BYTES);
             const fd = fs.openSync(file, 'r');
-            const buf = Buffer.alloc(s2 - pos);
-            fs.readSync(fd, buf, 0, buf.length, pos);
-            fs.closeSync(fd);
-            try { process.stdout.write(decoder.decode(buf, { stream: true })); }
-            catch { encoding = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
-            pos = s2;
+            try {
+              const buf = Buffer.alloc(len);
+              fs.readSync(fd, buf, 0, len, pos);
+              try { process.stdout.write(decoder.decode(buf, { stream: true })); }
+              catch { encoding = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
+            } finally {
+              fs.closeSync(fd);
+            }
+            pos += len;
+            if (s2 - pos > 0) {
+              process.stderr.write(`\n[日志截断：进程退出后剩余 ${(s2 - pos)} 字节超过单次读取上限 ${MAX_LOG_BYTES} 字节，未继续输出；完整内容可用 manager logs 查看]\n`);
+            }
           }
         } catch { /* 忽略 */ }
         clearInterval(tick);
@@ -1888,10 +1807,10 @@ function renderHuman(command, data) {
   switch (command) {
     case 'list': {
       if (!data.apps?.length) return data.note ?? '（空）';
-      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'lastRunId';
+      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'lastRunId';
       const rows = data.apps.map((a) =>
         String(a.alias).padEnd(14) + String(a.mode ?? '').padEnd(8) + String(a.status).padEnd(10)
-        + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.lastRunId ?? '-')
+        + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7) + String(a.lastRunId ?? '-')
         + (a.error ? `\n  ! ${a.error}` : ''));
       return [head, ...rows].join('\n');
     }
@@ -1904,6 +1823,7 @@ function renderHuman(command, data) {
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
         data.run ? `run=${data.run.runId} phase=${data.run.phase} managed=${data.run.managed} started=${data.run.startedAt ?? '-'}` : 'run=无',
         data.run?.pid != null ? `pid=${data.run.pid}${data.run.creationFileTime ? ` creationFileTime=${data.run.creationFileTime}` : ''}${data.run.image ? ` image=${data.run.image}` : ''}` : null,
+        Object.keys(data.env ?? {}).length ? `env=${JSON.stringify(data.env)}` : null,
         data.run?.lastError ? `lastError: ${data.run.lastError}` : null,
         data.run?.logPaths?.stdout ? `stdout=${data.run.logPaths.stdout}` : null,
         data.run?.logPaths?.stderr ? `stderr=${data.run.logPaths.stderr}` : null,
@@ -2066,7 +1986,7 @@ function usageText() {
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
     '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
-    '       [--src <run:…|hint:N|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
+    '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
     '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
     '  ui [--port N] [--open]              本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌；--open 监听成功后用默认浏览器打开带令牌 URL，失败仅打印地址；Ctrl+C 退出）',
@@ -2097,6 +2017,11 @@ export { resolveHome, cmdList, cmdStatus, listRuns, resolveLogFile, listSources,
 // ---------- 入口 ----------
 
 async function main() {
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
+    process.stderr.write(`project-runner manager 需要 Node.js 20 或更高版本；当前版本：${process.versions.node}\n`);
+    process.exit(1);
+  }
   let ctx;
   let command;
   try {

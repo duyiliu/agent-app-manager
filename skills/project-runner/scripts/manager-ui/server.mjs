@@ -8,12 +8,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { SCHEMA_VERSION, errorStatus } from '../lib/constants.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
 const TAIL_CHUNK = 256 * 1024;
-const SCHEMA_VERSION = 1;
-
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
 // 常数时间比较：对两侧各做一次哈希拉平长度后 timingSafeEqual
@@ -28,19 +27,7 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-// ManagerError 退出码契约 → HTTP 状态；数据损坏必须原样透出，不静默当空数据
-function errorStatus(e) {
-  if (e.status) return e.status;
-  switch (e.exitCode) {
-    case 1: return 400;
-    case 2: return 404;
-    case 3: return 409;
-    case 4: return 503;
-    case 5: return 500;
-    default: return 500;
-  }
-}
-
+// ManagerError 退出码契约 → HTTP 状态的 errorStatus 经 lib/constants.mjs 与 CLI 共用，避免接口契约分叉；数据损坏必须原样透出，不静默当空数据
 // --open 拉起默认浏览器：任何失败都只降级为“已打印 URL”，绝不阻塞/中断 ui 常驻。
 // Windows 用 cmd /d /s /c start：首个引号参数是窗口标题，URL 加引号防查询串里的特殊字符被 cmd 截断。
 function openInBrowser(url) {

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax checks
+        shell: pwsh
+        run: |
+          node --check skills/project-runner/scripts/manager.mjs
+          node --check skills/project-runner/scripts/manager-ui/server.mjs
+          node --check skills/project-runner/scripts/lib/constants.mjs
+          node --check skills/project-runner/scripts/test/ui-smoke.mjs
+          node --check skills/project-runner/scripts/test/manager-smoke.mjs
+      - name: UI smoke test
+        shell: pwsh
+        run: |
+          node skills/project-runner/scripts/test/ui-smoke.mjs 2>&1 | Tee-Object -FilePath ui-smoke.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Manager smoke test
+        shell: pwsh
+        run: |
+          node skills/project-runner/scripts/test/manager-smoke.mjs 2>&1 | Tee-Object -FilePath manager-smoke.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            ui-smoke.log
+            manager-smoke.log
+            *.log
+            skills/project-runner/scripts/test/*.log
+          if-no-files-found: ignore
