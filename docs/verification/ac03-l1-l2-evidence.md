@@ -1,7 +1,8 @@
 # AC03 分层验证证据（受管 JVM 跨会话存活）
 
-> 关联 issue：#6（验证 AC03）
+> 关联 issue：#6（验证 AC03）、#17（补验 L3）
 > 验证时间：2026-10-18T23:39Z – 2026-10-18T23:57Z（UTC；本机 UTC+8，即 2026-10-19 07:39–07:57）
+> L3 补验时间：2026-10-20T09:40Z – 09:42Z（UTC；本机 17:40–17:42），见 §4.5，结果：**通过**
 > 验证对象：`skills/project-runner/scripts/manager.mjs`（本次未修改其行为）
 > 环境：Windows 11 家庭版 中文版 build 26300（64-bit）· Node v22.22.0 · PowerShell 7.6.7 · JDK 1.8.0_201（`C:\Program Files\Java\jdk1.8.0_201\bin\java.exe`，真实 JDK，非 javapath shim）
 > 隔离数据目录：worktree 内 `_ac03_tmp/home-*`（绝对路径，通过 `--home` 传入；测试产物不入库，验证后已删除）
@@ -12,9 +13,9 @@
 | --- | --- | --- |
 | **L1 父子脱离** | **通过** | `start-new` 的 manager 进程（pid=23756）退出后，受管 JVM（pid=25220）仍被 `Get-Process` 查到，跨 30s 复查仍在；另有一次 ~5 分钟持续存活观测。 |
 | **L2 新会话核验** | **通过** | manager 已退出的情况下，用多个**全新 node/pwsh 进程**分别执行 `status`（RUNNING + 创建时间/映像核验 `{"result":"ok"}`）、`logs`（读到该批次自身输出并可与原始文件逐行对照）、`stop`（进程消失、复检为 STOPPED）、`start`（新 runId 新 PID 起实例）。 |
-| **L3 真实 pi/Agent 会话退出后存活** | **未验证（开放）** | 本次运行内无法观察 run 结束后的进程状态；补验判据与命令见 §4。仅有**旁证**（非通过证据）：shell 所在 Job 的 `LimitFlags=0x800`（仅 `BREAKAWAY_OK`，无 `KILL_ON_JOB_CLOSE`），受管 JVM 不在该 Job；但受管 JVM 仍在另一个未识别 Job 中，无法排除 run 结束时被连带回收。 |
+| **L3 真实 pi/Agent 会话退出后存活** | **通过** | 真实嵌套 pi 会话（`pi --print`，真实模型+工具调用）内受管启动探针 JVM（runId=rmvghsoag-2e3f7277，pid=32908），会话正常退出后由会话外全新进程实测：进程存活（Get-Process）、`status=RUNNING` 且 runId/创建时间/映像一致、心跳日志跨退出时刻连续可读、`stop` 生效且状态如实转 STOPPED（§4.5 判据 a–d 全过，2026-10-20）。 |
 
-> 按 issue 要求：**未经验证 L3 不得宣称 AC03 全量通过**。`docs/design.md` 状态行已按此分层如实回写。
+> 按 issue 要求：**未经验证 L3 不得宣称 AC03 全量通过**。`docs/design.md` 状态行已按此分层如实回写；L3 已于 2026-10-20 补验通过（§4.5），AC03 现为全量通过。
 
 ## 1. 验证方法
 
@@ -175,7 +176,9 @@ no Ac03Probe process left
 
 **判读**：`status` / `logs` / `stop` / `start` 全部由「manager 已退出后的全新进程」完成，覆盖核验、查看日志、控制三类能力，且停止后状态如实转 STOPPED。
 
-## 4. L3 真实 pi/Agent 会话退出后存活（未验证，交付后续会话补验）
+## 4. L3 真实 pi/Agent 会话退出后存活（2026-10-20 已补验，通过）
+
+> 本节 §4.1–§4.4 为 2026-10-19 首次验证时留下的方法与旁证记录；§4.5 为按该计划执行的补验结果。
 
 ### 4.1 为何本次无法完成
 
@@ -239,9 +242,55 @@ no Ac03Probe process left
 - 执行人：宿主调度器（run 结束后）或用户指定的后续 pi/Agent 会话。
 - 时机：本 PR 合并前后均可，但不得在补验前把 `docs/design.md` 的 AC03 结论改为「全量通过」。
 
+### 4.5 补验结果（2026-10-20 执行，L3 通过）
+
+**执行方式（与 §4.3 计划的对应关系）**：本次补验由一次性编码执行器 run（agent-control 调度，下称「调度 run」）完成。调度 run 自身无法观察自己 run 结束后的状态（与 §4.1 同理），因此把「会话 A」落实为**一个真实嵌套的 pi 会话**：由调度 run 以 `pi --print --no-session --tools bash` 启动——print 模式一次性运行，具备真实模型（deepseek-v4.1-flash，经 new-api 网关）、真实 bash 工具调用与正常退出，是一条真实的 pi run。会话 A 的唯一动作：执行 `start-new` 受管启动探针 JVM，把启动结果原样写入 `sessionA-record.json`，随后不做任何清理、正常结束（真实 run 退出）。核验在**会话 A 之外**完成（§4.3 第 3 步）：由调度 run 会话发起，每条命令均为全新 node/pwsh 进程。
+
+**环境与隔离**：
+
+- 隔离 home：worktree 内 `_ac03_l3_tmp/home-l3`（绝对路径经 `--home` 传入；探针源码/`.class`、描述 JSON、各时间线文件均在 `_ac03_l3_tmp/`，验证后整体删除不入库）。
+- 探针：同 §1 的 `Ac03Probe`（真实 JDK 1.8.0_201 `java.exe`，`-Xms8m -Xmx32m`，每 2s 一行心跳）。
+- 本机环境注意：`pwsh` 解析到 WindowsApps 应用别名时 Node `spawnSync` 得 `EPERM`，属本机 shell 环境限制（与被测行为无关）；实验统一在 PATH 前置 `C:\Program Files\PowerShell\7` 后执行。`manager.mjs`/`proc.ps1` 行为未改动。
+
+**时间线（UTC）**：
+
+```text
+09:40:03  调度 run 启动会话 A（pi --print --no-session --tools bash）
+09:40:05  会话 A 的 pi node 进程 pid=30084
+09:40:11  会话 A 内 manager start-new 返回（写入 sessionA-record.json）：
+          runId=rmvghsoag-2e3f7277  pid=32908  appId=a063b6087f367c5f
+          status=RUNNING  managed=true  image=...jdk1.8.0_201\bin\java.exe
+09:40:12  会话 A 进程树快照：pi(30084) → bash(33332) → bash(2368) → node(33556, manager)
+          → pwsh(32172, proc.ps1 身份采集)；受管 JVM 同秒创建（CIM CreationDate=09:40:12Z）
+09:40:22  会话 A 正常退出（exitCode=0）；复查 pi node 30084 已消失 —— run 真实结束
+09:41:45  run 外观测：pid=32908 仍存活（java），其父（manager node 33556）与会话 A 均已不存在
+09:42:14  §4.3 判据 (a)–(d) 逐项实测开始（每条均为全新进程发起）
+09:42:19  实测结束：(a)–(d) 全部满足；stop 后复査 status=STOPPED
+```
+
+**判据逐项（§4.3 第 3、4 步）**：
+
+- **(a) 存活**：`Get-Process -Id 32908` → `java`，`StartTime=2026-10-20 17:40:12`（UTC+8），`Path=C:\Program Files\Java\jdk1.8.0_201\bin\java.exe`。会话 A 退出约 2 分钟后仍存活。
+- **(b) 身份核验**：`status --json`（全新 node 进程）→ `status=RUNNING, managed=true`，`run.runId=rmvghsoag-2e3f7277` 与会话 A 记录一致，`creationFileTime=134369628126685988`、`image=...jdk1.8.0_201\bin\java.exe`。
+- **(c) 日志**：`logs --lines 5`（全新 node 进程）读到本批次心跳 n=58–62（09:42:07–15Z），与原始日志文件末尾逐行一致；且心跳**跨会话 A 退出时刻连续无中断**：n=5@09:40:20.99Z →（A 于 09:40:22Z 退出）→ n=6@09:40:22.99Z → n=7@09:40:25.00Z → … → n=63@09:42:17.49Z（stop 前最后一跳）。证明读到的是会话 A 期间启动的那个批次自身持续落盘的日志，而非重新拼装。
+- **(d) 控制**：`stop --json`（全新 node 进程）→ `{result:"stopped", runId:"rmvghsoag-2e3f7277", pid:32908}`；随后 `Get-Process` 查不到 32908（stop 生效）；再查 `status` 如实转 `STOPPED`（`exitNote=terminated(137) 有界强制停止；不保证优雅关机`），未谎报 RUNNING。
+
+四条全部满足 → **AC03 L3 通过**。结论：该运行器（Windows 11 + Node 22 + pi CLI print 会话）具备 AC03 能力，Managed 启动路径无需按 §5 阻塞。
+
+**Job Object 补充观测（非通过依据，与 §4.2 旁证合并判读）**：
+
+- 受管 JVM `IsProcessInJob(any job)=yes`（仍在某个 Job 中）。用系统句柄表枚举（`NtQuerySystemInformation(SystemExtendedHandleInformation)` + `DuplicateHandle` + `QueryInformationJobObject`）取得全部 115 个可复制 Job 句柄：均**不包含**该 JVM（`IsProcessInJob(jvm, dup)=false`），且这些 Job 的 `LimitFlags=0x0`（无 `KILL_ON_JOB_CLOSE`）。
+- 包含该 JVM 的 Job 属主为受保护进程（System/services/svchost 及 3 个无法以 `PROCESS_DUP_HANDLE` 打开的 node 进程，共 167 个属主无法复制句柄），其 `LimitFlags` 仍不可读 —— 与 2026-10-19 §4.2 的旁证限制一致。另注：本机 build 26300 内核将句柄表条目的对象指针隐藏为 0，无法按内核对象去重，故按逐句柄观测聚合。
+- 因此「run 结束是否被 Job 连带回收」的最终判据依然是 run 结束后的进程实测；本次实测存活且可控，未发生连带回收。
+
+**诚实记录的边界（不改变结论，但如实说明）**：
+
+1. 会话 A 是真实 pi 会话，但由调度 run 嵌套启动（子进程）。若宿主为整个调度 run 再包一层 `KILL_ON_JOB_CLOSE` 的 Job，该层未被本实验直接检验。可复核的客观事实是：(i) 全部可读 Job 均无 `KILL_ON_JOB_CLOSE`；(ii) 2026-10-19 旁证中运行器 shell 所在 Job `LimitFlags=0x800`（仅 `BREAKAWAY_OK`）；(iii) 本次受管 JVM 在发起会话正常退出后存活并可控。三者共同表明各已知 Job 层均不连带回收后代；若宿主更换运行器或调度层，应按 §4.3 同一判据重验后再宣称 AC03 兼容。
+2. 会话 A 有两次失败尝试（desc JSON 转义笔误 → `USAGE`；pwsh 应用别名 `EPERM` → `PWSH_MISSING`），均发生在 `start-new` 真正执行之前，未产生任何受管进程、注册表或运行记录；第三次成功。失败输出保留在时间线文件中，随临时目录一并删除。
+
 ## 5. 清理记录
 
-- 所有受管实例均通过 `manager.mjs --json stop` 停止；清理后 `Get-CimInstance Win32_Process | ? CommandLine -like '*Ac03Probe*'` 返回 `no Ac03Probe process left`。
-- 验证脚本、探针源码/`.class`、各隔离 `home-*` 数据目录、临时描述 JSON 全部位于 worktree 内 `_ac03_tmp/`，验证完成后整体删除，不入库。
+- 2026-10-18/19（L1/L2）：所有受管实例均通过 `manager.mjs --json stop` 停止；清理后 `Get-CimInstance Win32_Process | ? CommandLine -like '*Ac03Probe*'` 返回 `no Ac03Probe process left`。
+- 验证脚本、探针源码/`.class`、各隔离 `home-*` 数据目录、临时描述 JSON 全部位于 worktree 内 `_ac03_tmp/`（L3 为 `_ac03_l3_tmp/`），验证完成后整体删除，不入库。
 - JVM 因本机内存压力产生过若干 `hs_err_pid*.log`（探针以 `-Xmx32m` 等小参数运行后不再出现），已一并删除。
 - 未改动 `manager.mjs` 行为；`node --check skills/project-runner/scripts/manager.mjs` 通过。
