@@ -9,18 +9,21 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 try { fs.unlinkSync(configPath); } catch { /* best effort */ }
 const { file, args, cwd, outPath, errPath, runtimeFile, runId, limit } = config;
 let outSize = 0;
+let errSize = 0;
 try { outSize = fs.statSync(outPath).size; } catch { /* first write */ }
+try { errSize = fs.statSync(errPath).size; } catch { /* first write */ }
 let outFd = fs.openSync(outPath, 'a');
 let errFd = fs.openSync(errPath, 'a');
-let rotated = false;
+const rotatedStreams = new Set();
 
-function markRotated() {
-  if (rotated) return;
-  rotated = true;
+function markRotated(stream) {
+  if (rotatedStreams.has(stream)) return;
+  rotatedStreams.add(stream);
   try {
     const rt = JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
     if (rt.current?.runId === runId) {
       rt.current.logRotated = true;
+      rt.current.logRotatedStreams = [...rotatedStreams];
       const tmp = `${runtimeFile}.tmp-${process.pid}`;
       fs.writeFileSync(tmp, JSON.stringify(rt, null, 2) + '\n');
       fs.renameSync(tmp, runtimeFile);
@@ -30,21 +33,30 @@ function markRotated() {
 
 const target = spawn(file, args, { cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 fs.writeFileSync(config.pidFile, String(target.pid));
+function writeChunk(stream, input) {
+  const isOut = stream === 'stdout';
+  let chunk = input;
+  let fd = isOut ? outFd : errFd;
+  let size = isOut ? outSize : errSize;
+  const filePath = isOut ? outPath : errPath;
+  if (chunk.length > limit) chunk = chunk.subarray(chunk.length - limit);
+  if (size + chunk.length > limit) {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+    try { fs.unlinkSync(`${filePath}.1`); } catch { /* absent */ }
+    try { fs.renameSync(filePath, `${filePath}.1`); } catch { /* best effort */ }
+    fd = fs.openSync(filePath, 'w');
+    size = 0;
+    if (isOut) outFd = fd; else errFd = fd;
+    markRotated(stream);
+  }
+  fs.writeSync(fd, chunk);
+  size += chunk.length;
+  if (isOut) outSize = size; else errSize = size;
+}
 function forward(stream, isOut) {
   stream.on('data', (input) => {
     try {
-      let chunk = input;
-      if (isOut && chunk.length > limit) chunk = chunk.subarray(chunk.length - limit);
-      if (isOut && outSize + chunk.length > limit) {
-        fs.closeSync(outFd);
-        try { fs.unlinkSync(`${outPath}.1`); } catch { /* absent */ }
-        try { fs.renameSync(outPath, `${outPath}.1`); } catch { /* best effort */ }
-        outFd = fs.openSync(outPath, 'w');
-        outSize = 0;
-        markRotated();
-      }
-      fs.writeSync(isOut ? outFd : errFd, chunk);
-      if (isOut) outSize += chunk.length;
+      writeChunk(isOut ? 'stdout' : 'stderr', input);
     } catch { /* logging failure must not terminate the target */ }
   });
 }
