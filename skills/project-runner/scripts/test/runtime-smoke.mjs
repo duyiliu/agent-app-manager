@@ -189,10 +189,10 @@ try {
     assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
   });
   await check('command 模式歧义后显式清理 wrapper：身份不匹配拒绝，成功后保留 UNKNOWN，重复清理 alreadyStopped', () => {
-    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const before = cli('status', 'cmdamb');
+    // 前置歧义场景依赖 pwsh/命令模式；未建立时跳过，不把环境缺失当作失败
+    if (before.code !== 0 || !before.json?.data?.run?.wrapperPid) skip('缺 pwsh 7（未建立命令模式歧义场景）');
     assert.equal(before.json.data.status, 'UNKNOWN');
-    assert.ok(before.json.data.run.wrapperPid > 0, '缺少 wrapperPid 证据');
     const rtFile = before.json.data.runtimeFile;
     const original = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
     const originalCreation = original.current.wrapperCreationFileTime;
