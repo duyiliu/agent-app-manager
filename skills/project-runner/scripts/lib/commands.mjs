@@ -9,7 +9,7 @@ import { SCHEMA_VERSION } from './constants.mjs';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
-import { psProc, verifyRun, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
+import { psProc, verifyRun, verifyRuns, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
 import { withLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
@@ -252,11 +252,29 @@ export function cmdDoctor(ctx) {
 export function cmdList(ctx) {
   const reg = readRegistry(ctx.home);
   const apps = Object.values(reg.apps);
+  // 一次批量核验所有 RUNNING 记录（#15/#51）：N 个受管应用只产生 1 次 pwsh 调用；
+  // 批量失败时回退逐条核验，语义与结果不变。
+  const prefetched = new Map();
+  const pending = [];
+  for (const app of apps) {
+    try {
+      const cur = readRuntimeStrict(ctx.home, app.appId)?.current;
+      if (cur && cur.managed && cur.phase === 'RUNNING' && cur.pid != null && cur.creationFileTime && cur.image) {
+        pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+      }
+    } catch { /* 损坏/不兼容记录在下方按 DATA_* 处理 */ }
+  }
+  if (pending.length) {
+    try {
+      const results = verifyRuns(pending);
+      pending.forEach((p, i) => { if (results[i]) prefetched.set(p.appId, results[i]); });
+    } catch { /* 回退逐条 */ }
+  }
   const rows = apps.map((app) => {
     let rt;
     let st;
     try {
-      ({ rt, st } = statusWithFacts(ctx.home, app.appId));
+      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null));
     } catch (e) {
       return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
     }

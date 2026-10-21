@@ -4,13 +4,16 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'terminate', 'discover')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'discover')]
   [string]$Action,
 
   [int]$Id = 0,
   [string]$CreationFileTime = '',
   [string]$Image = '',
-  [int]$WaitMs = 10000
+  [int]$WaitMs = 10000,
+  # verify-batch：UTF-8 JSON 数组的 base64，形如
+  # [{ "id": 123, "creationFileTime": "...", "image": "..." }, ...]
+  [string]$Json = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,7 +111,7 @@ public static class ProcUtil {
 # 每次 pwsh -File 都是新进程，直接编译加载即可
 Add-Type -TypeDefinition $typeSrc -Language CSharp
 
-function Convert-Result([string]$raw) {
+function Parse-Result([string]$raw) {
   $parts = $raw -split "`t", 3
   $obj = [ordered]@{}
   switch ($parts[0]) {
@@ -127,7 +130,34 @@ function Convert-Result([string]$raw) {
     'ERR' { $obj.result = 'error'; $obj.code = [string]$parts[1]; $obj.win32 = [int]$parts[2] }
     default { $obj.result = 'error'; $obj.code = 'unexpected'; $obj.raw = $raw }
   }
-  [pscustomobject]$obj | ConvertTo-Json -Compress
+  return [pscustomobject]$obj
+}
+
+function Convert-Result([string]$raw) {
+  Parse-Result $raw | ConvertTo-Json -Compress
+}
+
+# verify-batch：一次 pwsh 调用逐项核验，避免 list 对 N 个应用 spawn N 次（#15/#51）。
+# 与 verify 走同一 ProcUtil.Verify（同句柄核验），语义完全一致。
+if ($Action -eq 'verify-batch') {
+  if (-not $Json) {
+    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $items = @()
+  try {
+    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
+    $items = @($jsonText | ConvertFrom-Json)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $out = @()
+  foreach ($it in $items) {
+    $out += (Parse-Result ([ProcUtil]::Verify([int]$it.id, [long]$it.creationFileTime, [string]$it.image)))
+  }
+  $out | ConvertTo-Json -Compress
+  exit 0
 }
 
 if (($Action -in 'verify', 'terminate') -and (($Id -le 0) -or (-not $CreationFileTime) -or (-not $Image))) {
