@@ -28,6 +28,9 @@ w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line 
 w(path.join(proj, '.tmp', 'runner-local-20261021-100000.stderr.log'), 'tmp line B\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 w(path.join(proj, '.env'), 'SECRET=x\n');
+fs.mkdirSync(path.join(proj, '.ssh'), { recursive: true });
+w(path.join(proj, '.ssh', 'id_ecdsa'), 'PRIVATE KEY\n');
+w(path.join(proj, '.npmrc'), '//registry.npmjs.org/:_authToken=secret\n');
 w(hintFile, 'hint 1\n');
 const root = fs.realpathSync(proj);
 
@@ -179,13 +182,19 @@ try {
   });
 
   const tree = (await get('/api/tree?app=his&path=')).json.data;
-  await check('文件树：列出 pom.xml，隐藏 .env', () => {
+  await check('文件树：列出 pom.xml，隐藏 .env/.ssh/.npmrc', () => {
     assert(tree.entries.some((e) => e.name === 'pom.xml'));
     assert(!tree.entries.some((e) => e.name === '.env'));
+    assert(!tree.entries.some((e) => e.name === '.ssh'));
+    assert(!tree.entries.some((e) => e.name === '.npmrc'));
   });
   const file = (await get('/api/file?app=his&path=pom.xml')).json.data;
   await check('文件预览内容', () => assert(file.text.includes('<project/>')));
   await check('.env 拒绝（403）', async () => assert.equal((await get('/api/file?app=his&path=.env')).status, 403));
+  await check('.ssh/id_ecdsa 与 .npmrc 拒绝（403）', async () => {
+    assert.equal((await get('/api/file?app=his&path=' + encodeURIComponent('.ssh/id_ecdsa'))).status, 403);
+    assert.equal((await get('/api/file?app=his&path=' + encodeURIComponent('.npmrc'))).status, 403);
+  });
   await check('路径穿越拒绝（403）', async () => assert.equal((await get('/api/file?app=his&path=..%2Fregistry.json')).status, 403));
   await check('ghost 项目目录缺失 tree 404', async () => assert.equal((await get('/api/tree?app=ghost&path=')).status, 404));
 

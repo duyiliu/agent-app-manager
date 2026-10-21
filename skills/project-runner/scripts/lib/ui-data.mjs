@@ -4,9 +4,10 @@ import path from 'node:path';
 export const UI_FILE_CHUNK = 256 * 1024;
 // 兼容两类约定名：jrebel-local-*（Java/JRebel 时代沿用）与 runner-local-*（非 Java 项目脚本日志）
 export const TMP_NAME_RE = /^(?:jrebel|runner)-local-[^/\\]+\.(stdout|stderr)\.log$/;
-export const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
+export const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties|\.ssh|\.aws|\.kube|\.docker|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.authinfo)$/i.test(name)
   || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
-  || /^(id_rsa|id_ed25519|credentials)(\..*)?$/i.test(name);
+  || /^id_(rsa|dsa|ecdsa|ed25519)(\..*)?$/i.test(name)
+  || /^credentials(\..*)?$/i.test(name);
 export const uiFail = (status, message) => Object.assign(new Error(message), { status });
 export const uiInside = (base, file) => {
   const rel = path.relative(base, file);
