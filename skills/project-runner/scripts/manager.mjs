@@ -1285,6 +1285,7 @@ function cmdRemove(ctx, ref) {
 const STALE_LOCK_RE = /^[A-Za-z0-9._-]+\.lock\.stale-\d+$/;
 const TMP_ORPHAN_RE = /^\.tmp-\d+-[0-9a-f]+$/;
 const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/;
+const RUN_META_FILE_RE = /^\.([a-z0-9][a-z0-9-]{0,47})\.(pid|sink\.json)$/;
 const TMP_ORPHAN_RECENT_MS = 60 * 1000;
 
 const fileSizeOf = (p) => { try { return fs.statSync(p).size; } catch { return 0; } };
@@ -1343,7 +1344,7 @@ function planPrune(home) {
         if (rt?.current?.runId) retain.add(rt.current.runId);
         const files = [];
         for (const name of fs.readdirSync(dir)) {
-          const m = RUN_LOG_FILE_RE.exec(name);
+          const m = RUN_LOG_FILE_RE.exec(name) ?? RUN_META_FILE_RE.exec(name);
           if (!m || retain.has(m[1])) continue;
           const file = path.join(dir, name);
           files.push({ runId: m[1], stream: m[2], file, size: fileSizeOf(file) });
@@ -1967,7 +1968,7 @@ function renderHuman(command, data) {
         ? 'prune 预览（默认 dry-run，未删除任何文件；确认后加 --apply 执行）'
         : 'prune 完成，已删除以下文件'];
       let any = false;
-      for (const a of data.logs) for (const f of a.files) { any = true; lines.push(`- [超保留期批次日志] ${f.file}（${f.size} 字节，run=${f.runId}.${f.stream}，appId=${a.appId}）`); }
+      for (const a of data.logs) for (const f of a.files) { any = true; const kind = /^(stdout|stderr)$/.test(f.stream) ? '超保留期批次日志' : '超保留期运行元文件'; lines.push(`- [${kind}] ${f.file}（${f.size} 字节，run=${f.runId}.${f.stream}，appId=${a.appId}）`); }
       for (const f of data.staleLocks) { any = true; lines.push(`- [死锁残留] ${f.file}（${f.size} 字节）`); }
       for (const f of data.tmpOrphans) { any = true; lines.push(`- [孤儿临时文件] ${f.file}（${f.size} 字节）`); }
       for (const s of data.skipped) lines.push(`  跳过 ${s.target}：${s.reason}`);
