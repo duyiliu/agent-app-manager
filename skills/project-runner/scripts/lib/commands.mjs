@@ -144,23 +144,57 @@ export function cmdPort(ctx, value) {
 
 export function cmdDoctor(ctx) {
   const home = ctx.home;
-  const reg = readRegistry(home);
+  const problems = [];
+  const addProblem = (file, e) => {
+    const code = e.code ?? 'UNKNOWN';
+    if (problems.some((p) => p.file === file && p.code === code)) return;
+    problems.push({ file, code, message: e.message });
+  };
+
+  // 注册表损坏不阻断其余独立诊断项；错误显式列入 problems，绝不静默当空注册表。
+  let reg = { schemaVersion: null, apps: {} };
+  try {
+    reg = readRegistry(home);
+  } catch (e) {
+    addProblem(registryPath(home), e);
+  }
+
   const runtimes = [];
   const runtimeDir = path.join(home, 'runtime');
-  if (fs.existsSync(runtimeDir)) for (const name of fs.readdirSync(runtimeDir)) {
+  let runtimeNames = [];
+  try {
+    if (fs.existsSync(runtimeDir)) runtimeNames = fs.readdirSync(runtimeDir);
+  } catch (e) {
+    addProblem(runtimeDir, e);
+  }
+  for (const name of runtimeNames) {
     if (!/^[a-z0-9][a-z0-9-]{0,47}\.json$/.test(name)) continue;
     const appId = name.slice(0, -5);
-    const rt = readRuntimeStrict(home, appId);
+    let rt;
+    try {
+      rt = readRuntimeStrict(home, appId);
+    } catch (e) {
+      addProblem(runtimePath(home, appId), e);
+      runtimes.push({ appId, schemaVersion: null, prevRuns: 0, logs: [], error: e.code ?? 'UNKNOWN' });
+      continue;
+    }
     const logChecks = [];
     for (const run of [rt?.current, ...(rt?.prevRuns ?? [])].filter(Boolean)) {
       if (!run.runId || !run.managed) continue;
       const paths = run.logPaths ?? { stdout: path.join(home, 'logs', appId, `${run.runId}.stdout.log`), stderr: path.join(home, 'logs', appId, `${run.runId}.stderr.log`) };
       for (const stream of ['stdout', 'stderr']) logChecks.push({ runId: run.runId, stream, exists: !!paths[stream] && fs.existsSync(paths[stream]) });
     }
-    runtimes.push({ appId, schemaVersion: rt?.schemaVersion, prevRuns: rt?.prevRuns?.length ?? 0, logs: logChecks });
+    runtimes.push({ appId, schemaVersion: rt.schemaVersion, prevRuns: rt.prevRuns?.length ?? 0, logs: logChecks });
   }
+
   const locksDir = path.join(home, 'locks');
-  const locks = fs.existsSync(locksDir) ? fs.readdirSync(locksDir).filter((n) => n.endsWith('.lock')) : [];
+  let locks = [];
+  try {
+    locks = fs.existsSync(locksDir) ? fs.readdirSync(locksDir).filter((n) => n.endsWith('.lock')) : [];
+  } catch (e) {
+    addProblem(locksDir, e);
+  }
+
   const tempFiles = [];
   const scanTemps = (dir, depth = 0) => {
     if (!fs.existsSync(dir) || depth > 2) return;
@@ -170,7 +204,10 @@ export function cmdDoctor(ctx) {
       else if (name.isDirectory()) scanTemps(file, depth + 1);
     }
   };
-  for (const dir of [home, runtimeDir, path.join(home, 'logs'), locksDir]) scanTemps(dir);
+  for (const dir of [home, runtimeDir, path.join(home, 'logs'), locksDir]) {
+    try { scanTemps(dir); } catch (e) { addProblem(dir, e); }
+  }
+
   const isWin = process.platform === 'win32';
   const isLinux = process.platform === 'linux';
   let pw = { error: true, status: null, stdout: '' };
@@ -188,8 +225,8 @@ export function cmdDoctor(ctx) {
     pwshVersion: isWin && !pw.error && pw.status === 0 ? pw.stdout.trim() : null,
     bootId: isLinux ? bootId() : null,
     procReadable,
-    home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports,
-    note: '只读诊断；locks 项仅列出，不回收；端口监听不代表业务就绪',
+    home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports, problems,
+    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；端口监听不代表业务就绪',
   }));
 }
 

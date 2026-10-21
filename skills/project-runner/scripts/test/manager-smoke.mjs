@@ -29,6 +29,14 @@ const run = (args, { json = true } = {}) => {
   try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（文本模式或崩溃） */ }
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
 };
+const runAt = (targetHome, args, { json = true } = {}) => {
+  const r = spawnSync(process.execPath, [MANAGER, '--home', targetHome, ...(json ? ['--json'] : []), ...args], {
+    encoding: 'utf8', timeout: 120000, windowsHide: true,
+  });
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON */ }
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
+};
 const isPsMissing = (r) => r.code === 4
   && (r.json?.error?.code === 'PWSH_MISSING' || r.stdout.includes('PWSH_MISSING') || r.stderr.includes('PWSH_MISSING'));
 
@@ -97,9 +105,41 @@ try {
     assert.equal(r.json.error.code, 'NOT_FOUND');
   });
 
+  check('只读命令在空 home 上不创建数据目录', () => {
+    const emptyHome = path.join(base, 'empty-home');
+    assert.equal(runAt(emptyHome, ['list']).code, 0);
+    assert.equal(runAt(emptyHome, ['logs', 'ghost']).code, 2);
+    assert.equal(runAt(emptyHome, ['prune']).code, 0);
+    assert.equal(fs.existsSync(emptyHome), false, '只读命令不应创建 home');
+  });
+
+  check('doctor 逐项收集损坏记录并继续输出其余诊断', () => {
+    const dh = path.join(base, 'doctor-home');
+    fs.mkdirSync(path.join(dh, 'runtime'), { recursive: true });
+    fs.mkdirSync(path.join(dh, 'locks'), { recursive: true });
+    fs.mkdirSync(path.join(dh, 'logs'), { recursive: true });
+    const homeReal = fs.realpathSync.native(dh);
+    const registryFile = path.join(homeReal, 'registry.json');
+    const corruptRuntime = path.join(homeReal, 'runtime', 'abad.json');
+    const goodRuntime = path.join(homeReal, 'runtime', 'agood.json');
+    fs.writeFileSync(registryFile, '{broken');
+    fs.writeFileSync(corruptRuntime, '{broken');
+    fs.writeFileSync(goodRuntime, JSON.stringify({ schemaVersion: 1, appId: 'agood', current: null, prevRuns: [] }));
+    fs.writeFileSync(path.join(homeReal, 'locks', 'agood.lock'), '{}');
+    const orphan = path.join(homeReal, '.tmp-1234-deadbeef');
+    fs.writeFileSync(orphan, 'x');
+    const r = runAt(homeReal, ['doctor']);
+    assert.equal(r.code, 0, `doctor 应正常退出：${r.stdout}${r.stderr}`);
+    assert.equal(r.json.ok, true);
+    assert(r.json.data.problems.find((p) => p.file === registryFile), '缺少损坏注册表');
+    assert(r.json.data.problems.find((p) => p.file === corruptRuntime), '缺少损坏运行记录');
+    assert(r.json.data.runtime.some((x) => x.appId === 'agood'), '健康运行记录应继续输出');
+    assert(r.json.data.locks.includes('agood.lock'), '锁诊断不应被阻断');
+    assert(r.json.data.orphanTmpFiles.includes(orphan), '临时文件诊断不应被阻断');
+  });
+
   // POSIX 专属：shell 脚本是包装进程，真实目标会变成解释器子进程，必须拒绝。
-  if (!isWindows) {
-    check('POSIX: exe 指向 #! 脚本被拒绝（CONFIG_INVALID，退出码 3）', () => {
+  if (!isWindows) {    check('POSIX: exe 指向 #! 脚本被拒绝（CONFIG_INVALID，退出码 3）', () => {
       const fake = path.join(base, 'fake.sh');
       fs.writeFileSync(fake, '#!/bin/sh\necho hi\n');
       fs.chmodSync(fake, 0o755);
