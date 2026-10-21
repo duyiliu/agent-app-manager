@@ -6,6 +6,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION, errorStatus } from '../lib/constants.mjs';
 
@@ -26,8 +27,29 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-// HTTP 错误状态映射与 CLI/API 常量共用，避免接口契约分叉。
-export async function startUiServer({ home, port = 0, api }) {
+// ManagerError 退出码契约 → HTTP 状态的 errorStatus 经 lib/constants.mjs 与 CLI 共用，避免接口契约分叉；数据损坏必须原样透出，不静默当空数据
+// --open 拉起默认浏览器：任何失败都只降级为“已打印 URL”，绝不阻塞/中断 ui 常驻。
+// Windows 用 cmd /d /s /c start：首个引号参数是窗口标题，URL 加引号防查询串里的特殊字符被 cmd 截断。
+function openInBrowser(url) {
+  try {
+    let child;
+    if (process.platform === 'win32') {
+      child = spawn('cmd', ['/d', '/s', '/c', `start "" "${url}"`], { detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true });
+    } else if (process.platform === 'darwin') {
+      child = spawn('open', [url], { detached: true, stdio: 'ignore' });
+    } else {
+      child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+    }
+    child.on('error', () => {
+      process.stdout.write(`[project-runner] 自动打开浏览器失败，请手动访问上方地址\n`);
+    });
+    child.unref();
+  } catch {
+    process.stdout.write(`[project-runner] 自动打开浏览器失败，请手动访问上方地址\n`);
+  }
+}
+
+export async function startUiServer({ home, port = 0, open = false, api }) {
   const token = crypto.randomBytes(24).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(token).digest();
   let boundPort = port;
@@ -43,7 +65,7 @@ export async function startUiServer({ home, port = 0, api }) {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...api.list(), home } });
     }
     if (u.pathname === '/api/status') {
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.status(u.searchParams.get('app') || '') });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.status(u.searchParams.get('app') || '') });
     }
     if (u.pathname === '/api/runs') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listRuns(u.searchParams.get('app') || '') });
@@ -55,7 +77,7 @@ export async function startUiServer({ home, port = 0, api }) {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listTree(u.searchParams.get('app') || '', u.searchParams.get('path') || '') });
     }
     if (u.pathname === '/api/file') {
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.readFile(u.searchParams.get('app') || '', u.searchParams.get('path') || '') });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.readFile(u.searchParams.get('app') || '', u.searchParams.get('path') || '', u.searchParams.get('offset') || '0') });
     }
     if (u.pathname === '/api/tail') {
       const src = u.searchParams.get('src');
@@ -78,9 +100,24 @@ export async function startUiServer({ home, port = 0, api }) {
       } finally {
         fs.closeSync(fd);
       }
+      const bytes = buf.subarray(0, read);
+      let encoding = 'utf-8';
+      let validUtf8 = false;
+      // Tail offsets/chunk boundaries may split a UTF-8 code point. Ignore only
+      // up to three boundary bytes while still strictly validating the payload.
+      for (let prefix = 0; prefix <= 3 && !validUtf8; prefix++) {
+        for (let suffix = 0; suffix <= 3 && prefix + suffix <= bytes.length; suffix++) {
+          try {
+            new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(prefix, bytes.length - suffix));
+            validUtf8 = true;
+            break;
+          } catch { /* retry after excluding a possible partial boundary code point */ }
+        }
+      }
+      if (!validUtf8) encoding = 'gbk';
       return sendJson(res, 200, {
         schemaVersion: SCHEMA_VERSION, ok: true,
-        data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, start: offset, offset: offset + read, size, b64: buf.subarray(0, read).toString('base64') },
+        data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, start: offset, offset: offset + read, size, encoding, b64: bytes.toString('base64') },
       });
     }
     throw fail(404, '接口不存在');
@@ -106,8 +143,9 @@ export async function startUiServer({ home, port = 0, api }) {
     route(res, u).catch((e) => {
       const status = errorStatus(e);
       if (status >= 500) console.error(e?.stack ?? e);
-      // 4xx 是面向用户的业务错误（未找到/非受管/状态冲突等），原样透出消息；5xx 保持通用文案
-      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: status < 500 ? e.message : '读取失败，请刷新重试' } });
+      // ManagerError 业务原因（包括依赖/冲突）原样透出；未知内部错误仍使用通用文案。
+      const known = Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 5;
+      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: known || status < 500 ? e.message : '读取失败，请刷新重试' } });
     });
   }
 
@@ -122,13 +160,15 @@ export async function startUiServer({ home, port = 0, api }) {
       resolve();
     });
   });
+  const uiUrl = `http://127.0.0.1:${boundPort}/?token=${token}`;
   process.stdout.write([
     '',
-    `[project-runner] 运行管理台（只读）: http://127.0.0.1:${boundPort}/?token=${token}`,
+    `[project-runner] 运行管理台（只读）: ${uiUrl}`,
     `  数据目录: ${home}`,
     '  该地址包含访问令牌，请勿转发给他人；页面展示的日志可能含敏感信息。',
     '  Ctrl+C 退出（无常驻服务，退出即停止）。',
     '',
   ].join('\n') + '\n');
+  if (open) openInBrowser(uiUrl);
   await new Promise(() => { /* 常驻直到进程被终止 */ });
 }

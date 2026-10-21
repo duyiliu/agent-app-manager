@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const UI_FILE_CHUNK = 256 * 1024;
-export const TMP_NAME_RE = /^jrebel-local-[^/\\]+\.(stdout|stderr)\.log$/;
+// 兼容两类约定名：jrebel-local-*（Java/JRebel 时代沿用）与 runner-local-*（非 Java 项目脚本日志）
+export const TMP_NAME_RE = /^(?:jrebel|runner)-local-[^/\\]+\.(stdout|stderr)\.log$/;
 export const uiBlocked = (name) => /^(\.git|node_modules|\.env.*|jrebel\.properties)$/i.test(name)
   || /\.(pem|key|p12|pfx|lic|keystore|jks)$/i.test(name)
   || /^(id_rsa|id_ed25519|credentials)(\..*)?$/i.test(name);

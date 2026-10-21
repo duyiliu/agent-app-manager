@@ -15,7 +15,9 @@ export function readTailLines(file, n) {
   } finally {
     fs.closeSync(fd);
   }
-  const text = buf.toString('utf8');
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { text = new TextDecoder('gbk').decode(buf); }
   let all = text.split(/\r?\n/);
   if (all.length && all[all.length - 1] === '') all.pop();
   const lines = all.slice(-want);

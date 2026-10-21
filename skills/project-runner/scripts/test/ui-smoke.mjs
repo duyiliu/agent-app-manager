@@ -10,6 +10,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ui-smoke-'));
@@ -24,6 +25,7 @@ w(path.join(home, 'logs', 'ahis', 'rtest1.stdout.log'), 'JRebel:  on\nINFO start
 w(path.join(home, 'logs', 'ahis', 'rtest1.stderr.log'), 'stderr line\n');
 w(path.join(home, 'logs', 'ahis', 'rold1.stdout.log'), 'old run line\n');
 w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line A\n');
+w(path.join(proj, '.tmp', 'runner-local-20261021-100000.stderr.log'), 'tmp line B\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 w(path.join(proj, '.env'), 'SECRET=x\n');
 w(hintFile, 'hint 1\n');
@@ -104,6 +106,20 @@ try {
   assert(up, 'manager ui 未在 10s 内就绪（未解析到令牌或端口未监听）');
 
   await check('启动横幅含带令牌 URL', () => assert(banner.includes(`http://127.0.0.1:${port}/?token=`)));
+
+  const page = await get('/');
+  await check('管理台页面含过滤输入框与只看错误开关', () => {
+    assert.equal(page.status, 200);
+    for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"']) {
+      assert(page.body.includes(marker), `页面缺少 ${marker}`);
+    }
+  });
+  await check('管理台页面内嵌脚本语法有效', () => {
+    const m = /<script>([\s\S]*?)<\/script>/.exec(page.body);
+    assert(m, '页面缺少内嵌脚本');
+    new vm.Script(m[1]); // 只编译不执行
+  });
+
   await check('缺少令牌返回 403', async () => assert.equal((await get('/api/apps', { token: null })).status, 403));
   await check('错误令牌返回 403', async () => assert.equal((await get('/api/apps', { token: 'wrong' })).status, 403));
   await check('Host 不匹配返回 403', async () => assert.equal((await get('/api/apps', { host: 'evil.example' })).status, 403));
@@ -132,7 +148,8 @@ try {
   await check('统一日志源（当前 stdout 优先 + 历史 + .tmp）', () => {
     assert.equal(sources[0].src, 'run:rtest1.stdout');
     assert(sources.some((s) => s.src === 'run:rold1.stdout'));
-    assert(sources.some((s) => s.src.startsWith('tmp:')));
+    assert(sources.some((s) => s.src === 'tmp:jrebel-local-20261020-100000.stdout.log'));
+    assert(sources.some((s) => s.src === 'tmp:runner-local-20261021-100000.stderr.log'));
   });
   const repSources = (await get('/api/sources?app=report')).json.data.sources;
   await check('非受管应用日志源=登记线索（hash 定位符）', () => assert.match(repSources[0].src, /^hint:[0-9a-f]{12}$/));
@@ -190,11 +207,17 @@ try {
     assert(logsCli.text.includes('nohup.out'));
   });
 
-  const spawnUi = (p) => spawn(process.execPath, [MANAGER, '--home', home, 'ui', '--port', String(p)], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const spawnUi = (p, extra = []) => spawn(process.execPath, [MANAGER, '--home', home, 'ui', '--port', String(p), ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
   const dup = await exitInfo(spawnUi(port));
   await check('重复 ui 提示已有实例（退出码 3）', () => {
     assert.equal(dup.code, 3);
     assert(dup.text.includes('已有 manager ui 实例'));
+  });
+  const dupOpen = await exitInfo(spawnUi(port, ['--open']));
+  await check('--open 不改变端口占用处理（冲突时不开浏览器，退出码 3）', () => {
+    // 监听失败发生在拉起浏览器之前：不弹窗、不阻塞，仍按端口冲突退出
+    assert.equal(dupOpen.code, 3);
+    assert(dupOpen.text.includes('已有 manager ui 实例'));
   });
   const foreign = http.createServer((q, s) => s.end('not ours'));
   await new Promise((r) => foreign.listen(0, '127.0.0.1', r));
