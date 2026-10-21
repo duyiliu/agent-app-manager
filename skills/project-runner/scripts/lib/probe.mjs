@@ -61,6 +61,9 @@ function posixCapture(pid) {
     if (e.code === 'ENOENT' || e.code === 'ESRCH') return { result: 'notfound' };
     return { result: 'error', code: 'captureFailed', message: e.message };
   }
+  // 已退出但尚未被父进程回收的 zombie 仍留在 /proc；其 exe 链接已失效，
+  // 不能靠 comm 把它继续当作存活实例，否则 ack 复核会误拒“已退出”的旧账。
+  if (stat.state === 'Z' || stat.state === 'X') return { result: 'notfound' };
   const image = readProcImage(pid);
   if (!image) return { result: 'error', code: 'imageUnavailable', message: `无法读取 /proc/${pid}/exe 或 comm` };
   return { result: 'ok', creationFileTime: `${readBootId()}:${stat.starttime}`, image };
@@ -93,7 +96,12 @@ function posixTerminate(params) {
   }
   const deadline = Date.now() + (params.waitMs ?? TERMINATE_WAIT_MS);
   while (Date.now() < deadline) {
-    try { readProcStat(params.id); } catch { return { result: 'terminated' }; }
+    try {
+      const st = readProcStat(params.id);
+      if (st.state === 'Z' || st.state === 'X') return { result: 'terminated' };
+    } catch {
+      return { result: 'terminated' };
+    }
     sleepMs(50);
   }
   return { result: 'terminateTimeout' };
