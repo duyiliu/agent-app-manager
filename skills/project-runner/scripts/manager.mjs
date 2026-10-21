@@ -20,7 +20,7 @@ import { usageError } from './lib/errors.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
   parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdStart, cmdStop, cmdRestart,
-  cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi,
+  cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi, cmdCleanupWrapper,
 } from './lib/commands.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource } from './lib/log-sources.mjs';
 
@@ -202,6 +202,7 @@ function usageText() {
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
     '  stop <alias|appId>                有界强制停止（仅受管实例）',
+    '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
     '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
@@ -256,6 +257,9 @@ async function main() {
     const refCommands = new Set(['status', 'stop', 'restart']);
     if (command === 'start' || command === 'remove') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
+    } else if (command === 'cleanup-wrapper') {
+      if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError('cleanup-wrapper 需要 <alias|appId>');
+      if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
       const allowedFlag = { status: '--probe', restart: '--force' }[command];
@@ -275,6 +279,7 @@ async function main() {
       }
       case 'start': data = cmdStart(ctx, ctx.rest[0]); break;
       case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
+      case 'cleanup-wrapper': data = cmdCleanupWrapper(ctx, ctx.rest[0]); break;
       case 'restart': data = cmdRestart(ctx, ctx.rest[0]); break;
       case 'remove': data = cmdRemove(ctx, ctx.rest[0]); break;
       case 'prune': data = cmdPrune(ctx); break;

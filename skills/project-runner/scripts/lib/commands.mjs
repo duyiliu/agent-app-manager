@@ -295,7 +295,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false) {
     ...(jrebelEvidence ? { jrebelEvidence } : {}),
     run: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, mode: cur.mode,
-      kind: cur.kind ?? 'direct', wrapperPid: cur.wrapperPid ?? null,
+      kind: cur.kind ?? 'direct', wrapperPid: cur.wrapperPid ?? null, loggerPid: cur.loggerPid ?? null,
+      wrapperCleaned: cur.wrapperCleaned ?? false,
       intentAt: cur.intentAt ?? null, startedAt: cur.startedAt ?? cur.intentAt,
       endedAt: cur.endedAt, pid: cur.pid ?? null,
       creationFileTime: cur.creationFileTime ?? null, image: cur.image ?? null,
@@ -394,6 +395,60 @@ function stopCurrent(home, appId, app, rt) {
   cur.lastError = `terminate_failed: ${JSON.stringify(t)}`;
   writeRuntime(home, appId, rt);
   throw conflictError('IDENTITY_UNKNOWN', `终止失败（${t.code ?? t.result}），标记 UNKNOWN，拒绝进一步操作`, { runId: cur.runId, detail: t });
+}
+
+// 命令模式失败（UNKNOWN）后清理残留 wrapper：只终止已记录身份的同进程，
+// 不改变 UNKNOWN 证据；目标候选与后代由人工处置（后代清理见 #39）。
+export function cmdCleanupWrapper(ctx, ref) {
+  if (!ref) throw usageError('cleanup-wrapper 需要 <alias|appId>');
+  const reg0 = readRegistry(ctx.home);
+  const appId = resolveAppId(reg0, ref);
+  return withLock(ctx.home, appId, 'cleanup-wrapper', () => {
+    const reg = readRegistry(ctx.home);
+    const app = reg.apps[appId];
+    const rt = readRuntimeStrict(ctx.home, appId);
+    if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
+    const cur = rt.current;
+    if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供 wrapper 清理`);
+    if (cur.phase !== 'UNKNOWN') {
+      throw conflictError('CONFLICT', `仅 UNKNOWN 记录可清理 wrapper（当前 phase=${cur.phase}）`);
+    }
+    if (!Number.isInteger(cur.wrapperPid) || !cur.wrapperCreationFileTime || !cur.wrapperImage) {
+      throw conflictError('IDENTITY_UNKNOWN', `runId=${cur.runId} 缺少完整 wrapper 身份证据，拒绝清理`, { runId: cur.runId, wrapperPid: cur.wrapperPid ?? null });
+    }
+    // Linux 的 sh 可能 exec 成目标（image 改变但 starttime 不变）：先按记录核验
+    // starttime，再用当前 image 调 terminate，避免把 exec 误判为身份不符。
+    let now;
+    try { now = psProc('capture', { id: cur.wrapperPid }); }
+    catch (e) { now = { result: 'error', message: e.message }; }
+    if (now.result === 'exited' || now.result === 'notfound') {
+      cur.wrapperCleaned = true;
+      cur.wrapperCleanupAt = new Date().toISOString();
+      cur.wrapperCleanupResult = now.result;
+      writeRuntime(ctx.home, appId, rt);
+      return { appId, alias: app.alias, runId: cur.runId, wrapperPid: cur.wrapperPid, result: now.result, note: 'wrapper 已退出；UNKNOWN 证据保留' };
+    }
+    if (now.result !== 'ok' || String(now.creationFileTime) !== String(cur.wrapperCreationFileTime)) {
+      throw conflictError('IDENTITY_UNKNOWN', `wrapper(pid=${cur.wrapperPid}) 身份与记录不一致，拒绝清理；未触碰任何进程`, { runId: cur.runId, wrapperPid: cur.wrapperPid, capture: now });
+    }
+    let t;
+    try { t = psProc('terminate', { id: cur.wrapperPid, creationFileTime: now.creationFileTime, image: now.image }); }
+    catch (e) { t = { result: 'error', message: e.message }; }
+    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound' || t.result === 'mismatch') {
+      cur.wrapperCleaned = true;
+      cur.wrapperCleanupAt = new Date().toISOString();
+      cur.wrapperCleanupResult = t.result;
+      writeRuntime(ctx.home, appId, rt);
+      return {
+        appId, alias: app.alias, runId: cur.runId, wrapperPid: cur.wrapperPid, result: t.result,
+        note: 'wrapper 已清理；UNKNOWN 证据与 prevRuns 保留，确认目标已退出后可用 --ack-unresolved 恢复',
+      };
+    }
+    if (t.result === 'terminateTimeout') {
+      throw conflictError('TERMINATE_TIMEOUT', `wrapper(pid=${cur.wrapperPid}) 终止超时，未确认退出`, { runId: cur.runId, wrapperPid: cur.wrapperPid });
+    }
+    throw conflictError('IDENTITY_UNKNOWN', `wrapper 清理失败（${t.code ?? t.result}）`, { runId: cur.runId, detail: t });
+  });
 }
 
 export function cmdStop(ctx, ref) {
