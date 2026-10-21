@@ -55,6 +55,10 @@ function resolveHome(argHome, readOnly = false) {
   return home;
 }
 
+// 只读命令绝不创建 home/子目录；数据缺失由数据层按空数据处理。
+// status 的 RUNNING→STOPPED 落账仅在 home 已存在且有记录时发生，不受影响。
+const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune']);
+
 // ---------- 输出 ----------
 
 function emitOk(ctx, command, data) {
@@ -241,7 +245,7 @@ async function main() {
   try {
     ctx = parseArgv(process.argv.slice(2));
     command = ctx.command;
-    ctx.home = resolveHome(ctx.home, ['doctor', 'port', 'status', 'detect'].includes(command));
+    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command));
   } catch (e) {
     const c = command ?? 'cli';
     if (e instanceof ManagerError) emitErr({ json: false }, c, e);
