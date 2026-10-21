@@ -152,9 +152,31 @@ try {
     assert(sources.some((s) => s.src === 'tmp:runner-local-20261021-100000.stderr.log'));
   });
   const repSources = (await get('/api/sources?app=report')).json.data.sources;
-  await check('非受管应用日志源=登记线索', () => assert.equal(repSources[0].src, 'hint:0'));
-  const hintTail = (await get(`/api/tail?app=report&src=${encodeURIComponent('hint:0')}`)).json.data;
+  await check('非受管应用日志源=登记线索（hash 定位符）', () => assert.match(repSources[0].src, /^hint:[0-9a-f]{12}$/));
+  const hintTail = (await get(`/api/tail?app=report&src=${encodeURIComponent(repSources[0].src)}`)).json.data;
   await check('hint 源 tail 内容', () => assert(Buffer.from(hintTail.b64, 'base64').toString('utf8').includes('hint 1')));
+  const staleHint = (await get(`/api/tail?app=report&src=${encodeURIComponent('hint:0')}`));
+  await check('hint 下标旧定位符明确报错（404）', () => {
+    assert.equal(staleHint.status, 404);
+    assert(staleHint.json.error.message.includes('失效'));
+  });
+  await check('hint 定位符在 logHints 变化后仍命中原文件（不错位）', async () => {
+    // 在 listSources 与 tail 之间新增并调换线索顺序：旧下标会错位读到别的文件，hash 定位符必须仍命中原文件
+    const hint2 = path.join(base, 'hint', 'second.out');
+    w(hint2, 'hint 2\n');
+    const rtNow = JSON.parse(fs.readFileSync(path.join(home, 'runtime', 'arep.json'), 'utf8'));
+    rtNow.current.logHints = [hint2, hintFile];
+    fs.writeFileSync(path.join(home, 'runtime', 'arep.json'), JSON.stringify(rtNow, null, 2));
+    const after = (await get('/api/sources?app=report')).json.data.sources;
+    assert(after.some((s) => s.src === repSources[0].src), '原 hash 定位符在线索变化后丢失');
+    const t2 = (await get(`/api/tail?app=report&src=${encodeURIComponent(repSources[0].src)}`)).json.data;
+    assert(Buffer.from(t2.b64, 'base64').toString('utf8').includes('hint 1'));
+  });
+  await check('失效 hash 定位符明确报错（404）', async () => {
+    const gone = (await get(`/api/tail?app=report&src=${encodeURIComponent('hint:deadbeefdead')}`));
+    assert.equal(gone.status, 404);
+    assert(gone.json.error.message.includes('失效'));
+  });
 
   const tree = (await get('/api/tree?app=his&path=')).json.data;
   await check('文件树：列出 pom.xml，隐藏 .env', () => {
