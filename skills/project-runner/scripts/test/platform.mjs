@@ -37,13 +37,76 @@ export function findExecutable(name) {
   return null;
 }
 
-// 测试兜底清理：Windows 结束整棵树，Linux 先尝试进程组再退化为单进程。
-export function killTree(pid) {
-  if (!pid) return;
+// 枚举某 pid 的当前直接子进程：Windows 用 CIM，Linux 用 /proc 的 ppid 字段。
+export function childrenOf(pid) {
   if (isWindows) {
-    try { spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, timeout: 10000 }); } catch { /* best effort */ }
-    return;
+    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${pid} } | ForEach-Object { $_.ProcessId }`],
+      { encoding: 'utf8', timeout: 20000 });
+    if (r.status !== 0 || !r.stdout) return [];
+    return r.stdout.trim().split(/\r?\n/).map((s) => Number(s.trim())).filter(Number.isInteger);
   }
-  try { process.kill(-pid, 'SIGKILL'); return; } catch { /* 不在同一进程组 */ }
-  try { process.kill(pid, 'SIGKILL'); } catch { /* 已退出 */ }
+  let names;
+  try { names = fs.readdirSync('/proc'); } catch { return []; }
+  const kids = [];
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    let raw;
+    try { raw = fs.readFileSync(`/proc/${name}/stat`, 'utf8'); } catch { continue; }
+    const close = raw.lastIndexOf(')');
+    if (close < 0) continue;
+    const fields = raw.slice(close + 2).trim().split(/\s+/);
+    if (Number.parseInt(fields[1], 10) === pid) kids.push(Number(name));
+  }
+  return kids;
+}
+
+// 枚举当时仍在的全部子孙（含多级）；父已死时 Windows 仍保留旧 ppid，Linux 用 /proc。
+export function listDescendants(pid) {
+  const out = [];
+  const seen = new Set();
+  const queue = [pid];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const child of childrenOf(cur)) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      out.push(child);
+      queue.push(child);
+    }
+  }
+  return out;
+}
+
+// 按命令行/参数匹配进程（用于断言“本轮启动的进程都已退出”）。
+export function findProcesses(pattern) {
+  const re = new RegExp(pattern);
+  if (isWindows) {
+    // 排除查询进程自身：它的命令行里带有 pattern 文本，否则会把自己算成匹配项。
+    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '${pattern}' -and $_.CommandLine -notmatch 'Get-CimInstance' } | ForEach-Object { $_.ProcessId }`],
+      { encoding: 'utf8', timeout: 20000 });
+    if (r.status !== 0 || !r.stdout) return [];
+    return r.stdout.trim().split(/\r?\n/).map((s) => Number(s.trim())).filter(Number.isInteger);
+  }
+  const r = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 20000 });
+  if (r.status !== 0 || !r.stdout) return [];
+  return r.stdout.trim().split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter((parts) => parts.length > 1 && re.test(parts.slice(1).join(' ')))
+    .map((parts) => Number(parts[0]))
+    .filter(Number.isInteger);
+}
+
+// 测试兜底清理：Windows 结束整棵树，Linux 先尝试进程组再退化为单进程。
+// 返回是否成功：清理失败必须由调用方显式报告（不得静默，#46）。
+export function killTree(pid) {
+  if (!pid) return false;
+  if (isWindows) {
+    const r = spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, timeout: 15000 });
+    return r.status === 0;
+  }
+  try { process.kill(-pid, 'SIGKILL'); return true; } catch { /* 不在同一进程组 */ }
+  try { process.kill(pid, 'SIGKILL'); return true; } catch { /* 已退出 */ }
+  return false;
 }
