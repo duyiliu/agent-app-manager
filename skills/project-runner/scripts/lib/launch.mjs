@@ -10,7 +10,7 @@ import { psProc, COMMAND_DISCOVER_TIMEOUT_MS } from './probe.mjs';
 import { resolveExe, newRunId, RUN_LOG_MAX_BYTES } from './desc.mjs';
 import { archiveCurrent, writeRuntime, isUnresolvedPhase } from './runtime.mjs';
 import { readStderrTailSafe } from './logs.mjs';
-import { conflictError } from './errors.mjs';
+import { conflictError, dependencyError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LOG_WRITER = path.join(SCRIPTS_DIR, 'log-writer.mjs');
@@ -31,6 +31,11 @@ export function cleanupWrapper(rt) {
 }
 
 export function launchManaged(home, appId, app, opts = {}) {
+  // 命令模式依赖 Windows cmd.exe 与 pwsh 后代发现；非 Windows 保持既有的依赖缺失语义，
+  // 不伪造命令模式托管（直连真实可执行文件仍可用 POSIX /proc 回退）。
+  if (app.command && process.platform !== 'win32') {
+    throw dependencyError('命令模式受管启动依赖 Windows cmd.exe 与 pwsh 7；当前平台不可用');
+  }
   const runId = newRunId();
   const logDir = path.join(home, 'logs', appId);
   fs.mkdirSync(logDir, { recursive: true });

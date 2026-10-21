@@ -1,5 +1,6 @@
 // PowerShell process probes: identity capture, liveness verification, port diagnosis.
 // proc.ps1 runs the actual win32 calls; each invocation is a short-lived pwsh process.
+import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
@@ -15,7 +16,99 @@ export const COMMAND_DISCOVER_TIMEOUT_MS = 45000; // 命令模式后代发现默
 
 let selfIdentity = null;
 
+// ---------- POSIX fallback（Windows 仍走 proc.ps1；仅用于无 pwsh 的非 Windows 环境） ----------
+// 身份以 bootId + /proc/<pid>/stat starttime 表示，重启后 bootId 变化不会误认旧 PID。
+let posixBootId = null;
+
+function readBootId() {
+  if (posixBootId) return posixBootId;
+  try {
+    posixBootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  } catch {
+    try {
+      const m = /^btime\s+(\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8'));
+      posixBootId = m ? `btime:${m[1]}` : 'unknown';
+    } catch {
+      posixBootId = 'unknown';
+    }
+  }
+  return posixBootId;
+}
+
+function readProcStat(pid) {
+  const text = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const close = text.lastIndexOf(')');
+  if (close < 0) throw new Error('unexpected /proc stat format');
+  const fields = text.slice(close + 2).trim().split(/\s+/);
+  // comm 之后：state(3), ppid(4), ..., starttime(22) => fields[19]
+  return { state: fields[0], ppid: Number(fields[1]), starttime: fields[19] };
+}
+
+function readProcImage(pid) {
+  try {
+    return path.basename(fs.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, ''));
+  } catch {
+    try { return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim() || null; }
+    catch { return null; }
+  }
+}
+
+function posixCapture(pid) {
+  let stat;
+  try {
+    stat = readProcStat(pid);
+  } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ESRCH') return { result: 'notfound' };
+    return { result: 'error', code: 'captureFailed', message: e.message };
+  }
+  const image = readProcImage(pid);
+  if (!image) return { result: 'error', code: 'imageUnavailable', message: `无法读取 /proc/${pid}/exe 或 comm` };
+  return { result: 'ok', creationFileTime: `${readBootId()}:${stat.starttime}`, image };
+}
+
+function posixVerify(params) {
+  const cur = posixCapture(params.id);
+  if (cur.result !== 'ok') return cur;
+  if (String(cur.creationFileTime) !== String(params.creationFileTime)
+      || cur.image.toLowerCase() !== String(params.image).toLowerCase()) {
+    return { result: 'mismatch' };
+  }
+  return cur;
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function posixTerminate(params) {
+  const v = posixVerify(params);
+  if (v.result === 'mismatch') return v;
+  if (v.result === 'notfound') return { result: 'exited' };
+  if (v.result !== 'ok') return v;
+  try {
+    process.kill(params.id, 'SIGKILL');
+  } catch (e) {
+    if (e.code === 'ESRCH') return { result: 'exited' };
+    return { result: 'error', code: 'terminateFailed', message: e.message };
+  }
+  const deadline = Date.now() + (params.waitMs ?? TERMINATE_WAIT_MS);
+  while (Date.now() < deadline) {
+    try { readProcStat(params.id); } catch { return { result: 'terminated' }; }
+    sleepMs(50);
+  }
+  return { result: 'terminateTimeout' };
+}
+
+function posixProc(action, params) {
+  if (action === 'capture') return posixCapture(params.id);
+  if (action === 'verify') return posixVerify(params);
+  if (action === 'terminate') return posixTerminate(params);
+  return { result: 'error', code: 'unsupportedAction', message: `当前平台不支持 proc 动作：${action}` };
+}
+
 function psProcOnce(action, params) {
+  if (process.platform !== 'win32') return posixProc(action, params);
+
   const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', action];
   if (params.id != null) args.push('-Id', String(params.id));
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
