@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 const [configPath] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 try { fs.unlinkSync(configPath); } catch { /* best effort */ }
-const { file, args, cwd, env, outPath, errPath, runtimeFile, runId, limit } = config;
+const { file, args, cwd, outPath, errPath, runtimeFile, runId, limit } = config;
 let outSize = 0;
 try { outSize = fs.statSync(outPath).size; } catch { /* first write */ }
 let outFd = fs.openSync(outPath, 'a');
@@ -28,7 +28,7 @@ function markRotated() {
   } catch { /* best effort */ }
 }
 
-const target = spawn(file, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+const target = spawn(file, args, { cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 fs.writeFileSync(config.pidFile, String(target.pid));
 function forward(stream, isOut) {
   stream.on('data', (input) => {

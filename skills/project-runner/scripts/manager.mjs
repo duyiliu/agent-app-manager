@@ -712,7 +712,7 @@ function launchManaged(home, appId, app, opts = {}) {
     fs.writeFileSync(sinkConfig, JSON.stringify({
       file: isCommand ? resolveComspec(app.cwd) : app.exe,
       args: isCommand ? ['/d', '/s', '/c', app.command] : app.args,
-      cwd: app.cwd, env: { ...process.env }, outPath, errPath,
+      cwd: app.cwd, outPath, errPath,
       runtimeFile: runtimePath(home, appId), runId, limit: app.logMaxBytes ?? RUN_LOG_MAX_BYTES, pidFile,
     }));
     // The detached logger owns both output descriptors and launches the application
