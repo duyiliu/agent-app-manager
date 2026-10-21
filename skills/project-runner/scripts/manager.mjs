@@ -430,6 +430,8 @@ function loadManagedDesc(file) {
   if (d.discoverTimeoutMs != null && (!Number.isInteger(d.discoverTimeoutMs) || d.discoverTimeoutMs < 1000 || d.discoverTimeoutMs > 120000)) errs.push('discoverTimeoutMs 需为 1000-120000 整数');
   if (d.args != null && (!Array.isArray(d.args) || d.args.some((a) => typeof a !== 'string'))) errs.push('args 必须是字符串数组');
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
+  if (d.env != null && (!d.env || typeof d.env !== 'object' || Array.isArray(d.env))) errs.push('env 必须是环境变量名到字符串值的对象');
+  else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
@@ -446,6 +448,7 @@ function loadManagedDesc(file) {
     expectedImage: d.expectedImage ?? null,
     discoverTimeoutMs: d.discoverTimeoutMs ?? null,
     envRefs: d.envRefs ?? [],
+    env: d.env ?? {},
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
@@ -581,6 +584,7 @@ function upsertApp(reg, appId, desc) {
     existing.expectedImage = desc.expectedImage ?? null;
     existing.discoverTimeoutMs = desc.discoverTimeoutMs ?? null;
     existing.envRefs = desc.envRefs;
+    existing.env = desc.env ?? {};
     existing.expectedPort = desc.expectedPort ?? null;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
@@ -591,7 +595,7 @@ function upsertApp(reg, appId, desc) {
     appId, alias: desc.alias, displayName: desc.displayName, root: desc.root, entry: desc.entry,
     cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
-    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
+    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs, env: desc.env ?? {},
     expectedPort: desc.expectedPort ?? null, sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };
@@ -665,7 +669,7 @@ function launchManaged(home, appId, app, opts = {}) {
     child = spawn(file, argv, {
       cwd: app.cwd, detached: !isCommand, windowsHide: true,
       stdio: ['ignore', outFd, errFd],
-      env: { ...process.env },
+      env: { ...process.env, ...(app.env ?? {}) },
     });
     // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
     // 具体失败仍由下方身份采集/发现路径统一落账并保留证据
@@ -890,7 +894,7 @@ function cmdRecordUnmanaged(ctx) {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
-        envRefs: [], expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+        envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
     }
@@ -1006,6 +1010,12 @@ function extractJrebelEvidence(home, appId, cur) {
   };
 }
 
+function displayEnv(env = {}) {
+  return Object.fromEntries(Object.entries(env).map(([name, value]) => [
+    name, value.length > 120 ? `${value.slice(0, 120)}… (截断)` : value,
+  ]));
+}
+
 async function cmdStatus(ctx, ref, probeRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
@@ -1019,6 +1029,7 @@ async function cmdStatus(ctx, ref, probeRequested = false) {
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
+    env: displayEnv(app.env ?? {}),
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
@@ -1812,6 +1823,7 @@ function renderHuman(command, data) {
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
         data.run ? `run=${data.run.runId} phase=${data.run.phase} managed=${data.run.managed} started=${data.run.startedAt ?? '-'}` : 'run=无',
         data.run?.pid != null ? `pid=${data.run.pid}${data.run.creationFileTime ? ` creationFileTime=${data.run.creationFileTime}` : ''}${data.run.image ? ` image=${data.run.image}` : ''}` : null,
+        Object.keys(data.env ?? {}).length ? `env=${JSON.stringify(data.env)}` : null,
         data.run?.lastError ? `lastError: ${data.run.lastError}` : null,
         data.run?.logPaths?.stdout ? `stdout=${data.run.logPaths.stdout}` : null,
         data.run?.logPaths?.stderr ? `stderr=${data.run.logPaths.stderr}` : null,
