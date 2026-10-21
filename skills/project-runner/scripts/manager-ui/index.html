@@ -358,6 +358,9 @@ aside {
 .prev-row .rid { color:#bddcf4; overflow-wrap:anywhere }
 .prev-row .why { color:#dcc389 }
 .prev-row .dim { color:var(--text-faint) }
+.prev-row.history-pick { cursor:pointer; border-left:3px solid transparent; }
+.prev-row.history-pick:hover { background:rgba(148,163,184,.06); }
+.prev-row.history-pick.selected { border-left-color:var(--accent); background:var(--accent-soft); }
 
 .log-panel {
   flex:1;
@@ -440,6 +443,8 @@ aside {
 .fd-head strong { font-size:12.5px; color:var(--text) }
 .fd-head .badge { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:180px }
 .fd-body { flex:1; min-height:0; display:flex; flex-direction:column }
+.fd-filter { flex:none; display:flex; gap:6px; padding:7px 8px; border-bottom:1px solid var(--line-soft) }
+.fd-filter input { flex:1; min-width:0; height:30px; padding:0 9px; color:var(--text); background:#0b1016; border:1px solid var(--line-strong); border-radius:var(--radius-sm); font:11.5px var(--ui-font) }
 .fd-tree { flex:0 1 45%; overflow:auto; padding:6px 4px; border-bottom:1px solid var(--line) }
 .fd-item {
   display:block; width:100%; height:auto;
@@ -479,6 +484,7 @@ aside {
 </header>
 <div class="banner warn" id="roBanner">只读视图：这里不提供启动/停止/重启——stop 是有界强制终止，请用 manager CLI 或让 Agent 执行；未结记录的恢复指引见下方黄色提示。</div>
 <div class="banner" id="fatalBanner" hidden></div>
+<div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">
   <aside aria-label="应用列表">
     <div class="panel-title">
@@ -500,6 +506,7 @@ aside {
         <select id="runSel" aria-label="日志源" disabled></select>
         <input id="logFilter" type="search" placeholder="正则过滤…" spellcheck="false" aria-label="日志正则过滤" disabled>
         <button id="errorsBtn" type="button" aria-pressed="false" title="只看错误（内置错误规则：ERROR/Exception/Caused by 等）" disabled>只看错误</button>
+        <button id="pauseBtn" type="button" aria-pressed="false">暂停</button>
         <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" type="button" disabled>清屏</button>
         <span id="logMeta"></span>
@@ -516,6 +523,7 @@ aside {
     <button id="fdClose" class="icon-btn" type="button" title="关闭" aria-label="关闭文件面板">✕</button>
   </div>
   <div class="fd-body">
+    <div class="fd-filter"><input id="fdFilter" type="search" placeholder="过滤当前层级…" aria-label="过滤当前层级"><button id="fdFilterClear" type="button" title="清空过滤">清空</button></div>
     <div id="fdTree" class="fd-tree"></div>
     <div class="fd-preview">
       <div id="fdPath" class="fd-path">选择文件查看内容（只读，UTF-8）</div>
@@ -533,6 +541,11 @@ const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : nu
 let token = new URLSearchParams(location.search).get('token') || '';
 let selected = null;          // 当前选中的 alias
 let appsCache = [];
+let paused = false, manualRefresh = false;
+let previousStatuses = new Map();
+let notifiedRuns;
+try { notifiedRuns = new Set(JSON.parse(sessionStorage.getItem('pr-ui-notified-runs') || '[]')); } catch { notifiedRuns = new Set(); }
+let wantedHistoryRun = null, selectedHistoryRun = null;
 let fatal = false;            // 令牌失效后停止轮询
 let degrading = false;        // 数据损坏等持久性错误
 
@@ -556,6 +569,14 @@ function showBanner(text, warn = false) {
 }
 function hideBanner() { $('#fatalBanner').hidden = true; }
 function conn(text, bad = false) { const c = $('#connState'); c.textContent = text; c.classList.toggle('bad', bad); }
+function notifyExit(runId, status, note) {
+  if (!runId || notifiedRuns.has(runId)) return;
+  notifiedRuns.add(runId);
+  try { sessionStorage.setItem('pr-ui-notified-runs', JSON.stringify([...notifiedRuns])); } catch {}
+  const banner = $('#exitBanner');
+  banner.hidden = false;
+  banner.textContent = `批次 ${runId} 状态变化：${status}${note ? ` · ${note}` : ''}`;
+}
 function handlePollError(e) {
   conn(e.message, true);
   if (e.status === 403) {
@@ -643,11 +664,22 @@ function updateTitle() {
   document.title = (running > 0 ? `(${running}) ` : '') + 'Project Runner · 运行管理台';
 }
 async function loadApps() {
-  if (fatal) return;
+  if (fatal || (paused && !manualRefresh)) return;
   try {
     const d = await api('/api/apps');
     hideBannerIfRecovered();
     appsCache = d.apps ?? [];
+    for (const a of appsCache) {
+      const old = previousStatuses.get(a.alias);
+      const runId = a.lastRunId ?? null;
+      if (old?.status === 'RUNNING' && ['STOPPED', 'UNKNOWN'].includes(a.status) && old.runId === runId) {
+        try {
+          const detail = await api('/api/status?app=' + encodeURIComponent(a.alias));
+          notifyExit(runId, a.status, detail.run?.exitNote || detail.run?.lastError || detail.note || a.error || '退出说明不可用');
+        } catch { notifyExit(runId, a.status, a.error || '退出说明不可用'); }
+      }
+      previousStatuses.set(a.alias, { status: a.status, runId });
+    }
     updateTitle();
     $('#homePath').textContent = d.home ?? '';
     if (selected && !appsCache.some(a => a.alias === selected)) {
@@ -736,12 +768,19 @@ function renderDetail(d) {
     card.appendChild(el('div', 'prev-title', '历史批次（prevRuns）'));
     for (const p of d.prevRuns.slice(0, 10)) {
       const row = el('div', 'prev-row');
+      row.classList.add('history-pick');
+      row.dataset.runId = p.runId;
+      row.classList.toggle('selected', selectedHistoryRun === p.runId);
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
       row.appendChild(el('span', 'rid', p.runId));
       row.appendChild(el('span', 'dim', p.phase ?? '?'));
       if (p.pid != null) row.appendChild(el('span', 'dim', 'pid ' + p.pid));
       if (p.archivedAt) row.appendChild(el('span', 'dim', '归档 ' + fmtTime(p.archivedAt)));
       if (p.archiveReason) row.appendChild(el('span', 'why', p.archiveReason));
       if (p.lastError) row.appendChild(el('span', 'dim', p.lastError));
+      row.addEventListener('click', () => selectHistoryRun(p.runId));
+      row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectHistoryRun(p.runId); } });
       card.appendChild(row);
     }
   }
@@ -763,9 +802,16 @@ function renderDetail(d) {
   applyDetail(detailTouched ? detailOpen : needsAttention);
 }
 async function loadStatus() {
-  if (fatal || !selected) return;
+  if (fatal || (paused && !manualRefresh) || !selected) return;
   try {
-    renderDetail(await api('/api/status?app=' + encodeURIComponent(selected)));
+    const detail = await api('/api/status?app=' + encodeURIComponent(selected));
+    const old = previousStatuses.get(selected);
+    const runId = detail.run?.runId;
+    if (old?.status === 'RUNNING' && old.runId === runId && ['STOPPED', 'UNKNOWN'].includes(detail.status)) {
+      notifyExit(runId, detail.status, detail.run?.exitNote || detail.run?.lastError || detail.note || '退出说明不可用');
+    }
+    previousStatuses.set(selected, { status: detail.status, runId });
+    renderDetail(detail);
   } catch (e) {
     if (e.status === 404) { renderDetail(null); return; }
     handlePollError(e);
@@ -774,6 +820,7 @@ async function loadStatus() {
 function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
+  selectedHistoryRun = null; wantedHistoryRun = null;
   detailOpen = false; detailTouched = false;
   try {
     const u = new URL(location.href);
@@ -882,7 +929,7 @@ function renderLines(force = false) {
   renderMeta();
 }
 async function pollTail() {
-  if (fatal || degrading || !selected || !logSrc || tailBusy) return;
+  if (fatal || (paused && !manualRefresh) || degrading || !selected || !logSrc || tailBusy) return;
   tailBusy = true;
   try {
     const d = await api(`/api/tail?app=${encodeURIComponent(selected)}&src=${encodeURIComponent(logSrc)}&offset=${offset}`);
@@ -916,6 +963,7 @@ async function pollTail() {
   } finally { tailBusy = false; }
 }
 async function loadSources() {
+  if (paused && !manualRefresh) return;
   const version = ++sourcesVersion;
   sourcesController?.abort();
   sourcesController = new AbortController();
@@ -935,24 +983,75 @@ async function loadSources() {
     $('#logFilter').disabled = !has;
     $('#errorsBtn').disabled = !has;
     if (!has) {
+      const missingRunId = wantedHistoryRun;
+      wantedHistoryRun = null;
+      selectedHistoryRun = null;
       logSrc = null;
       logSrcLabel = '';
-      logHint('该应用暂无可读日志源（受管批次、登记线索与项目 .tmp 日志都未找到）。');
-      renderMeta();
+      logHint(missingRunId ? `历史批次 ${missingRunId} 没有 stdout 日志流。` : '该应用暂无可读日志源（受管批次、登记线索与项目 .tmp 日志都未找到）。');
+      $('#logMeta').textContent = '';
       return;
     }
-    const want = logSrc && [...runSel.options].some(o => o.value === logSrc) ? logSrc : runSel.options[0].value;
+    const historicalSource = wantedHistoryRun ? `run:${wantedHistoryRun}.stdout` : null;
+    if (historicalSource && ![...runSel.options].some(o => o.value === historicalSource)) {
+      const missingRunId = wantedHistoryRun;
+      wantedHistoryRun = null;
+      selectedHistoryRun = null;
+      $('#detail').querySelectorAll('.history-pick.selected').forEach(n => n.classList.remove('selected'));
+      logSrc = null;
+      logSrcLabel = '';
+      runSel.value = '';
+      logHint(`历史批次 ${missingRunId} 没有 stdout 日志流。`);
+      $('#logMeta').textContent = '';
+      return;
+    }
+    const want = historicalSource || (logSrc && [...runSel.options].some(o => o.value === logSrc) ? logSrc : runSel.options[0].value);
     runSel.value = want;
     const picked = (d.sources ?? []).find(s => s.src === want);
     logSrcLabel = picked ? picked.label : '';
     if (want !== logSrc) { logSrc = want; resetLog(); }
+    if (wantedHistoryRun && want === historicalSource) {
+      const pickedRun = wantedHistoryRun;
+      wantedHistoryRun = null;
+      selectedHistoryRun = pickedRun;
+      $('#detail').querySelectorAll('.history-pick').forEach(row => row.classList.toggle('selected', row.dataset.runId === pickedRun));
+    }
   } catch (e) { if (e.name !== 'AbortError' && version === sourcesVersion) handlePollError(e); }
 }
 
 // ---------- 事件与轮询 ----------
 
-$('#refreshBtn').addEventListener('click', loadApps);
+async function manualReload() {
+  if (fatal) return;
+  manualRefresh = true;
+  try {
+    await loadApps();
+    if (selected) { await Promise.all([loadStatus(), loadSources()]); pollTail(); }
+  } finally { manualRefresh = false; }
+}
+$('#refreshBtn').addEventListener('click', manualReload);
+$('#pauseBtn').addEventListener('click', () => {
+  paused = !paused;
+  $('#pauseBtn').textContent = paused ? '恢复刷新' : '暂停';
+  $('#pauseBtn').setAttribute('aria-pressed', String(paused));
+  $('#pauseBtn').classList.toggle('on', paused);
+  if (!paused) manualReload();
+});
+async function selectHistoryRun(runId) {
+  wantedHistoryRun = runId;
+  selectedHistoryRun = runId;
+  const source = `run:${runId}.stdout`;
+  const row = $('#detail').querySelector(`.history-pick[data-run-id="${CSS.escape(runId)}"]`);
+  $('#detail').querySelectorAll('.history-pick').forEach(n => n.classList.toggle('selected', n === row));
+  logSrc = source;
+  resetLog();
+  await loadSources();
+  if (logSrc === source) pollTail();
+}
+
 $('#runSel').addEventListener('change', e => {
+  wantedHistoryRun = null;
+  $('#detail').querySelectorAll('.history-pick.selected').forEach(n => n.classList.remove('selected'));
   logSrc = e.target.value || null;
   const opt = e.target.selectedOptions[0];
   logSrcLabel = opt ? opt.textContent.replace(/^● /, '').replace(/ · [\d.]+ (KB|MB)$/, '') : '';
@@ -1007,6 +1106,7 @@ async function loadTree(rel, target, version) {
         let loaded = false, loading = false;
         row.addEventListener('click', async () => {
           children.hidden = !children.hidden;
+          children.dataset.expanded = String(!children.hidden);
           row.textContent = (children.hidden ? '▸ ' : '▾ ') + item.name;
           if (!children.hidden && !loaded && !loading) {
             loading = true;
@@ -1023,6 +1123,7 @@ async function loadTree(rel, target, version) {
         });
       }
     }
+    applyTreeFilter();
   } catch (e) {
     if (version === treeVersion) fdHint(target, e.message, true);
   }
@@ -1069,6 +1170,20 @@ $('#fdNext').addEventListener('click', () => previewFile(previewPath, previewOff
 $('#filesBtn').addEventListener('click', openFiles);
 $('#fdClose').addEventListener('click', () => { $('#fileDrawer').hidden = true; });
 $('#fdRefresh').addEventListener('click', () => { if (selected) loadTree('', $('#fdTree'), ++treeVersion); });
+function applyTreeFilter() {
+  const query = $('#fdFilter').value.trim().toLocaleLowerCase();
+  const root = $('#fdTree');
+  for (const level of [root, ...root.querySelectorAll('.fd-group')]) {
+    for (const row of [...level.children].filter(n => n.classList.contains('fd-item'))) {
+      const child = row.nextElementSibling?.classList.contains('fd-group') ? row.nextElementSibling : null;
+      const visible = !query || row.textContent.slice(2).toLocaleLowerCase().includes(query);
+      row.hidden = !visible;
+      if (child) child.hidden = !visible || child.dataset.expanded !== 'true';
+    }
+  }
+}
+$('#fdFilter').addEventListener('input', applyTreeFilter);
+$('#fdFilterClear').addEventListener('click', () => { $('#fdFilter').value = ''; applyTreeFilter(); $('#fdFilter').focus(); });
 
 // ---------- 启动 ----------
 loadApps().then(() => {
@@ -1077,10 +1192,19 @@ loadApps().then(() => {
   if (pick) selectApp(pick.alias);
   else if (appsCache.length === 1) selectApp(appsCache[0].alias);
 });
-setInterval(loadApps, 4000);
-setInterval(loadStatus, 4000);
-setInterval(loadSources, 8000);
-setInterval(pollTail, 1000);
+let pollTimers = [];
+function schedulePolling() {
+  pollTimers.forEach(clearInterval);
+  const slow = document.visibilityState === 'hidden';
+  pollTimers = [
+    setInterval(loadApps, slow ? 30000 : 4000),
+    setInterval(loadStatus, slow ? 30000 : 4000),
+    setInterval(loadSources, slow ? 30000 : 8000),
+    setInterval(pollTail, slow ? 30000 : 1000),
+  ];
+}
+document.addEventListener('visibilitychange', schedulePolling);
+schedulePolling();
 </script>
 </body>
 </html>
