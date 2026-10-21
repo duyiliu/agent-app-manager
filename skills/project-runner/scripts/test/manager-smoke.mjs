@@ -20,14 +20,15 @@ const proj = fs.realpathSync(path.join(base, 'proj'));
 // 同步休眠（主线程，用于轮询进程退出落账）
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const run = (args, { json = true } = {}) => {
-  const r = spawnSync(process.execPath, [MANAGER, '--home', home, ...(json ? ['--json'] : []), ...args], {
+const runAt = (h, args, { json = true } = {}) => {
+  const r = spawnSync(process.execPath, [MANAGER, '--home', h, ...(json ? ['--json'] : []), ...args], {
     encoding: 'utf8', timeout: 120000, windowsHide: true,
   });
   let parsed = null;
   try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（文本模式或崩溃） */ }
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
 };
+const run = (args, opts) => runAt(home, args, opts);
 const isPsMissing = (r) => r.code === 4
   && (r.json?.error?.code === 'PWSH_MISSING' || r.stdout.includes('PWSH_MISSING') || r.stderr.includes('PWSH_MISSING'));
 
@@ -95,6 +96,69 @@ try {
     assert.equal(r.json.ok, false);
     assert.equal(r.json.command, 'status');
     assert.equal(r.json.error.code, 'NOT_FOUND');
+  });
+
+  // ---------- 只读命令不创建缺失的 home ----------
+  const roHome = path.join(base, 'read-only-home');
+  check('list 空 home 不创建数据目录', () => {
+    const r = runAt(roHome, ['list']);
+    assert.equal(r.code, 0);
+    assert.deepEqual(r.json.data.apps, []);
+    assert.equal(fs.existsSync(roHome), false, 'list 不应创建 home');
+  });
+  check('logs / prune --dry-run 空 home 不创建数据目录', () => {
+    const logs = runAt(roHome, ['logs', 'ghost']);
+    assert.equal(logs.code, 2);
+    assert.equal(logs.json.error.code, 'NOT_FOUND');
+    const prune = runAt(roHome, ['prune', '--dry-run']);
+    assert.equal(prune.code, 0);
+    assert.equal(prune.json.data.dryRun, true);
+    assert.equal(fs.existsSync(roHome), false, 'logs/prune 不应创建 home');
+  });
+
+  // ---------- doctor 逐项收集损坏数据 ----------
+  const doctorHome = path.join(base, 'doctor-home');
+  const doctorRuntime = path.join(doctorHome, 'runtime');
+  const doctorLocks = path.join(doctorHome, 'locks');
+  fs.mkdirSync(doctorRuntime, { recursive: true });
+  fs.mkdirSync(doctorLocks, { recursive: true });
+  fs.mkdirSync(path.join(doctorHome, 'logs', 'agood'), { recursive: true });
+  const doctorRegistry = path.join(doctorHome, 'registry.json');
+  const goodRegistry = { schemaVersion: 1, apps: { agood: { appId: 'agood', alias: 'good', expectedPort: null } } };
+  fs.writeFileSync(doctorRegistry, JSON.stringify(goodRegistry));
+  fs.writeFileSync(path.join(doctorRuntime, 'agood.json'), JSON.stringify({ schemaVersion: 1, appId: 'agood', current: null, prevRuns: [] }));
+  const corruptRuntime = path.join(doctorRuntime, 'abad.json');
+  fs.writeFileSync(corruptRuntime, '{broken');
+  const orphanTmp = path.join(doctorHome, '.tmp-1234-deadbeef');
+  fs.writeFileSync(orphanTmp, 'x');
+  fs.writeFileSync(path.join(doctorLocks, 'agood.lock'), '{}');
+  check('doctor 收集损坏运行记录并继续输出其余诊断', () => {
+    const r = runAt(doctorHome, ['doctor']);
+    assert.equal(r.code, 0, `doctor 应正常退出：${r.stdout}${r.stderr}`);
+    assert.equal(r.json.ok, true);
+    const problem = r.json.data.problems.find((p) => p.file === corruptRuntime);
+    assert(problem, `problems 缺少损坏运行记录：${JSON.stringify(r.json.data.problems)}`);
+    assert.equal(problem.code, 'DATA_CORRUPT');
+    assert(problem.message);
+    const appIds = r.json.data.runtime.map((x) => x.appId);
+    assert(appIds.includes('agood') && appIds.includes('abad'), `runtime 扫描不完整：${appIds.join(',')}`);
+    assert(r.json.data.locks.includes('agood.lock'), '损坏运行记录不应阻断 locks 输出');
+    assert(r.json.data.orphanTmpFiles.includes(orphanTmp), '损坏运行记录不应阻断 tmp 输出');
+    assert.equal(new Set(r.json.data.orphanTmpFiles).size, r.json.data.orphanTmpFiles.length, '孤儿临时文件重复列出');
+  });
+  check('doctor 注册表损坏时仍输出 locks/tmp 并显式列出问题', () => {
+    fs.writeFileSync(doctorRegistry, '{broken');
+    try {
+      const r = runAt(doctorHome, ['doctor']);
+      assert.equal(r.code, 0, `doctor 应正常退出：${r.stdout}${r.stderr}`);
+      const problem = r.json.data.problems.find((p) => p.file === doctorRegistry);
+      assert(problem, `problems 缺少损坏注册表：${JSON.stringify(r.json.data.problems)}`);
+      assert.equal(problem.code, 'DATA_CORRUPT');
+      assert(r.json.data.locks.includes('agood.lock'), '注册表损坏不应阻断 locks 输出');
+      assert(r.json.data.orphanTmpFiles.includes(orphanTmp), '注册表损坏不应阻断 tmp 输出');
+    } finally {
+      fs.writeFileSync(doctorRegistry, JSON.stringify(goodRegistry));
+    }
   });
 
   // ---------- 生命周期（依赖 pwsh） ----------

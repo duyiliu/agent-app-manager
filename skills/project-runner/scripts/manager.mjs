@@ -1129,6 +1129,7 @@ function cmdDoctor(ctx) {
     addProblem(locksDir, e);
   }
   const tempFiles = [];
+  const seenTemps = new Set();
   const scanTemps = (dir, depth = 0) => {
     if (!homeExists || depth > 2) return;
     let entries;
@@ -1141,8 +1142,13 @@ function cmdDoctor(ctx) {
     }
     for (const name of entries) {
       const file = path.join(dir, name.name);
-      if (name.name.startsWith('.tmp-')) tempFiles.push(file);
-      else if (name.isDirectory()) scanTemps(file, depth + 1);
+      if (name.name.startsWith('.tmp-')) {
+        // 根目录与子目录会分别扫描，避免同一临时文件被重复列出
+        if (!seenTemps.has(file)) {
+          seenTemps.add(file);
+          tempFiles.push(file);
+        }
+      } else if (name.isDirectory()) scanTemps(file, depth + 1);
     }
   };
   for (const dir of [home, runtimeDir, path.join(home, 'logs'), locksDir]) scanTemps(dir);
