@@ -75,8 +75,11 @@ function emitErr(ctx, command, e) {
   } else {
     let text = `错误[${e.code ?? 'UNKNOWN'}] ${e.message}`;
     if (e.detail) {
-      text += `\n详情: ${typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)}`;
-      if (typeof e.detail.stderrTail === 'string' && e.detail.stderrTail) text += `\nstderr 尾部:\n${e.detail.stderrTail}`;
+      // detail.stderrTail 单独按原样附在末尾，不进 JSON 转义
+      const { stderrTail, ...rest } = typeof e.detail === 'object' ? e.detail : {};
+      const body = typeof e.detail === 'string' ? e.detail : JSON.stringify(rest);
+      text += `\n详情: ${body}`;
+      if (typeof stderrTail === 'string' && stderrTail) text += `\nstderr 尾部:\n${stderrTail}`;
     }
     process.stderr.write(`${text}\n`);
   }
@@ -124,7 +127,6 @@ function renderHuman(command, data) {
         data.abandonedRunId ? `已显式放弃未结记录 run=${data.abandonedRunId}（${data.abandonedReason}），证据保留在 prevRuns` : null,
         `stdout=${data.logPaths.stdout}`,
         `stderr=${data.logPaths.stderr}`,
-        data.portEvidence?.forced ? data.portEvidence.note : null,
         data.note ?? '',
         '观察：manager ui 可在浏览器只读查看全部受管应用与日志（Ctrl+C 退出）',
       ].filter(Boolean).join('\n');
@@ -251,12 +253,13 @@ async function main() {
     if (command === 'start' || command === 'remove') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
     } else if (refCommands.has(command)) {
-      const bad = command === 'status' ? ctx.rest.slice(1).find((a) => a !== '--probe') : ctx.rest.find((a, i) => i > 0 || a.startsWith('--'));
+      if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
+      const allowedFlag = { status: '--probe', restart: '--force' }[command];
+      const bad = ctx.rest.slice(1).find((a) => a !== allowedFlag);
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
-      if (!ctx.rest[0]) throw usageError(`${command} 需要 <alias|appId>`);
     }
     switch (command) {
-      case 'list': data = cmdList(ctx); break;
+      case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
       case 'status': data = await cmdStatus(ctx, ctx.rest[0], ctx.rest.includes('--probe')); break;
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
       case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;

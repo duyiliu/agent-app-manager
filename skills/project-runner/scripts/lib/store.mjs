@@ -1,9 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { SCHEMA_VERSION, EXIT, ManagerError } from './constants.mjs';
-
-const dataError = (code, message) => new ManagerError(code, message, EXIT.DATA);
+import { SCHEMA_VERSION } from './constants.mjs';
+import { dataError } from './errors.mjs';
 
 export function registryPath(home) { return path.join(home, 'registry.json'); }
 export function runtimePath(home, appId) { return path.join(home, 'runtime', `${appId}.json`); }

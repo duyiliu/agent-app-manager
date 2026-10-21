@@ -72,7 +72,7 @@ export function portOccupants(port) {
 }
 
 export function portConflict(port, force, ignorePid = null) {
-  if (!Number.isInteger(port) || port < 1) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   const occupants = portOccupants(port).filter((p) => p.pid !== ignorePid);
   if (!occupants.length) return null;
   if (force) return { port, occupants, forced: true, note: '--force 已明确允许在端口监听时继续；外部进程仅诊断，不接管、不停止' };
@@ -109,7 +109,7 @@ export function tcpListening(port) {
     const socket = new net.Socket();
     socket.setTimeout(700);
     socket.once('connect', () => { socket.destroy(); resolve(true); });
-    socket.once('error', () => resolve(false));
+    socket.once('error', () => { socket.destroy(); resolve(false); });
     socket.once('timeout', () => { socket.destroy(); resolve(false); });
     socket.connect(port, '127.0.0.1');
   });

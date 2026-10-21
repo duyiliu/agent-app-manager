@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { appContext } from './runtime.mjs';
 import { ID_RE } from './desc.mjs';
 import { UI_FILE_CHUNK, TMP_NAME_RE, uiBlocked, uiFail, uiResolveFile } from './ui-data.mjs';
-import { readTailLines, MAX_LOG_BYTES } from './logs.mjs';
+import { readTailLines, MAX_LOG_BYTES, RUN_LOG_FILE_RE } from './logs.mjs';
 import { verifyRun } from './probe.mjs';
 import { usageError, notFoundError } from './errors.mjs';
 
@@ -85,7 +85,7 @@ export function listSources(home, ref) {
   const runDir = path.join(home, 'logs', appId);
   if (fs.existsSync(runDir)) {
     for (const name of fs.readdirSync(runDir)) {
-      const m = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/.exec(name);
+      const m = RUN_LOG_FILE_RE.exec(name);
       if (!m) continue;
       const rotated = name.endsWith('.log.1');
       push({ src: `run:${m[1]}.${m[2]}${rotated ? '.1' : ''}`, kind: 'run', label: `${m[1]} · ${m[2]}${rotated ? ' · 轮转前' : ''}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
@@ -116,7 +116,9 @@ export function resolveSource(home, ref, src) {
   let m;
   if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)(\.1)?$/.exec(src))) {
     const suffix = m[3] ?? '';
-    const file = uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log${suffix}`);
+    let file;
+    try { file = uiResolveFile(path.join(home, 'logs', appId), `${m[1]}.${m[2]}.log${suffix}`); }
+    catch (e) { if (e.code === 'ENOENT') throw notFoundError('日志不存在'); throw e; }
     if (suffix && !fs.existsSync(file)) throw notFoundError('轮转日志不存在');
     return { appId, alias: app.alias, runId: m[1], stream: m[2], file };
   }
@@ -125,7 +127,8 @@ export function resolveSource(home, ref, src) {
       const hints = (rt?.current?.logHints ?? []).filter((h) => typeof h === 'string' && path.isAbsolute(h));
       const hint = hints.find((h) => hintLocator(h) === src);
       if (!hint) throw notFoundError(`日志线索定位符失效（${src}）：登记的日志线索已变化或不存在，请重新拉取日志源列表`);
-      const real = fs.realpathSync(hint);
+      let real;
+      try { real = fs.realpathSync(hint); } catch { throw notFoundError('日志线索不存在'); }
       if (!fs.statSync(real).isFile()) throw notFoundError('日志线索不存在');
       return { appId, alias: app.alias, runId: null, stream: null, file: real };
     }
@@ -133,7 +136,10 @@ export function resolveSource(home, ref, src) {
     throw notFoundError(`日志线索定位符无效或已失效（${src}）：定位符已改为 hint:<hash>，请重新拉取日志源列表`);
   }
   if ((m = /^tmp:(.+)$/.exec(src)) && TMP_NAME_RE.test(m[1])) {
-    return { appId, alias: app.alias, runId: null, stream: m[1].endsWith('.stdout.log') ? 'stdout' : 'stderr', file: uiResolveFile(app.root, `.tmp/${m[1]}`) };
+    let file;
+    try { file = uiResolveFile(app.root, `.tmp/${m[1]}`); }
+    catch (e) { if (e.code === 'ENOENT') throw notFoundError('日志不存在'); throw e; }
+    return { appId, alias: app.alias, runId: null, stream: m[1].endsWith('.stdout.log') ? 'stdout' : 'stderr', file };
   }
   throw usageError('日志源标识无效');
 }
@@ -189,7 +195,7 @@ export function mergeStreamTails(a, b) {
   return out;
 }
 
-export function followLogs(ctx, appId, app, rt, runId, stream, file, initialLines) {
+export function followLogs(rt, runId, file, initialLines) {
   const cur = rt && rt.current;
   process.on('SIGINT', () => {
     process.stderr.write('\n[已中止 follow]\n');
@@ -203,7 +209,6 @@ export function followLogs(ctx, appId, app, rt, runId, stream, file, initialLine
   for (const l of first.lines) process.stdout.write(`${l}\n`);
   let pos = fs.statSync(file).size;
   let decoder = new TextDecoder('utf-8', { fatal: true });
-  let encoding = 'utf-8';
   let lastIdentityCheck = 0;
   const tick = setInterval(() => {
     let size = 0;
@@ -219,7 +224,7 @@ export function followLogs(ctx, appId, app, rt, runId, stream, file, initialLine
         const buf = Buffer.alloc(len);
         fs.readSync(fd, buf, 0, len, pos);
         try { process.stdout.write(decoder.decode(buf, { stream: true })); }
-        catch { encoding = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
+        catch { decoder = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
       } finally {
         fs.closeSync(fd);
       }
@@ -241,7 +246,7 @@ export function followLogs(ctx, appId, app, rt, runId, stream, file, initialLine
               const buf = Buffer.alloc(len);
               fs.readSync(fd, buf, 0, len, pos);
               try { process.stdout.write(decoder.decode(buf, { stream: true })); }
-              catch { encoding = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
+              catch { decoder = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
             } finally {
               fs.closeSync(fd);
             }

@@ -29,12 +29,15 @@ function acquireLock(home, name, op) {
       } catch (e2) {
         throw dataError('LOCK_CORRUPT', `锁文件损坏，拒绝静默处理；人工核验后删除：${file}（${e2.message}）`);
       }
+      if (!holder || typeof holder !== 'object') {
+        throw dataError('LOCK_CORRUPT', `锁文件内容不是持有者对象，拒绝静默处理；人工核验后删除：${file}`);
+      }
       holder.name = name;
       let alive;
       try {
         alive = holderAlive(holder);
       } catch (e3) {
-        if (e3.code === 'PWSH_MISSING') throw e3;
+        if (e3.code === 'PWSH_MISSING' || e3.code === 'LOCK_CORRUPT') throw e3;
         alive = true; // 权限等未知情形：保守视为存活，拒绝回收
       }
       if (alive) throw conflictError('LOCK_BUSY', `另一操作进行中（${holder.op ?? '?'}，pid=${holder.pid}），拒绝并发执行`);

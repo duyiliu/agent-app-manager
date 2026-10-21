@@ -1,4 +1,4 @@
-//\u0000Launch-description contract: validation regexes, desc loading/normalization,
+// Launch-description contract: validation regexes, desc loading/normalization,
 // executable resolution (wrapper/shim rejection) and registry app upsert.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,6 +48,7 @@ export function loadManagedDesc(file) {
   const errs = [];
   if (!ALIAS_RE.test(d.alias ?? '')) errs.push(`alias 需匹配 ${ALIAS_RE}`);
   if (!d.root || !path.isAbsolute(d.root)) errs.push('root 必须是绝对路径');
+  if (d.cwd != null && !path.isAbsolute(d.cwd)) errs.push('cwd 必须是绝对路径');
   if (d.entry != null && !ENTRY_RE.test(d.entry)) errs.push(`entry 需匹配 ${ENTRY_RE}`);
   const hasExe = typeof d.exe === 'string' && d.exe;
   const hasCmd = typeof d.command === 'string' && d.command.trim();
@@ -64,7 +65,7 @@ export function loadManagedDesc(file) {
   if (d.env != null && (!d.env || typeof d.env !== 'object' || Array.isArray(d.env))) errs.push('env 必须是环境变量名到字符串值的对象');
   else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
-  if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
+  if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需为 1-65535 的整数');
   if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {

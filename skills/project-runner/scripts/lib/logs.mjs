@@ -3,6 +3,10 @@ import fs from 'node:fs';
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
 export const MAX_LOG_LINES = 5000;
 
+// 批次日志与启动元文件的文件名语法（logs/<appId>/ 下），prune 与 listSources 共用
+export const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/;
+export const RUN_META_FILE_RE = /^\.([a-z0-9][a-z0-9-]{0,47})\.(pid|sink\.json)$/;
+
 export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
   const want = Math.min(Math.max(1, n), MAX_LOG_LINES);
   const size = fs.statSync(file).size;

@@ -92,6 +92,7 @@ export function cmdRecordUnmanaged(ctx) {
   const entry = ENTRY_RE.test(d.entry ?? '') ? d.entry : 'default';
   const appId = computeAppId(root, entry);
   const logHints = (opts.getAll('--log-hints') ?? []).flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
+  if (logHints.some((h) => !path.isAbsolute(h))) throw usageError('--log-hints 需要绝对路径');
   return withLock(ctx.home, appId, 'record-unmanaged', () => {
     const reg = readRegistry(ctx.home);
     for (const app of Object.values(reg.apps)) {
@@ -134,6 +135,7 @@ export function cmdRecordUnmanaged(ctx) {
 }
 
 export function cmdPort(ctx, value) {
+  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw usageError('port 需要 1-65535 的整数');
   return { port, occupants: portOccupants(port), note: '外部进程仅诊断，不接管、不停止' };
@@ -154,7 +156,7 @@ export function cmdDoctor(ctx) {
       const paths = run.logPaths ?? { stdout: path.join(home, 'logs', appId, `${run.runId}.stdout.log`), stderr: path.join(home, 'logs', appId, `${run.runId}.stderr.log`) };
       for (const stream of ['stdout', 'stderr']) logChecks.push({ runId: run.runId, stream, exists: !!paths[stream] && fs.existsSync(paths[stream]) });
     }
-    runtimes.push({ appId, schemaVersion: rt.schemaVersion, prevRuns: rt.prevRuns?.length ?? 0, logs: logChecks });
+    runtimes.push({ appId, schemaVersion: rt?.schemaVersion, prevRuns: rt?.prevRuns?.length ?? 0, logs: logChecks });
   }
   const locksDir = path.join(home, 'locks');
   const locks = fs.existsSync(locksDir) ? fs.readdirSync(locksDir).filter((n) => n.endsWith('.lock')) : [];
@@ -418,6 +420,11 @@ export function cmdRemove(ctx, ref) {
           writeRuntime(ctx.home, appId, rt);
           abandonedRunId = abandon.runId;
         }
+      } else if (ackRunId) {
+        // 已确认 STOPPED 的记录没有可 ack 的未结旧账：与 start 同一 ACK_MISMATCH 语义
+        throw conflictError('ACK_MISMATCH',
+          `当前没有 STARTING/UNKNOWN 未结记录，--ack-unresolved=${ackRunId} 不适用；请去掉该参数`,
+          { ackRunId, current: { runId: rt.current.runId, phase: rt.current.phase, managed: rt.current.managed } });
       }
     }
     delete reg.apps[appId];
@@ -476,7 +483,7 @@ export function cmdLogs(ctx, ref) {
       const reg = readRegistry(ctx.home);
       const rt = readRuntimeStrict(ctx.home, t.appId);
       // hint/tmp 源没有受管身份，followLogs 会提示无法自动结束，直到 Ctrl+C
-      followLogs(ctx, t.appId, reg.apps[t.appId], rt, t.runId, t.stream, t.file, lines);
+      followLogs(rt, t.runId, t.file, lines);
       return { following: true };
     }
     const r = readTailLines(t.file, lines);
@@ -509,7 +516,7 @@ export function cmdLogs(ctx, ref) {
     if (ctx.json) throw usageError('--follow 与 --json 不兼容');
     const reg = readRegistry(ctx.home);
     const rt = readRuntimeStrict(ctx.home, t.appId);
-    followLogs(ctx, t.appId, reg.apps[t.appId], rt, t.runId, t.stream, t.file, lines);
+    followLogs(rt, t.runId, t.file, lines);
     return { following: true };
   }
   const r = readTailLines(t.file, lines);

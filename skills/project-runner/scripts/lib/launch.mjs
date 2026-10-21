@@ -51,7 +51,7 @@ export function launchManaged(home, appId, app, opts = {}) {
     intentAt: new Date().toISOString(), startedAt: null,
     pid: null, creationFileTime: null, image: null,
     wrapperPid: null, wrapperCreationFileTime: null, wrapperImage: null,
-    envResolved: app.envRefs.filter((n) => n in process.env),
+    envResolved: (app.envRefs ?? []).filter((n) => n in process.env),
     logPaths: { stdout: outPath, stderr: errPath },
     lastError: null, endedAt: null, exitNote: null,
   };
@@ -113,11 +113,17 @@ export function launchManaged(home, appId, app, opts = {}) {
   }
   if (!isCommand) {
     // Capture the managed application, not the logging helper.
-    let targetPid = child.pid;
+    // pidFile 由 log-writer 在目标 spawn 成功后写入；拿不到真实目标 pid 时绝不
+    // 把 logger 自身的 pid 顶替为目标（否则 stop 会杀错进程、真实目标变孤儿）。
+    let targetPid = null;
     for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    try { targetPid = Number(fs.readFileSync(pidFile, 'utf8')) || child.pid; } catch { /* helper startup failed */ }
+    try { targetPid = Number(fs.readFileSync(pidFile, 'utf8')) || null; } catch { /* helper startup failed */ }
     rt.current.pid = targetPid;
-    try { cap = psProc('capture', { id: targetPid }); } catch (e) { cap = { result: 'error', message: e.message }; }
+    try {
+      cap = targetPid == null
+        ? { result: 'error', code: 'target_pid_unavailable', message: `pidFile ${pidFile} 未出现或内容无效` }
+        : psProc('capture', { id: targetPid });
+    } catch (e) { cap = { result: 'error', message: e.message }; }
     if (cap.result === 'ok') {
       rt.current.phase = 'RUNNING';
       rt.current.creationFileTime = cap.creationFileTime;
@@ -127,7 +133,7 @@ export function launchManaged(home, appId, app, opts = {}) {
     }
     rt.current.phase = 'UNKNOWN';
     rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
-    failUnresolved('IDENTITY_CAPTURE_FAILED', `已拉起（pid=${child.pid}）但身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { pid: child.pid, capture: cap });
+    failUnresolved('IDENTITY_CAPTURE_FAILED', `已拉起（logger pid=${child.pid}）但目标身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { targetPid, loggerPid: child.pid, capture: cap });
   }
 
   // ---- 命令模式：wrapper 身份留证，随后在后代中发现唯一真实目标 ----
