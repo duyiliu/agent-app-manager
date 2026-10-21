@@ -7,27 +7,44 @@ export const MAX_LOG_LINES = 5000;
 export const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/;
 export const RUN_META_FILE_RE = /^\.([a-z0-9][a-z0-9-]{0,47})\.(pid|sink\.json)$/;
 
+// 尾部窗口起点：默认 50-200 行的场景不需要读满 MAX_LOG_BYTES（#53），
+// 行数不足时再按 4 倍向前扩展，直到覆盖文件开头或达到 maxBytes 上限。
+const INITIAL_TAIL_WINDOW = 64 * 1024;
+
+function decodeLogBuffer(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch {
+    // 精简 ICU 的 Node 可能不带 GBK 解码器：回退 lossy UTF-8，不让读取失败。
+    try { return new TextDecoder('gbk').decode(buf); }
+    catch { return new TextDecoder('utf-8').decode(buf); }
+  }
+}
+
+function splitLogLines(text) {
+  const all = text.split(/\r?\n/);
+  if (all.length && all[all.length - 1] === '') all.pop();
+  return all;
+}
+
 export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
   const want = Math.min(Math.max(1, n), MAX_LOG_LINES);
   const size = fs.statSync(file).size;
-  const start = Math.max(0, size - maxBytes);
   const fd = fs.openSync(file, 'r');
-  let buf;
+  let start = 0;
+  let all = [];
   try {
-    buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
+    let window = Math.min(INITIAL_TAIL_WINDOW, Math.max(size, 1));
+    for (;;) {
+      start = Math.max(0, size - window);
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      all = splitLogLines(decodeLogBuffer(buf));
+      if (all.length >= want || start === 0 || window >= maxBytes) break;
+      window = Math.min(Math.max(window * 4, window + 1), maxBytes, size);
+    }
   } finally {
     fs.closeSync(fd);
   }
-  let text;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-  catch {
-    // 精简 ICU 的 Node 可能不带 GBK 解码器：回退 lossy UTF-8，不让读取失败。
-    try { text = new TextDecoder('gbk').decode(buf); }
-    catch { text = new TextDecoder('utf-8').decode(buf); }
-  }
-  let all = text.split(/\r?\n/);
-  if (all.length && all[all.length - 1] === '') all.pop();
   const lines = all.slice(-want);
   return { lines, truncated: start > 0 || all.length > want, skippedBytes: start };
 }

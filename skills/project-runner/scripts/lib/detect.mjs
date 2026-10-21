@@ -35,7 +35,13 @@ export function detectProjects(root) {
     if (!pkg) continue;
     const scripts = pkg.scripts ?? {};
     const script = ['dev', 'start', 'serve'].find((s) => typeof scripts[s] === 'string' && scripts[s].trim());
-    if (!script) continue;
+    if (!script) {
+      // package.json 存在但没有可识别脚本：提示 bin/main 字段，不编造候选（#54）
+      if (pkg.bin || pkg.main) {
+        notes.push({ file: rel, suggestion: 'package.json 无 dev/start/serve 脚本；可核对 bin/main 字段或 README 的启动方式后手工拟定 desc。' });
+      }
+      continue;
+    }
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
     const framework = ['vite', '@vue/cli-service', 'next', 'nuxt', '@angular/cli'].find((name) => deps[name]);
     const projectRoot = path.resolve(absoluteRoot, path.dirname(rel));
@@ -70,6 +76,26 @@ export function detectProjects(root) {
   }
   for (const rel of files.filter((f) => path.basename(f) === 'go.mod')) {
     notes.push({ file: rel, suggestion: '检测到 Go 模块；请核对 main package 后选择 go run <入口>，或经授权先 go build 再直连产物。' });
+  }
+  // 入口文件低置信候选（#54）：仅在同目录尚无候选时给出，保持“未发现不编造”
+  const hasCandidateFor = (dir) => candidates.some((c) => path.resolve(c.desc.root) === path.resolve(dir));
+  for (const rel of files) {
+    const base = path.basename(rel);
+    const m = /^(server|app|main|index|run|start)\.(js|mjs|cjs|py)$/.exec(base);
+    if (!m) continue;
+    const projectRoot = path.resolve(absoluteRoot, path.posix.dirname(rel));
+    if (hasCandidateFor(projectRoot)) continue;
+    const isPy = m[2] === 'py';
+    const alias = `${aliasBase}-${candidates.length + 1}`.slice(0, 32);
+    candidates.push({
+      desc: {
+        alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: isPy ? 'python' : 'node',
+        command: `${isPy ? pythonExec : 'node'} ${base}`,
+        expectedImage: isPy ? `${pythonExec}${exeSuffix}` : `node${exeSuffix}`,
+      },
+      confidence: 'low',
+      evidence: { file: rel, rule: `entry-file:${base}` },
+    });
   }
   return { candidates, notes, suggestion: candidates.length ? null : '未发现可确定的启动证据；请检查仓库说明、启动脚本和应用入口后再手工拟定 desc。' };
 }
