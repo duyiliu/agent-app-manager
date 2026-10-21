@@ -87,11 +87,75 @@ function resolveHome(argHome, readOnly = false) {
   return home;
 }
 
-// ---------- PowerShell 进程适配 ----------
+// ---------- PowerShell / POSIX 进程适配 ----------
 
 let selfIdentity = null;
 
+// POSIX（Linux /proc）身份回退：受管生命周期的身份核验不依赖 pwsh。
+// creationFileTime 使用内核算定的进程启动 tick，可在 PID 复用时区分新旧实例。
+function linuxProcSnapshot(pid) {
+  let raw;
+  try {
+    raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ESRCH') return { result: 'notfound' };
+    return { result: 'error', code: 'openFailed', message: e.message };
+  }
+  const close = raw.lastIndexOf(')');
+  const fields = close >= 0 ? raw.slice(close + 2).trim().split(/\s+/) : [];
+  const state = fields[0];
+  const creationFileTime = fields[19];
+  if (!state || !creationFileTime) return { result: 'error', code: 'statParseFailed', message: `无法解析 /proc/${pid}/stat` };
+  if (state === 'Z') return { result: 'exited' };
+  let image;
+  try {
+    image = fs.readlinkSync(`/proc/${pid}/exe`);
+  } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ESRCH') return { result: 'exited' };
+    return { result: 'error', code: 'imageFailed', message: e.message };
+  }
+  return { result: 'ok', creationFileTime, image };
+}
+
+function posixProcOnce(action, params) {
+  if (action === 'capture') {
+    if (!Number.isInteger(params.id) || params.id <= 0) return { result: 'error', code: 'badArgs' };
+    return linuxProcSnapshot(params.id);
+  }
+  if (action === 'verify' || action === 'terminate') {
+    if (!Number.isInteger(params.id) || params.id <= 0 || !params.creationFileTime || !params.image) return { result: 'error', code: 'badArgs' };
+    const current = linuxProcSnapshot(params.id);
+    if (current.result !== 'ok') return current;
+    if (String(current.creationFileTime) !== String(params.creationFileTime)) return { result: 'mismatch', field: 'creationTime' };
+    if (String(current.image) !== String(params.image)) return { result: 'mismatch', field: 'image' };
+    if (action === 'verify') return { result: 'ok' };
+
+    try {
+      process.kill(params.id, 'SIGKILL');
+    } catch (e) {
+      if (e.code === 'ESRCH') return { result: 'notfound' };
+      return { result: 'error', code: 'terminateFailed', message: e.message };
+    }
+    const waitMs = Math.max(0, params.waitMs ?? TERMINATE_WAIT_MS);
+    const deadline = Date.now() + waitMs;
+    do {
+      const snap = linuxProcSnapshot(params.id);
+      // 原实例已消失，或同 PID 已被新进程复用：均视为原实例已终止，绝不再触碰新进程。
+      if (snap.result === 'notfound' || snap.result === 'exited') return { result: 'terminated' };
+      if (snap.result === 'ok' && (String(snap.creationFileTime) !== String(params.creationFileTime) || String(snap.image) !== String(params.image))) {
+        return { result: 'terminated' };
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    } while (Date.now() < deadline);
+    return { result: 'terminateTimeout' };
+  }
+  return { result: 'error', code: 'unsupportedAction' };
+}
+
 function psProcOnce(action, params) {
+  if (process.platform !== 'win32' && ['capture', 'verify', 'terminate'].includes(action)) {
+    return posixProcOnce(action, params);
+  }
   const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', action];
   if (params.id != null) args.push('-Id', String(params.id));
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
@@ -130,7 +194,30 @@ function psProc(action, params = {}) {
   return retryProcessProbe(action, () => psProcOnce(action, params));
 }
 
+// Linux 端口诊断回退：从 /proc/net/{tcp,tcp6} 读取 LISTEN 项，不依赖 pwsh。
+// 仅用于端口占用判定与只读诊断，不接管/终止任何外部进程。
+function posixPortOccupants(port) {
+  const rows = [];
+  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    for (const line of text.split('\n').slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 4 || parts[3] !== '0A') continue; // 0A = TCP LISTEN
+      const local = parts[1]?.split(':') ?? [];
+      const portHex = local[local.length - 1];
+      if (!portHex || Number.parseInt(portHex, 16) !== port) continue;
+      rows.push({
+        pid: null, processName: null, executablePath: null, startedAt: null,
+        localAddress: local.slice(0, -1).join(':'), remoteAddress: parts[2], state: 'LISTEN', source: path.basename(file),
+      });
+    }
+  }
+  return rows.map((row) => ({ ...row, identity: null }));
+}
+
 function portOccupants(port) {
+  if (process.platform !== 'win32') return posixPortOccupants(port);
   const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', path.join(SCRIPT_DIR, 'ps', 'port.ps1'), '-Port', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
@@ -507,7 +594,8 @@ function exeRejection(resolved) {
   if (/javapath/i.test(resolved)) {
     return `Oracle javapath 转发 shim，其真实 JVM 为子进程：日志句柄不落地、终止会错位`;
   }
-  if (!EXEC_EXT_RE.test(resolved)) {
+  // Windows 需要真实 PE 映像（.exe/.com）；POSIX 可执行文件通常无扩展名（如 node、java）
+  if (process.platform === 'win32' && !EXEC_EXT_RE.test(resolved)) {
     return `不是可直接启动的可执行文件（受管要求 .exe/.com）；请解析到底层真实进程`;
   }
   return null;
