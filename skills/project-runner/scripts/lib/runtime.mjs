@@ -2,7 +2,7 @@
 // (STARTING/UNKNOWN) protection with explicit ack recovery, and status computation.
 import { runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
 import { psProc, verifyRun } from './probe.mjs';
-import { withLock, lockHeld } from './locks.mjs';
+import { withLock, lockState } from './locks.mjs';
 import { ID_RE } from './desc.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 
@@ -158,8 +158,16 @@ export function computeStatus(home, appId, rt) {
     return { status: 'UNKNOWN', managed: false, runId: cur.runId, note: '非受管记录：仅记录启动尝试与日志线索，不提供生命周期控制' };
   }
   if (cur.phase === 'STARTING') {
-    if (lockHeld(home, appId)) return { status: 'STARTING', managed: true, runId: cur.runId };
-    return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: `启动中断（intentAt=${cur.intentAt}）；证据保留，不会自动重试` };
+    // STARTING 只在锁持有者仍存活时成立；残留锁（启动被强杀 / PID 已复用）必须
+    // 展示为启动中断，否则用户会误以为启动仍在进行而错过 --ack-unresolved 恢复。
+    // 锁损坏由 lockState 抛 LOCK_CORRUPT，保留现场供人工核验，不在此静默回收。
+    const lock = lockState(home, appId);
+    if (lock.present && lock.alive) return { status: 'STARTING', managed: true, runId: cur.runId };
+    const reason = lock.present ? '锁持有者已退出' : '锁文件不存在';
+    return {
+      status: 'UNKNOWN', managed: true, runId: cur.runId,
+      note: `启动中断（${reason}），证据保留，需 --ack-unresolved ${cur.runId}；intentAt=${cur.intentAt}`,
+    };
   }
   if (cur.phase === 'STOPPED') {
     return { status: 'STOPPED', managed: true, runId: cur.runId, note: cur.exitNote ?? null };

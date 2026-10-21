@@ -77,6 +77,30 @@ export function withLock(home, name, op, fn) {
   }
 }
 
+// 只读检查锁文件及其持有者是否仍存活。缺失 → present=false；损坏/信息不完整 →
+// LOCK_CORRUPT（绝不静默回收）；核验结果不明时 holderAlive 保守返回 true。
+export function lockState(home, name) {
+  const file = lockPath(home, name);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return { present: false, alive: false, holder: null };
+    throw dataError('LOCK_UNREADABLE', `锁文件不可读，拒绝静默处理；人工核验后删除：${file}（${e.message}）`);
+  }
+  let holder;
+  try {
+    holder = JSON.parse(raw);
+  } catch (e) {
+    throw dataError('LOCK_CORRUPT', `锁文件损坏，拒绝静默处理；人工核验后删除：${file}（${e.message}）`);
+  }
+  if (!holder || typeof holder !== 'object') {
+    throw dataError('LOCK_CORRUPT', `锁文件内容不是持有者对象，拒绝静默处理；人工核验后删除：${file}`);
+  }
+  holder.name = name;
+  return { present: true, alive: holderAlive(holder), holder };
+}
+
 export function lockHeld(home, name) {
   return fs.existsSync(lockPath(home, name));
 }

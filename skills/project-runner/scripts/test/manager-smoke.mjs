@@ -10,6 +10,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { psProc } from '../lib/probe.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-manager-smoke-'));
@@ -204,6 +205,38 @@ try {
     const j = expectFail(run(['start', 'smoke']), 3, 'UNRESOLVED_RUN');
     assert(j.error.message.includes('rfakestuck1'), '错误信息未给出 runId');
     assert(j.error.message.includes('--ack-unresolved'), '错误信息未给出恢复指引');
+  });
+
+  lifecycle('STARTING + 死锁持有者 → status/list UNKNOWN（启动中断）并提示恢复', () => {
+    const dead = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8', windowsHide: true });
+    assert(Number.isInteger(dead.pid) && dead.pid > 0, `无法取得已退出进程 pid：${dead.pid}`);
+    const lockFile = path.join(home, 'locks', `${appId}.lock`);
+    fs.writeFileSync(lockFile, JSON.stringify({
+      pid: dead.pid, creationFileTime: '1', op: 'start-new', at: new Date().toISOString(),
+    }) + '\n');
+    const st = expectOk(run(['status', 'smoke']));
+    assert.equal(st.data.status, 'UNKNOWN', '残留锁不得继续伪装为 STARTING');
+    assert(st.data.note.includes('启动中断（锁持有者已退出）'), `状态提示未标明启动中断：${st.data.note}`);
+    assert.match(st.data.note, /--ack-unresolved rfakestuck1/, '状态提示缺少恢复指引');
+    const list = expectOk(run(['list']));
+    const row = list.data.apps.find((a) => a.alias === 'smoke');
+    assert.equal(row.status, 'UNKNOWN');
+    assert(row.note.includes('--ack-unresolved rfakestuck1'), 'list 缺少恢复指引');
+    fs.unlinkSync(lockFile);
+  });
+
+  lifecycle('STARTING + 锁持有者存活 → status/list 保持 STARTING', () => {
+    const self = psProc('capture', { id: process.pid });
+    assert.equal(self.result, 'ok', `无法采集测试进程身份：${JSON.stringify(self)}`);
+    const lockFile = path.join(home, 'locks', `${appId}.lock`);
+    fs.writeFileSync(lockFile, JSON.stringify({
+      pid: process.pid, creationFileTime: self.creationFileTime, op: 'start-new', at: new Date().toISOString(),
+    }) + '\n');
+    const st = expectOk(run(['status', 'smoke']));
+    assert.equal(st.data.status, 'STARTING');
+    const list = expectOk(run(['list']));
+    assert.equal(list.data.apps.find((a) => a.alias === 'smoke').status, 'STARTING');
+    fs.unlinkSync(lockFile);
   });
 
   lifecycle('--ack-unresolved 与未结 runId 不一致 → ACK_MISMATCH（退出码 3）', () => {

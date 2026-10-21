@@ -197,6 +197,7 @@ export function cmdList(ctx) {
       pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
+      note: st.note ?? null,
     };
   });  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };

@@ -94,6 +94,7 @@ function renderHuman(command, data) {
       const rows = data.apps.map((a) =>
         String(a.alias).padEnd(14) + String(a.mode ?? '').padEnd(8) + String(a.status).padEnd(10)
         + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7) + String(a.lastRunId ?? '-')
+        + (a.note ? `\n  note: ${a.note}` : '')
         + (a.error ? `\n  ! ${a.error}` : ''));
       return [head, ...rows].join('\n');
     }
