@@ -31,10 +31,15 @@ const w = (f, c) => fs.writeFileSync(f, c, 'utf8');
 // 受管应用 aok：current=rkeep1（STOPPED），prevRuns=[rkeep2]；rold1/rold2 超出保留期（可回收）
 const aokLogs = path.join(home, 'logs', 'aok');
 w(path.join(aokLogs, 'rkeep1.stdout.log'), 'keep1 stdout A\nkeep1 stdout B\n');
+w(path.join(aokLogs, 'rkeep1.stdout.log.1'), 'rotated keep1 stdout\n');
 w(path.join(aokLogs, 'rkeep1.stderr.log'), 'keep1 stderr E1\nkeep1 stderr E2\n');
 w(path.join(aokLogs, 'rkeep2.stdout.log'), 'keep2 stdout\n');
 w(path.join(aokLogs, 'rold1.stdout.log'), 'old1 beyond retention\n');
+w(path.join(aokLogs, 'rold1.stdout.log.1'), 'old1 rotated beyond retention\n');
 w(path.join(aokLogs, 'rold2.stderr.log'), 'old2 beyond retention\n');
+w(path.join(aokLogs, '.rkeep1.pid'), '123\n');
+w(path.join(aokLogs, '.rold1.pid'), '123\n');
+w(path.join(aokLogs, '.rold1.sink.json'), '{}\n');
 w(path.join(aokLogs, 'notes.txt'), '不是批次日志，必须保留\n');
 w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line A\ntmp line B\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
@@ -189,10 +194,13 @@ await check('--src tmp:<name> 与 ui 同源同内容', async () => {
   assert.equal(tmpLog.json.data.file, t.file);
   assert.equal(tmpLog.json.data.lines.join('\n'), fs.readFileSync(t.file, 'utf8').trimEnd());
 });
-await check('--src run:<历史批次> 可读旧日志', async () => {
+await check('--src run:<历史批次> 与轮转日志可读', async () => {
   const r = await run(['logs', 'ok', '--src', 'run:rkeep2.stdout', '--json']);
   assert.equal(r.code, 0);
   assert.deepEqual(r.json.data.lines, ['keep2 stdout']);
+  const rotated = await run(['logs', 'ok', '--src', 'run:rkeep1.stdout.1', '--json']);
+  assert.equal(rotated.code, 0);
+  assert.deepEqual(rotated.json.data.lines, ['rotated keep1 stdout']);
 });
 await check('--src 与 --lines 组合有界读取', async () => {
   const r = await run(['logs', 'ok', '--src', 'run:rkeep1.stdout', '--lines', '1', '--json']);
@@ -242,7 +250,10 @@ await check('prune 默认 dry-run：列出将删内容且不删除任何文件',
   if (pwshOk) {
     const files = pd.json.data.logs.flatMap((a) => a.files).map((f) => f.file);
     assert(files.includes(path.join(aokLogs, 'rold1.stdout.log')), `应列出超保留期日志：${files.join(',')}`);
+    assert(files.includes(path.join(aokLogs, 'rold1.stdout.log.1')), `应列出超保留期轮转日志：${files.join(',')}`);
     assert(files.includes(path.join(aokLogs, 'rold2.stderr.log')));
+    assert(files.includes(path.join(aokLogs, '.rold1.pid')), `应列出超保留期运行元文件：${files.join(',')}`);
+    assert(files.includes(path.join(aokLogs, '.rold1.sink.json')));
   } else {
     assert(pd.json.data.skipped.some((s) => s.kind === 'logs' && s.reason.includes('PWSH_MISSING')));
   }
@@ -262,7 +273,10 @@ await check('prune --apply：回收超保留期日志、死锁残留与孤儿临
   assert.equal(pa.json.data.dryRun, false);
   if (pwshOk) {
     assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log')));
+    assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log.1')));
     assert(!fs.existsSync(path.join(aokLogs, 'rold2.stderr.log')));
+    assert(!fs.existsSync(path.join(aokLogs, '.rold1.pid')));
+    assert(!fs.existsSync(path.join(aokLogs, '.rold1.sink.json')));
   }
   assert(!fs.existsSync(path.join(home, 'locks', 'azombie.lock.stale-1700000000000')));
   assert(!fs.existsSync(oldTmp1));
@@ -270,6 +284,8 @@ await check('prune --apply：回收超保留期日志、死锁残留与孤儿临
 });
 await check('prune 不删 current/保留期日志、证据与非残留文件', () => {
   assert(fs.existsSync(path.join(aokLogs, 'rkeep1.stdout.log')));
+  assert(fs.existsSync(path.join(aokLogs, 'rkeep1.stdout.log.1')));
+  assert(fs.existsSync(path.join(aokLogs, '.rkeep1.pid')), '保留期的运行元文件不得删除');
   assert(fs.existsSync(path.join(aokLogs, 'rkeep1.stderr.log')));
   assert(fs.existsSync(path.join(aokLogs, 'rkeep2.stdout.log')));
   assert(fs.existsSync(path.join(aokLogs, 'notes.txt')));
