@@ -118,6 +118,13 @@ export function launchManaged(home, appId, app, opts = {}) {
     // Logger owns log descriptors; the manager never opens active log files.
   }
 
+  // spawn 未返回 pid（例如同步 spawn 失败）时不能进入身份采集：直接落账并拒绝重试（#22）
+  if (!Number.isInteger(child.pid)) {
+    rt.current.phase = 'UNKNOWN';
+    rt.current.lastError = 'spawn_failed: 未获得子进程 pid';
+    failUnresolved('SPAWN_FAILED', `进程启动失败（未获得子进程 pid）；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: spawnError ?? 'no-pid' });
+  }
+
   rt.current.startedAt = new Date().toISOString();
   if (isCommand) {
     rt.current.wrapperPid = child.pid; // 先记 logger pid；pidFile 出现后覆盖为真实 wrapper

@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { isWindows, findExecutable, killTree, listDescendants, findProcesses } from './platform.mjs';
@@ -36,6 +36,12 @@ fs.writeFileSync(path.join(projPy, 'srv.py'),
   'import time\nprint("py-ready", flush=True)\nwhile True:\n    time.sleep(1)\n', 'utf8');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const cliAsync = (...args) => new Promise((res) => {
+  const c = spawn(process.execPath, [MANAGER, '--home', home, '--json', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  c.stdout.on('data', (d) => { out += d; });
+  c.on('exit', (code) => res({ code, json: (() => { try { return JSON.parse(out); } catch { return null; } })() }));
+});
 const cli = (...args) => {
   const r = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args],
     { encoding: 'utf8', windowsHide: true, timeout: 60000 });
@@ -329,6 +335,19 @@ try {
     const f = cli('record-unmanaged', '--desc', descFile({ alias: 'dup2', root: projNode, mode: 'node' }), '--force');
     assert.equal(f.code, 0, f.text);
     assert.equal(f.json.data.replacedManaged, true);
+  });
+  await check('并发登记不丢更新（#22 registry 锁）', async () => {
+    const roots = [];
+    for (let i = 0; i < 4; i++) {
+      const d = path.join(base, `conc-${i}`);
+      fs.mkdirSync(d, { recursive: true });
+      roots.push(d);
+    }
+    const results = await Promise.all(roots.map((r, i) => cliAsync('record-unmanaged', '--desc', descFile({ alias: `conc${i}`, root: r, mode: 'proc' }))));
+    if (pwshMissing(results[0])) skip('缺 pwsh 7');
+    assert(results.every((r) => r.code === 0), `并发登记失败：${results.map((r) => `${r.code}/${r.json?.error?.code ?? '-'}/${r.json?.error?.message ?? ''}`).join(' | ')}`);
+    const apps = cli('list', '--json').json.data.apps;
+    for (let i = 0; i < 4; i++) assert(apps.some((a) => a.alias === `conc${i}`), `登记丢失：conc${i}`);
   });
   await check('list 汇总有真实 mode 展示', () => {
     if (!nodeRunId) skip('无受管实例');

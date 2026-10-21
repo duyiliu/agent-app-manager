@@ -180,6 +180,12 @@ try {
     assert.equal(gone.status, 404);
     assert(gone.json.error.message.includes('失效'));
   });
+  await check('线索文件被删除后 tail 返回 404（不报 500）', async () => {
+    const src = repSources[0].src;
+    fs.unlinkSync(hintFile);
+    const r = await get(`/api/tail?app=report&src=${encodeURIComponent(src)}`);
+    assert.equal(r.status, 404);
+  });
 
   const tree = (await get('/api/tree?app=his&path=')).json.data;
   await check('文件树：列出 pom.xml，隐藏 .env/.ssh/.npmrc', () => {

@@ -68,7 +68,8 @@ function emitOk(ctx, command, data) {
   } else {
     process.stdout.write(`${renderHuman(command, data)}\n`);
   }
-  process.exit(EXIT.OK);
+  // 不调用 process.exit：Windows 管道下 stdout 是异步写，立即退出会截断输出（#22）
+  process.exitCode = EXIT.OK;
 }
 
 function emitErr(ctx, command, e) {
@@ -87,7 +88,8 @@ function emitErr(ctx, command, e) {
     }
     process.stderr.write(`${text}\n`);
   }
-  process.exit(e.exitCode ?? 1);
+  // 同上：让 stdout/stderr 自然 flush，避免大 JSON 被截断（#22）
+  process.exitCode = e.exitCode ?? 1;
 }
 
 function renderHuman(command, data) {
@@ -295,7 +297,6 @@ async function main() {
     // 退出码仍为 5（数据损坏/内部错误一类），但不冒充 DATA_CORRUPT。
     if (e instanceof ManagerError) emitErr(ctx, command, e);
     else emitErr(ctx, command, new ManagerError('INTERNAL', `内部错误：${e.message}`, EXIT.DATA, { stack: e.stack }));
-    process.exit(5);
   }
 }
 

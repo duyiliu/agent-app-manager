@@ -10,7 +10,7 @@ import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWrite
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
 import { psProc, verifyRun, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
-import { withLock } from './locks.mjs';
+import { withLock, withLockWait } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
@@ -19,6 +19,18 @@ import { planPrune, applyPrune } from './prune.mjs';
 import { bootId } from './proc-linux.mjs';
 
 // ---------- 简单选项解析 ----------
+
+// 注册表读改写必须串行：不同 appId 的并发首次登记会互相覆盖（atomicWriteJson 只防
+// 损坏，不防丢更新）。锁顺序固定为「应用锁 → 注册表锁」，避免与单应用操作死锁（#22）。
+function mutateRegistry(home, fn) {
+  // 等待式锁：并发登记排队执行，而不是让其中一个直接 LOCK_BUSY 失败
+  return withLockWait(home, 'registry', 'mutate', 5000, () => {
+    const reg = readRegistry(home);
+    const out = fn(reg);
+    atomicWriteJson(registryPath(home), reg);
+    return out;
+  });
+}
 
 export function parseNamed(args, spec) {
   const single = new Map();
@@ -71,8 +83,7 @@ export function cmdStartNew(ctx) {
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const portEvidence = portConflict(desc.expectedPort, opts.has('--force'));
-    const app = upsertApp(reg, appId, desc);
-    atomicWriteJson(registryPath(ctx.home), reg);
+    const app = mutateRegistry(ctx.home, (r) => upsertApp(r, appId, desc));
     const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind,
@@ -111,31 +122,35 @@ export function cmdRecordUnmanaged(ctx) {
         `appId=${appId}（root=${root}，entry=${entry}）已存在受管登记「${existing.alias}」，非受管登记会覆盖其受管身份与进程追踪证据；确认后用 --force 覆盖，或先 remove 该登记`,
         { appId, alias: existing.alias, root, entry, managed: true });
     }
-    if (existing) {
-      existing.alias = d.alias;
-      existing.displayName = d.displayName ?? d.alias;
-      // 转为非受管形态：清空受管启动能力，避免残留 exe/command 继续被当作可受管
-      existing.exe = null;
-      existing.args = [];
-      existing.command = null;
-      existing.expectedImage = null;
-      existing.discoverTimeoutMs = null;
-      existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
-      existing.updatedAt = now;
-    } else {
-      reg.apps[appId] = {
+    const app = mutateRegistry(ctx.home, (r) => {
+      const target = r.apps[appId];
+      if (target) {
+        target.alias = d.alias;
+        target.displayName = d.displayName ?? d.alias;
+        // 转为非受管形态：清空受管启动能力，避免残留 exe/command 继续被当作可受管
+        target.exe = null;
+        target.args = [];
+        target.command = null;
+        target.expectedImage = null;
+        target.discoverTimeoutMs = null;
+        target.mode = MODES.has(d.mode) ? d.mode : target.mode;
+        target.updatedAt = now;
+        return target;
+      }
+      const created = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
         envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
-    }
-    atomicWriteJson(registryPath(ctx.home), reg);
+      r.apps[appId] = created;
+      return created;
+    });
     const rt = readRuntimeStrict(ctx.home, appId) ?? { schemaVersion: SCHEMA_VERSION, appId, prevRuns: [] };
     archiveCurrent(rt);
     rt.current = {
-      runId: newRunId(), phase: 'UNKNOWN', managed: false, mode: reg.apps[appId].mode,
+      runId: newRunId(), phase: 'UNKNOWN', managed: false, mode: app.mode,
       intentAt: now, startedAt: now, pid: null, creationFileTime: null, image: null,
       envResolved: [], logPaths: null, logHints,
       lastError: null, endedAt: null,
@@ -143,7 +158,7 @@ export function cmdRecordUnmanaged(ctx) {
     };
     writeRuntime(ctx.home, appId, rt);
     return {
-      appId, alias: reg.apps[appId].alias, runId: rt.current.runId,
+      appId, alias: app.alias, runId: rt.current.runId,
       managed: false, status: 'UNKNOWN', logHints,
       replaced: !!existing,
       ...(wasManaged ? { replacedManaged: true } : {}),
@@ -355,10 +370,12 @@ export function cmdStart(ctx, ref) {
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
-    app.cwd = cwd;
-    app.exe = exe;
-    app.updatedAt = new Date().toISOString();
-    atomicWriteJson(registryPath(ctx.home), reg);
+    mutateRegistry(ctx.home, (r) => {
+      const a = r.apps[appId];
+      a.cwd = cwd;
+      a.exe = exe;
+      a.updatedAt = new Date().toISOString();
+    });
     const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
@@ -499,10 +516,12 @@ export function cmdRestart(ctx, ref) {
     const exe = app.command ? null : resolveExe(app.exe, cwd);
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
     const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
-    app.cwd = cwd;
-    app.exe = exe;
-    app.updatedAt = new Date().toISOString();
-    atomicWriteJson(registryPath(ctx.home), reg);
+    mutateRegistry(ctx.home, (r) => {
+      const a = r.apps[appId];
+      a.cwd = cwd;
+      a.exe = exe;
+      a.updatedAt = new Date().toISOString();
+    });
     const cur = launchManaged(ctx.home, appId, app);
     return {
       appId, alias: app.alias, stop: stopResult,
@@ -551,8 +570,7 @@ export function cmdRemove(ctx, ref) {
           { ackRunId, current: { runId: rt.current.runId, phase: rt.current.phase, managed: rt.current.managed } });
       }
     }
-    delete reg.apps[appId];
-    atomicWriteJson(registryPath(ctx.home), reg);
+    mutateRegistry(ctx.home, (r) => { delete r.apps[appId]; });
     return {
       appId, alias: app.alias, removed: true,
       runtimeFile: runtimePath(ctx.home, appId),
