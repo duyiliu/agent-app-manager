@@ -352,9 +352,19 @@ function verifyAbandonable(home, appId, cur) {
   if (cur.creationFileTime && cur.image) {
     const v = verifyRunGone(cur); // 核验失败抛 IDENTITY_UNKNOWN，保守拒绝
     if (v.alive) {
+      // POSIX 恢复路径没有 taskkill/pwsh 可依赖：ack 已明确表示要放弃旧实例，
+      // 先有界终止已核验的旧实例再拒绝本次 ack，确保既不留孤儿也不会启动第二份实例；
+      // 用户确认退出后重试 ack 即可正常归档并启动。Windows 仍保持“只拒绝、不触碰”的既有语义。
+      let termination = null;
+      if (process.platform !== 'win32') {
+        try { termination = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image }); }
+        catch (e) { termination = { result: 'error', message: e.message }; }
+      }
       throw conflictError('UNRESOLVED_RUN',
-        `--ack-unresolved=${cur.runId} 被拒绝：旧进程仍存活（pid=${cur.pid}），禁止启动第二份受管实例`,
-        { ...ev, verification: 'alive' });
+        process.platform !== 'win32'
+          ? `--ack-unresolved=${cur.runId} 被拒绝：旧进程（pid=${cur.pid}）在 ack 时仍存活，已请求终止；未启动第二份受管实例，请确认退出后重试`
+          : `--ack-unresolved=${cur.runId} 被拒绝：旧进程仍存活（pid=${cur.pid}），禁止启动第二份受管实例`,
+        { ...ev, verification: 'alive', ...(termination ? { termination } : {}) });
     }
     return; // 已退出或 PID 已复用
   }
