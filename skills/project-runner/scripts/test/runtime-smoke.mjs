@@ -198,6 +198,17 @@ try {
     assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS');
     assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
   });
+  await check('cleanup-wrapper 清理歧义残留 wrapper，UNKNOWN 证据保留', () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('cleanup-wrapper', 'cmdamb');
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    assert(['terminated', 'exited', 'notfound', 'mismatch'].includes(r.json.data.result), r.text);
+    const s = cli('status', 'cmdamb').json.data;
+    assert.equal(s.status, 'UNKNOWN');
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.appId}.json`), 'utf8'));
+    assert.equal(rt.current.wrapperCleaned, true);
+  });
   await check('command 模式发现超时：DISCOVERY_TIMEOUT 留证 UNKNOWN', () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({

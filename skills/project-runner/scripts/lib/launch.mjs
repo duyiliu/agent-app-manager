@@ -30,6 +30,14 @@ function shellArgs(command) {
   return process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
 }
 
+// log-writer 在目标 spawn 成功后写 pidFile；等待窗口与直连/命令模式共用。
+function readPidFile(file) {
+  for (let i = 0; i < 100 && !fs.existsSync(file); i++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+  try { return Number(fs.readFileSync(file, 'utf8')) || null; } catch { return null; }
+}
+
 // 目标进程终止后尽力清理仍存活的 cmd wrapper（多数会随子进程退出自然消亡）。
 // wrapper 身份在启动时已采集，同句柄核验+终止，失败仅作留证不影响主结果。
 export function cleanupWrapper(rt) {
@@ -60,7 +68,7 @@ export function launchManaged(home, appId, app, opts = {}) {
     kind: isCommand ? 'command' : 'direct',
     intentAt: new Date().toISOString(), startedAt: null,
     pid: null, creationFileTime: null, image: null,
-    wrapperPid: null, wrapperCreationFileTime: null, wrapperImage: null,
+    wrapperPid: null, wrapperCreationFileTime: null, wrapperImage: null, loggerPid: null,
     envResolved: (app.envRefs ?? []).filter((n) => n in process.env),
     logPaths: { stdout: outPath, stderr: errPath },
     lastError: null, endedAt: null, exitNote: null,
@@ -111,23 +119,26 @@ export function launchManaged(home, appId, app, opts = {}) {
 
   rt.current.startedAt = new Date().toISOString();
   if (isCommand) {
-    rt.current.wrapperPid = child.pid;
+    rt.current.wrapperPid = child.pid; // 先记 logger pid；pidFile 出现后覆盖为真实 wrapper
+    rt.current.loggerPid = child.pid;
   } else {
     rt.current.pid = child.pid;
   }
 
   let cap;
   if (isCommand) {
-    try { cap = psProc('capture', { id: child.pid }); }
+    // wrapper 是 log-writer spawn 的 cmd/sh（不是 logger 自身）。记录它的身份，
+    // 供失败后的 cleanup-wrapper 同身份核验；pidFile 不可用时回退 logger 身份。
+    const wrapperPid = readPidFile(pidFile);
+    if (wrapperPid) rt.current.wrapperPid = wrapperPid;
+    try { cap = psProc('capture', { id: rt.current.wrapperPid }); }
     catch (e) { cap = { result: 'error', message: e.message }; }
   }
   if (!isCommand) {
     // Capture the managed application, not the logging helper.
     // pidFile 由 log-writer 在目标 spawn 成功后写入；拿不到真实目标 pid 时绝不
     // 把 logger 自身的 pid 顶替为目标（否则 stop 会杀错进程、真实目标变孤儿）。
-    let targetPid = null;
-    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    try { targetPid = Number(fs.readFileSync(pidFile, 'utf8')) || null; } catch { /* helper startup failed */ }
+    const targetPid = readPidFile(pidFile);
     rt.current.pid = targetPid;
     try {
       cap = targetPid == null
