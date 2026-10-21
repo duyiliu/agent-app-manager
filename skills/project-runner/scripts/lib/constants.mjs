@@ -2,6 +2,10 @@
 export const SCHEMA_VERSION = 1;
 export const EXIT = Object.freeze({ OK: 0, USAGE: 1, NOT_FOUND: 2, CONFLICT: 3, DEPENDENCY: 4, DATA: 5 });
 
+// 进程探针等待上限（Windows pwsh 与 Linux /proc 共用同一语义）
+export const TERMINATE_WAIT_MS = 10000;
+export const COMMAND_DISCOVER_TIMEOUT_MS = 45000;
+
 // 统一错误类型：manager 与 lib 共用同一类，instanceof 检查才能跨模块生效
 export class ManagerError extends Error {
   constructor(code, message, exitCode, detail) {

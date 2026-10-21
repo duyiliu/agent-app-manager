@@ -16,8 +16,11 @@ export const MODES = new Set(['java', 'jrebel', 'python', 'node', 'proc']);
 // 启动目标校验：.cmd/.bat/.ps1 包装与 WindowsApps 0 字节 stub 会改变子进程形态一律拒绝
 export const WRAPPER_EXT_RE = /\.(cmd|bat|ps1)$/i;
 export const EXEC_EXT_RE = /\.(exe|com)$/i;
-// 命令模式的目标进程映像基名（不含目录、必须 .exe/.com）
-export const IMAGE_NAME_RE = /^[^\\/]+\.(exe|com)$/i;
+// 命令模式的目标进程映像基名：Windows 必须 .exe/.com；Linux 允许无扩展名（node/java），
+// 只要求是单个文件名，不含路径分隔符。
+export const IMAGE_NAME_RE = process.platform === 'win32'
+  ? /^[^\\/]+\.(exe|com)$/i
+  : /^[^/\\]+$/;
 
 export const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024; // 单次运行日志的写入上限（超过即轮转）
 
@@ -128,6 +131,7 @@ function isAppExecAlias(file) {
 
 // 校验解析出的候选可执行文件：返回 null 表示可用，否则为拒绝原因。
 function exeRejection(resolved) {
+  if (process.platform !== 'win32') return posixExeRejection(resolved);
   if (isAppExecAlias(resolved)) {
     return `WindowsApps 应用执行别名（reparse point，无法核验真实目标进程）`;
   }
@@ -143,6 +147,33 @@ function exeRejection(resolved) {
   return null;
 }
 
+// POSIX：必须是普通文件 + 可执行位；#! 脚本是包装进程（真实目标是解释器子进程），
+// 与 Windows 的 .cmd/.bat 同类，必须解析到真实解释器或改用 command 模式。
+function posixExeRejection(resolved) {
+  let st;
+  try { st = fs.statSync(resolved); } catch { return '不可执行或不是普通文件'; }
+  if (!st.isFile()) return '不是普通文件';
+  if (/\.(cmd|bat|ps1)$/i.test(resolved)) {
+    return `Windows 脚本包装（${path.extname(resolved)}），Linux 上无法作为受管进程`;
+  }
+  let real = resolved;
+  try { real = fs.realpathSync.native(resolved); } catch { /* 保持原路径 */ }
+  try { fs.accessSync(real, fs.constants.X_OK); } catch { return '没有可执行权限'; }
+  try {
+    const fd = fs.openSync(real, 'r');
+    try {
+      const head = Buffer.alloc(2);
+      const n = fs.readSync(fd, head, 0, 2, 0);
+      if (n === 2 && head[0] === 0x23 && head[1] === 0x21) {
+        return `脚本包装（#!），真实进程会变成解释器子进程：日志句柄不落地、终止目标错位`;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch { /* 读不到头部：交给 spawn 报错，不据此拒绝 */ }
+  return null;
+}
+
 // where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：UTF-8 解码失败回退 GBK，
 // 避免非 ASCII 用户名路径乱码后把真实候选误判为不可用。
 function decodeCmdOutput(buf) {
@@ -151,6 +182,11 @@ function decodeCmdOutput(buf) {
 }
 
 export function resolveExe(exe, cwd) {
+  if (process.platform !== 'win32') return resolveExePosix(exe, cwd);
+  return resolveExeWindows(exe, cwd);
+}
+
+function resolveExeWindows(exe, cwd) {
   if (/[\\/]/.test(exe)) {
     const abs = path.isAbsolute(exe) ? exe : path.resolve(cwd, exe);
     const rejected = [];
@@ -187,6 +223,36 @@ export function resolveExe(exe, cwd) {
   }
   throw conflictError('CONFIG_INVALID',
     `exe ${exe} 的 PATH 候选均不可作为受管目标：${rejected.join('；')}。请提供真实可执行文件路径（如真实 python.exe/node.exe）后重试`);
+}
+
+function resolveExePosix(exe, cwd) {
+  if (exe.includes('/')) {
+    const abs = path.isAbsolute(exe) ? exe : path.resolve(cwd, exe);
+    if (!fs.existsSync(abs)) {
+      throw conflictError('CONFIG_INVALID', `exe 不存在：${exe}（Skill 需重新分析该目标项目）`);
+    }
+    const why = exeRejection(abs);
+    if (why) throw conflictError('CONFIG_INVALID', `exe 不可用：${abs}（${why}）。请改用真实可执行文件或 command 模式`);
+    return fs.realpathSync.native(abs);
+  }
+  if (/^java(c)?$/i.test(exe) && process.env.JAVA_HOME) {
+    const jh = path.join(process.env.JAVA_HOME, 'bin', exe);
+    if (fs.existsSync(jh) && !exeRejection(jh)) return fs.realpathSync.native(jh);
+  }
+  // Linux 无 where：按 PATH 顺序逐个校验，规则与 Windows 分支一致。
+  const rejected = [];
+  for (const dir of String(process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    const cand = path.join(dir, exe);
+    if (!fs.existsSync(cand)) continue;
+    const why = exeRejection(cand);
+    if (!why) return fs.realpathSync.native(cand);
+    rejected.push(`${cand}（${why}）`);
+  }
+  if (rejected.length) {
+    throw conflictError('CONFIG_INVALID',
+      `exe ${exe} 的 PATH 候选均不可作为受管目标：${rejected.join('；')}。请提供真实可执行文件路径（脚本请用 command 模式）`);
+  }
+  throw conflictError('CONFIG_INVALID', `exe 不在 PATH 中：${exe}（Skill 需重新分析该目标项目）`);
 }
 
 export function canonicalizeDesc(desc) {

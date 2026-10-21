@@ -8,6 +8,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { isWindows, findExecutable, killTree } from './platform.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-runtime-smoke-'));
@@ -63,18 +64,25 @@ const check = async (name, fn) => {
   }
 };
 const skip = (why) => { const e = new Error(why); e.code = 'PR_SKIP'; throw e; };
-// pwsh 缺失时 start-new 会在锁内失败（exit 4/PWSH_MISSING），统一判定
-const pwshMissing = (r) => r.code === 4 || (r.json?.error?.code === 'PWSH_MISSING');
+// pwsh 缺失时 start-new 会在锁内失败（exit 4/PWSH_MISSING），统一判定；Linux 不应出现。
+const pwshMissing = (r) => isWindows && (r.code === 4 || (r.json?.error?.code === 'PWSH_MISSING'));
 
-// ---- 预检：python 是否可用（裸名解析得到真实 exe；仅 stub 时无法受管） ----
-const whereOut = spawnSync('where', ['python'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
-const pyCandidates = whereOut.status === 0 ? whereOut.stdout.trim().split(/\r?\n/).filter(Boolean) : [];
+// ---- 预检：python 是否可用（Windows 可能有 WindowsApps stub；Linux 回退 python3） ----
+const NODE_IMAGE = isWindows ? 'node.exe' : 'node';
 const isWinAppsAlias = (p) => {
-  if (!/\\Microsoft\\WindowsApps\\/i.test(p)) return false;
+  if (!isWindows || !/\\Microsoft\\WindowsApps\\/i.test(p)) return false;
   try { const s = fs.lstatSync(p); return s.size === 0 || s.isSymbolicLink(); } catch { return false; }
 };
-const pyReal = pyCandidates.find((p) => !isWinAppsAlias(p));
-const winAppsStub = pyCandidates.find((p) => isWinAppsAlias(p));
+const pyCandidates = isWindows
+  ? (() => {
+    const r = spawnSync('where', ['python'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+    return r.status === 0 ? r.stdout.trim().split(/\r?\n/).filter(Boolean) : [];
+  })()
+  : [];
+const pyReal = isWindows
+  ? pyCandidates.find((p) => !isWinAppsAlias(p))
+  : (findExecutable('python') ?? findExecutable('python3'));
+const winAppsStub = isWindows ? pyCandidates.find(isWinAppsAlias) : null;
 
 try {
   // ---------- node 受管生命周期 ----------
@@ -136,11 +144,11 @@ try {
   }
 
   // ---------- python 受管生命周期 ----------
-  await check('python start-new 受管启动（裸名 python 跳过 WindowsApps stub）', async () => {
+  await check('python start-new 受管启动（Windows 跳过 WindowsApps stub；Linux 用真实解释器）', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
-    if (!pyReal) skip('PATH 中无真实 python.exe');
+    if (!pyReal) skip('PATH 中无真实 python');
     const r = cli('start-new', '--desc', descFile({
-      alias: 'pyapp', root: projPy, mode: 'python', exe: 'python', args: ['srv.py'],
+      alias: 'pyapp', root: projPy, mode: 'python', exe: isWindows ? 'python' : pyReal, args: ['srv.py'],
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 0, r.text);
@@ -159,7 +167,7 @@ try {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdapp', root: projCmd, mode: 'node',
-      command: 'node srv.js', expectedImage: 'node.exe',
+      command: 'node srv.js', expectedImage: NODE_IMAGE,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 0, r.text);
@@ -182,7 +190,7 @@ try {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdamb', root: projAmb, entry: 'amb', mode: 'node',
-      command: 'node two.js', expectedImage: 'node.exe', discoverTimeoutMs: 15000,
+      command: 'node two.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? r.json.data?.wrapperPid ?? 0);
@@ -194,7 +202,7 @@ try {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdtmo', root: projAmb, entry: 'tmo', mode: 'node',
-      command: 'ping -n 30 127.0.0.1 >nul', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
+      command: isWindows ? 'ping -n 30 127.0.0.1 >nul' : 'sleep 30', expectedImage: NODE_IMAGE, discoverTimeoutMs: 5000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
@@ -205,7 +213,7 @@ try {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdfail', root: projAmb, entry: 'fail', mode: 'node',
-      command: 'node missing-module-for-runtime-smoke.js', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
+      command: 'node missing-module-for-runtime-smoke.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 5000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 3, r.text);
@@ -219,7 +227,7 @@ try {
     }));
     assert.equal(r1.code, 1, r1.text);
     const r2 = cli('start-new', '--desc', descFile({
-      alias: 'both', root: projAmb, mode: 'node', exe: 'node', command: 'node srv.js', expectedImage: 'node.exe',
+      alias: 'both', root: projAmb, mode: 'node', exe: 'node', command: 'node srv.js', expectedImage: NODE_IMAGE,
     }));
     assert.equal(r2.code, 1, r2.text);
   });
@@ -241,8 +249,7 @@ try {
     assert(r.json.error.message.includes('mode'));
   });
   await check('npm 裸名拒绝（仅 .cmd/无扩展包装候选，CONFIG_INVALID 退出码 3）', () => {
-    const npm = spawnSync('where', ['npm'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
-    if (npm.status !== 0) skip('无 npm');
+    if (!findExecutable('npm')) skip('无 npm');
     const r = cli('start-new', '--desc', descFile({
       alias: 'npmbad', root: projNode, mode: 'node', exe: 'npm', args: ['run', 'dev'],
     }));
@@ -250,9 +257,10 @@ try {
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'CONFIG_INVALID');
   });
-  await check('exe 直接指向 .cmd 拒绝', () => {
-    const fake = path.join(base, 'fake.cmd');
-    fs.writeFileSync(fake, '@echo off\r\n');
+  await check(isWindows ? 'exe 直接指向 .cmd 拒绝' : 'exe 直接指向 #! 脚本拒绝', () => {
+    const fake = path.join(base, isWindows ? 'fake.cmd' : 'fake.sh');
+    fs.writeFileSync(fake, isWindows ? '@echo off\r\n' : '#!/bin/sh\necho hi\n');
+    if (!isWindows) fs.chmodSync(fake, 0o755);
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdbad', root: projNode, mode: 'proc', exe: fake, args: [],
     }));
@@ -261,6 +269,7 @@ try {
     assert.equal(r.json.error.code, 'CONFIG_INVALID');
   });
   await check('WindowsApps 0 字节 stub 路径拒绝', () => {
+    if (!isWindows) skip('仅 Windows 有 WindowsApps 执行别名');
     if (!winAppsStub) skip('本机无 WindowsApps python stub');
     const r = cli('start-new', '--desc', descFile({
       alias: 'stubbad', root: projPy, mode: 'python', exe: winAppsStub, args: ['srv.py'],
@@ -291,9 +300,7 @@ try {
   for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'cmdamb', 'cmdtmo', 'cmdfail']) {
     try { cli('stop', a); } catch { /* 忽略 */ }
   }
-  for (const p of strayWrapperPids.filter(Boolean)) {
-    try { spawnSync('taskkill', ['/T', '/F', '/PID', String(p)], { windowsHide: true, timeout: 10000 }); } catch { /* 忽略 */ }
-  }
+  for (const p of strayWrapperPids.filter(Boolean)) killTree(p);
   try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* 进程刚退出时日志句柄可能短暂占用，残留由 temp 目录兜底 */ }
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }

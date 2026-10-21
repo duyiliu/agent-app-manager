@@ -37,7 +37,7 @@ function acquireLock(home, name, op) {
       try {
         alive = holderAlive(holder);
       } catch (e3) {
-        if (e3.code === 'PWSH_MISSING' || e3.code === 'LOCK_CORRUPT') throw e3;
+        if (e3.code === 'PWSH_MISSING' || e3.code === 'LOCK_CORRUPT' || e3.code === 'IDENTITY_UNAVAILABLE') throw e3;
         alive = true; // 权限等未知情形：保守视为存活，拒绝回收
       }
       if (alive) throw conflictError('LOCK_BUSY', `另一操作进行中（${holder.op ?? '?'}，pid=${holder.pid}），拒绝并发执行`);

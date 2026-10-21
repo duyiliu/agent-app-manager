@@ -5,15 +5,26 @@ import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { retryProcessProbe } from './proc.mjs';
+import { EXIT, ManagerError, TERMINATE_WAIT_MS, COMMAND_DISCOVER_TIMEOUT_MS } from './constants.mjs';
+import * as linuxProc from './proc-linux.mjs';
 import { conflictError, dependencyError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PS_PROC = path.join(SCRIPTS_DIR, 'ps', 'proc.ps1');
 
-export const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
-export const COMMAND_DISCOVER_TIMEOUT_MS = 45000; // 命令模式后代发现默认上限
+export { TERMINATE_WAIT_MS, COMMAND_DISCOVER_TIMEOUT_MS };
 
+const IS_WIN = process.platform === 'win32';
+const IS_LINUX = process.platform === 'linux';
 let selfIdentity = null;
+
+// 当前仅支持 Windows（pwsh/Win32）与 Linux（/proc）；其他平台明确拒绝，
+// 不静默降级成不可靠的探针。
+function ensureSupported() {
+  if (!IS_WIN && !IS_LINUX) {
+    throw new ManagerError('PLATFORM_UNSUPPORTED', `project-runner 当前仅支持 Windows 与 Linux；当前平台：${process.platform}`, EXIT.DEPENDENCY);
+  }
+}
 
 function psProcOnce(action, params) {
   const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', action];
@@ -51,10 +62,14 @@ function psProcOnce(action, params) {
 }
 
 export function psProc(action, params = {}) {
+  ensureSupported();
+  if (IS_LINUX) return linuxProc.run(action, params);
   return retryProcessProbe(action, () => psProcOnce(action, params));
 }
 
 export function portOccupants(port) {
+  ensureSupported();
+  if (IS_LINUX) return linuxProc.portOccupants(port);
   const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', path.join(SCRIPTS_DIR, 'ps', 'port.ps1'), '-Port', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
@@ -82,7 +97,12 @@ export function portConflict(port, force, ignorePid = null) {
 export function selfIdentityCapture() {
   if (!selfIdentity) {
     const r = psProc('capture', { id: process.pid });
-    if (r.result !== 'ok') throw dependencyError(`无法采集自身进程身份：${JSON.stringify(r)}`);
+    if (r.result !== 'ok') {
+      if (IS_LINUX) {
+        throw new ManagerError('IDENTITY_UNAVAILABLE', `无法采集自身进程身份（/proc 不可读）：${JSON.stringify(r)}`, EXIT.DEPENDENCY);
+      }
+      throw dependencyError(`无法采集自身进程身份：${JSON.stringify(r)}`);
+    }
     selfIdentity = r;
   }
   return selfIdentity;
