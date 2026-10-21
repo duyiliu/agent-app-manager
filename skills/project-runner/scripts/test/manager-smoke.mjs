@@ -203,6 +203,28 @@ try {
 
   // ---------- 未结记录与 --ack-unresolved 正反例 ----------
   const rtFile = () => path.join(home, 'runtime', `${appId}.json`);
+  lifecycle('残留锁 + STARTING → status 显示启动中断（UNKNOWN）', () => {
+    const saved = fs.readFileSync(rtFile(), 'utf8');
+    const lockFile = path.join(home, 'locks', `${appId}.lock`);
+    const rt = JSON.parse(saved);
+    rt.current = {
+      runId: 'rstale1', phase: 'STARTING', managed: true, mode: 'java',
+      intentAt: new Date().toISOString(), startedAt: null,
+      pid: null, creationFileTime: null, image: null, envResolved: [],
+      logPaths: null, lastError: null, endedAt: null, exitNote: null,
+    };
+    fs.writeFileSync(rtFile(), JSON.stringify(rt, null, 2));
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, creationFileTime: '1', op: 'start', at: new Date().toISOString() }));
+    try {
+      const st = expectOk(run(['status', 'smoke']));
+      assert.equal(st.data.status, 'UNKNOWN');
+      assert(st.data.note.includes('启动中断'), `note 未提示启动中断：${st.data.note}`);
+      expectFail(run(['start', 'smoke']), 3, 'UNRESOLVED_RUN');
+    } finally {
+      fs.writeFileSync(rtFile(), saved);
+      try { fs.unlinkSync(lockFile); } catch { /* start 已回收死锁 */ }
+    }
+  });
   lifecycle('伪造 STARTING 未结记录 → start 默认拒绝（UNRESOLVED_RUN）', () => {
     const rt = JSON.parse(fs.readFileSync(rtFile(), 'utf8'));
     rt.current = {
