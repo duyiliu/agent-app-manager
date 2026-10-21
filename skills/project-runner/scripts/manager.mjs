@@ -24,7 +24,7 @@ import { retryProcessProbe } from './lib/proc.mjs';
 
 export { SCHEMA_VERSION };
 const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
-const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024; // 单次运行日志的写入上限（超过即轮转）
+const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024; // 单次运行日志的单流写入上限（stdout/stderr 各自超过即轮转）
 const TERMINATE_WAIT_MS = 10000;         // 有界强制停止等待
 const PREV_RUNS_KEEP = 20;
 // 未结记录：STARTING（启动中断，pid 未采集）、UNKNOWN（身份不明，进程可能仍存活）
@@ -436,7 +436,7 @@ function loadManagedDesc(file) {
   else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && !Number.isInteger(d.expectedPort)) errs.push('expectedPort 必须是整数');
-  if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
+  if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数（stdout/stderr 各自上限）');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
     alias: d.alias,

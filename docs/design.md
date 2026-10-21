@@ -126,7 +126,7 @@ ui [--port N] [--open]                      # 本地只读 Web 管理台（127.0
 
 `list/status` 读取注册表，实时核验受管 JVM 身份；区分 RUNNING、STOPPED、STARTING、UNKNOWN，以及独立的 `managed` 状态。未注册项目不在列表；历史 Unmanaged 记录不得凭端口扫描宣称 STOPPED 或 RUNNING。输出项目别名、来源、状态、PID/端口（有证据才填写）、托管能力、日志位置。
 
-输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
+输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；受管运行日志的 stdout 与 stderr 各自受 `logMaxBytes`（默认 16 MiB）约束，超过即轮转为对应流的 `.log.1`；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
 
 ## 5. 最小可靠性要求
 
