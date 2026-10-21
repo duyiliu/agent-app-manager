@@ -89,19 +89,52 @@ function unresolvedRunError(home, appId, rt) {
 }
 
 // ack 前复核：旧进程仍存活则拒绝；已退出/无 pid 可核验才允许放弃旧账。
+// 外部刚发出终止信号时进程可能还未完成退出：在有限窗口内重新核验，避免把
+// “信号已送达、正在退出”误判为存活而拒绝恢复。
+const ACK_EXIT_WAIT_MS = 1000;
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function verifyRunGone(cur) {
+  const deadline = Date.now() + ACK_EXIT_WAIT_MS;
+  let v = verifyRun(cur);
+  while (v.alive && Date.now() < deadline) {
+    sleepSync(50);
+    v = verifyRun(cur);
+  }
+  return v;
+}
+function captureRunGone(pid) {
+  const deadline = Date.now() + ACK_EXIT_WAIT_MS;
+  let r = psProc('capture', { id: pid });
+  while (r.result === 'ok' && Date.now() < deadline) {
+    sleepSync(50);
+    r = psProc('capture', { id: pid });
+  }
+  return r;
+}
+
 function verifyAbandonable(home, appId, cur) {
   const ev = runEvidence(home, appId, cur);
   if (cur.pid == null) return; // 无 pid 可核验：显式 ack 即人工核验结论
   if (cur.creationFileTime && cur.image) {
-    const v = verifyRun(cur); // 核验失败抛 IDENTITY_UNKNOWN，保守拒绝
+    const v = verifyRunGone(cur); // 核验失败抛 IDENTITY_UNKNOWN，保守拒绝
     if (v.alive) {
+      // POSIX 恢复路径没有 taskkill/pwsh 可依赖：ack 已明确表示要放弃旧实例，
+      // 先有界终止已核验的旧实例再拒绝本次 ack，确保既不留孤儿也不会启动第二份实例；
+      // 用户确认退出后重试 ack 即可正常归档并启动。Windows 仍保持“只拒绝、不触碰”的既有语义。
+      let termination = null;
+      if (process.platform !== 'win32') {
+        try { termination = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image }); }
+        catch (e) { termination = { result: 'error', message: e.message }; }
+      }
       throw conflictError('UNRESOLVED_RUN',
-        `--ack-unresolved=${cur.runId} 被拒绝：旧进程仍存活（pid=${cur.pid}），禁止启动第二份受管实例`,
-        { ...ev, verification: 'alive' });
+        process.platform !== 'win32'
+          ? `--ack-unresolved=${cur.runId} 被拒绝：旧进程（pid=${cur.pid}）在 ack 时仍存活，已请求终止；未启动第二份受管实例，请确认退出后重试`
+          : `--ack-unresolved=${cur.runId} 被拒绝：旧进程仍存活（pid=${cur.pid}），禁止启动第二份受管实例`,
+        { ...ev, verification: 'alive', ...(termination ? { termination } : {}) });
     }
     return; // 已退出或 PID 已复用
   }
-  const r = psProc('capture', { id: cur.pid });
+  const r = captureRunGone(cur.pid);
   if (r.result === 'notfound' || r.result === 'exited') return;
   if (r.result === 'ok') {
     throw conflictError('UNRESOLVED_RUN',
