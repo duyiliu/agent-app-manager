@@ -122,7 +122,7 @@ function linuxProcSnapshot(pid) {
   const state = fields[0];
   const creationFileTime = fields[19];
   if (!state || !creationFileTime) return { result: 'error', code: 'statParseFailed', message: `无法解析 /proc/${pid}/stat` };
-  if (state === 'Z') return { result: 'exited' };
+  if (state === 'Z' || state === 'X' || state === 'x') return { result: 'exited' };
   let image;
   try {
     image = fs.readlinkSync(`/proc/${pid}/exe`);
@@ -339,11 +339,34 @@ function unresolvedRunError(home, appId, rt) {
 }
 
 // ack 前复核：旧进程仍存活则拒绝；已退出/无 pid 可核验才允许放弃旧账。
+// 外部刚发出终止信号时进程可能还未完成退出：在有限窗口内重新核验，避免把“信号已送达、正在退出”误判为存活而拒绝恢复。
+const ACK_EXIT_WAIT_MS = 1000;
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function verifyRunGone(cur) {
+  const deadline = Date.now() + ACK_EXIT_WAIT_MS;
+  let v = verifyRun(cur);
+  while (v.alive && Date.now() < deadline) {
+    sleepSync(50);
+    v = verifyRun(cur);
+  }
+  return v;
+}
+
+function captureRunGone(pid) {
+  const deadline = Date.now() + ACK_EXIT_WAIT_MS;
+  let r = psProc('capture', { id: pid });
+  while (r.result === 'ok' && Date.now() < deadline) {
+    sleepSync(50);
+    r = psProc('capture', { id: pid });
+  }
+  return r;
+}
+
 function verifyAbandonable(home, appId, cur) {
   const ev = runEvidence(home, appId, cur);
   if (cur.pid == null) return; // 无 pid 可核验：显式 ack 即人工核验结论
   if (cur.creationFileTime && cur.image) {
-    const v = verifyRun(cur); // 核验失败抛 IDENTITY_UNKNOWN，保守拒绝
+    const v = verifyRunGone(cur); // 核验失败抛 IDENTITY_UNKNOWN，保守拒绝
     if (v.alive) {
       throw conflictError('UNRESOLVED_RUN',
         `--ack-unresolved=${cur.runId} 被拒绝：旧进程仍存活（pid=${cur.pid}），禁止启动第二份受管实例`,
@@ -351,7 +374,7 @@ function verifyAbandonable(home, appId, cur) {
     }
     return; // 已退出或 PID 已复用
   }
-  const r = psProc('capture', { id: cur.pid });
+  const r = captureRunGone(cur.pid);
   if (r.result === 'notfound' || r.result === 'exited') return;
   if (r.result === 'ok') {
     throw conflictError('UNRESOLVED_RUN',
