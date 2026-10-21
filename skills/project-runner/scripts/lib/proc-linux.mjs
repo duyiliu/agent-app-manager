@@ -251,8 +251,17 @@ export function selfIdentity() {
   return r;
 }
 
+// 批量核验：与 verify 同语义（boot_id:starttime + image），Linux 侧无 spawn 成本，
+// 仅为与 Windows 的 verify-batch 保持同一接口。
+export function verifyBatch(items) {
+  return (items ?? []).map((it) => {
+    try { return verify(it.id ?? it.pid, it); } catch (e) { return { result: 'error', code: 'verifyFailed', message: e.message }; }
+  });
+}
+
 export function run(action, params = {}) {
   switch (action) {
+    case 'verify-batch': return verifyBatch(params.items);
     case 'capture': return capture(params.id);
     case 'verify': return verify(params.id, params);
     case 'terminate': return terminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);

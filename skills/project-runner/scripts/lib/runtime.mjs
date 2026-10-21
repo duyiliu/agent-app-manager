@@ -1,7 +1,7 @@
 // Runtime-record lifecycle: app context resolution, run archival, unresolved-run
 // (STARTING/UNKNOWN) protection with explicit ack recovery, and status computation.
 import { runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
-import { psProc, verifyRun } from './probe.mjs';
+import { psProc, verifyRun, interpretVerifyResult } from './probe.mjs';
 import { withLock, lockState } from './locks.mjs';
 import { ID_RE } from './desc.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
@@ -151,7 +151,8 @@ export function parseAckRunId(value) {
 // ---------- 状态计算（只读 + 就地标记；落账由 statusWithFacts 在锁内完成） ----------
 
 // 状态计算（只读 + 就地标记）。
-export function computeStatus(home, appId, rt) {
+// prefetched：批量核验预取结果（与逐条 verifyRun 同语义），避免 list 对 N 个应用 spawn N 次
+export function computeStatus(home, appId, rt, prefetched = null) {
   if (!rt || !rt.current) return { status: 'UNKNOWN', note: '无当前运行记录' };
   const cur = rt.current;
   if (!cur.managed) {
@@ -175,7 +176,7 @@ export function computeStatus(home, appId, rt) {
     return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: cur.lastError ?? '状态未知' };
   }
   if (cur.phase === 'RUNNING') {
-    const v = verifyRun(cur);
+    const v = prefetched ? interpretVerifyResult(prefetched) : verifyRun(cur);
     if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid };
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
@@ -204,9 +205,9 @@ function settleStoppedWriteback(home, appId, marked) {
 }
 
 // 查询即核验，并按 OS 事实落账
-export function statusWithFacts(home, appId) {
+export function statusWithFacts(home, appId, prefetched = null) {
   const rt = readRuntimeStrict(home, appId);
-  const st = computeStatus(home, appId, rt);
+  const st = computeStatus(home, appId, rt, prefetched);
   if (st.writeback && rt && rt.current) {
     settleStoppedWriteback(home, appId, { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId });
   }
