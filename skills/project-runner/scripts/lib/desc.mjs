@@ -137,6 +137,17 @@ function exeRejection(resolved) {
   if (/javapath/i.test(resolved)) {
     return `Oracle javapath 转发 shim，其真实 JVM 为子进程：日志句柄不落地、终止会错位`;
   }
+  // Windows 必须 .exe/.com；其他平台没有扩展名约定，以真实普通文件且可执行为准。
+  // 仅放宽非 Windows 校验，Windows 的 wrapper/shim 防护不受影响。
+  if (process.platform !== 'win32') {
+    try {
+      if (!fs.statSync(resolved).isFile()) return `不是普通文件`;
+      fs.accessSync(resolved, fs.constants.X_OK);
+    } catch {
+      return `不可执行或不是普通文件`;
+    }
+    return null;
+  }
   if (!EXEC_EXT_RE.test(resolved)) {
     return `不是可直接启动的可执行文件（受管要求 .exe/.com）；请解析到底层真实进程`;
   }
