@@ -523,7 +523,8 @@ function exeRejection(resolved) {
   if (/javapath/i.test(resolved)) {
     return `Oracle javapath 转发 shim，其真实 JVM 为子进程：日志句柄不落地、终止会错位`;
   }
-  if (!EXEC_EXT_RE.test(resolved)) {
+  // Windows 需要真实 PE 映像（.exe/.com）；POSIX 可执行文件通常无扩展名（如 node、java）
+  if (process.platform === 'win32' && !EXEC_EXT_RE.test(resolved)) {
     return `不是可直接启动的可执行文件（受管要求 .exe/.com）；请解析到底层真实进程`;
   }
   return null;
