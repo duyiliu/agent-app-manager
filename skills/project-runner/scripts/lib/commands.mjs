@@ -246,6 +246,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false) {
     run: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, mode: cur.mode,
       kind: cur.kind ?? 'direct', wrapperPid: cur.wrapperPid ?? null,
+      wrapperCreationFileTime: cur.wrapperCreationFileTime ?? null, wrapperImage: cur.wrapperImage ?? null,
       intentAt: cur.intentAt ?? null, startedAt: cur.startedAt ?? cur.intentAt,
       endedAt: cur.endedAt, pid: cur.pid ?? null,
       creationFileTime: cur.creationFileTime ?? null, image: cur.image ?? null,
@@ -346,15 +347,98 @@ function stopCurrent(home, appId, app, rt) {
   throw conflictError('IDENTITY_UNKNOWN', `终止失败（${t.code ?? t.result}），标记 UNKNOWN，拒绝进一步操作`, { runId: cur.runId, detail: t });
 }
 
-export function cmdStop(ctx, ref) {
-  if (!ref) throw usageError('stop 需要 <alias|appId>');
+// 显式清理命令模式 wrapper：仅在 UNKNOWN 未结记录且 wrapper 身份完整时允许。
+// 不自动调用——歧义/超时后 wrapper 留证由人工决定；这里按同句柄核验后终止，
+// 只改 exitNote/lastError，不改变 phase、不归档 current、不触碰 prevRuns 或其他进程。
+function appendLastError(cur, note) {
+  cur.lastError = cur.lastError ? `${cur.lastError}; ${note}` : note;
+}
+
+function cleanupCurrentWrapper(home, appId, app, rt) {
+  const cur = rt.current;
+  if (!cur) throw notFoundError(`${app.alias} 无运行记录`);
+  if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供 wrapper 清理`);
+  if (cur.phase !== 'UNKNOWN') {
+    throw conflictError('WRAPPER_NOT_PENDING',
+      `当前 phase=${cur.phase}（runId=${cur.runId}），仅 UNKNOWN 未结记录允许显式清理 wrapper；未触碰任何进程`,
+      { runId: cur.runId, phase: cur.phase });
+  }
+  if (!cur.wrapperPid || !cur.wrapperCreationFileTime || !cur.wrapperImage) {
+    throw conflictError('IDENTITY_UNKNOWN',
+      `UNKNOWN 记录缺少完整 wrapper 身份证据（pid/创建时间/映像），拒绝清理；未触碰任何进程`,
+      { runId: cur.runId, wrapperPid: cur.wrapperPid ?? null, wrapperCreationFileTime: cur.wrapperCreationFileTime ?? null, wrapperImage: cur.wrapperImage ?? null });
+  }
+
+  const wrapperPid = cur.wrapperPid;
+  const t = psProc('terminate', { id: wrapperPid, creationFileTime: cur.wrapperCreationFileTime, image: cur.wrapperImage });
+  if (t.result === 'terminated') {
+    cur.exitNote = `wrapper(pid=${wrapperPid}) 已显式终止（同句柄核验通过）；phase 保持 UNKNOWN，原证据与 prevRuns 保留`;
+    writeRuntime(home, appId, rt);
+    return {
+      appId, alias: app.alias, result: 'stopped', target: 'wrapper',
+      runId: cur.runId, wrapperPid, wrapperImage: cur.wrapperImage, phase: cur.phase,
+      exitNote: cur.exitNote,
+      note: '仅终止 manager 拉起的 wrapper；未自动清理目标/后代进程，UNKNOWN 证据保留',
+    };
+  }
+  if (t.result === 'exited' || t.result === 'notfound') {
+    cur.exitNote = `wrapper(pid=${wrapperPid}) 已自行退出，无需清理；phase 保持 UNKNOWN，原证据与 prevRuns 保留`;
+    writeRuntime(home, appId, rt);
+    return {
+      appId, alias: app.alias, result: 'alreadyStopped', target: 'wrapper',
+      runId: cur.runId, wrapperPid, wrapperImage: cur.wrapperImage, phase: cur.phase,
+      exitNote: cur.exitNote,
+      note: 'wrapper 已不在运行；未触碰任何进程',
+    };
+  }
+  if (t.result === 'mismatch') {
+    // PID 已复用或映像/创建时间不一致：同句柄核验未通过，绝不终止
+    appendLastError(cur, `wrapper_cleanup_mismatch: ${JSON.stringify(t)}; 未触碰任何进程`);
+    writeRuntime(home, appId, rt);
+    throw conflictError('IDENTITY_UNKNOWN',
+      `wrapper 身份核验不匹配（pid=${wrapperPid} 可能已被复用），拒绝终止；未触碰任何进程`,
+      { runId: cur.runId, wrapperPid, detail: t });
+  }
+  if (t.result === 'terminateTimeout') {
+    appendLastError(cur, `wrapper_cleanup_timeout: wrapper(pid=${wrapperPid}) 终止已发出但未确认退出`);
+    writeRuntime(home, appId, rt);
+    throw conflictError('TERMINATE_TIMEOUT',
+      `wrapper(pid=${wrapperPid}) 终止已发出但等待 ${TERMINATE_WAIT_MS}ms 未确认退出；phase 保持 UNKNOWN，不自动重试`,
+      { runId: cur.runId, wrapperPid, detail: t });
+  }
+  appendLastError(cur, `wrapper_cleanup_failed: ${JSON.stringify(t)}`);
+  writeRuntime(home, appId, rt);
+  throw conflictError('IDENTITY_UNKNOWN',
+    `wrapper(pid=${wrapperPid}) 清理失败（${t.code ?? t.result}），未确认终止；phase 保持 UNKNOWN`,
+    { runId: cur.runId, wrapperPid, detail: t });
+}
+
+export function cmdCleanupWrapper(ctx, ref) {
+  if (!ref) throw usageError('cleanup-wrapper 需要 <alias|appId>');
+  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
-  return withLock(ctx.home, appId, 'stop', () => {
+  return withLock(ctx.home, appId, 'cleanup-wrapper', () => {
     const reg = readRegistry(ctx.home);
     const app = reg.apps[appId];
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
+    return cleanupCurrentWrapper(ctx.home, appId, app, rt);
+  });
+}
+
+export function cmdStop(ctx, ref) {
+  if (!ref) throw usageError('stop 需要 <alias|appId>');
+  const opts = parseNamed(ctx.rest.slice(1), { '--wrapper': 'flag' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const reg0 = readRegistry(ctx.home);
+  const appId = resolveAppId(reg0, ref);
+  return withLock(ctx.home, appId, opts.has('--wrapper') ? 'cleanup-wrapper' : 'stop', () => {
+    const reg = readRegistry(ctx.home);
+    const app = reg.apps[appId];
+    const rt = readRuntimeStrict(ctx.home, appId);
+    if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
+    if (opts.has('--wrapper')) return cleanupCurrentWrapper(ctx.home, appId, app, rt);
     return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt) };
   });
 }

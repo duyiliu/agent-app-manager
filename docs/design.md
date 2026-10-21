@@ -101,7 +101,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 - 仅对 `managed=true`、本 Skill 留存的受管进程执行停止/重启；不能用 `runId`、端口或主类去认领外部进程。
 - 停止前验证目标 PID、OS 创建时间、唯一 `runId` 与可执行文件身份；Windows 上要确保**身份核验与终止针对同一进程句柄**，避免“先查 PID 再按 PID 杀”的复用竞态。环境做不到可靠操作则拒绝。
 - P0 只支持**有界强制停止**，不承诺优雅关机或 shutdown hook；执行前说明，不执行 `taskkill /T` 或盲目终止整棵进程树。
-- `restart` 必须先确认旧进程已退出，才启动新实例；重复停止可返回 alreadyStopped。UNKNOWN、身份无法验证或外部进程一律拒绝停止/重启。
+- `restart` 必须先确认旧进程已退出，才启动新实例；重复停止可返回 alreadyStopped。UNKNOWN、身份无法验证或外部进程一律拒绝停止/重启。命令模式发现失败后残留的 cmd wrapper 由显式 `cleanup-wrapper <alias|appId>`（或 `stop <alias|appId> --wrapper`）清理：仅 `phase=UNKNOWN` 且 wrapper 身份完整时允许，同句柄核验后终止，只写 exitNote/lastError，保持 UNKNOWN 与 prevRuns 证据；wrapper 已退出返回 alreadyStopped，身份不匹配拒绝且不误杀。
 - 用户明确要求单个目标的启动/重启可按已授权流程执行；不提供 `all`、通配符或自动批量重启。
 
 ## 4. 最小命令接口
@@ -114,7 +114,8 @@ status <alias|appId> [--probe] [--json]  # --probe 附加本机 TCP 监听探测
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
 doctor [--json]                          # 只读自检（不修复）
 start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
-stop <alias|appId> [--json]              # 仅 Managed
+stop <alias|appId> [--wrapper] [--json] # 仅 Managed；--wrapper 只清理 UNKNOWN 未结记录残留的 cmd wrapper
+cleanup-wrapper <alias|appId> [--json]   # 显式清理 wrapper：仅 UNKNOWN 且身份完整；已退出返回 alreadyStopped，身份不匹配拒绝
 restart <alias|appId> [--force] [--json] # 仅 Managed
 remove <alias|appId> [--ack-unresolved <runId>] [--json]   # 移除登记：仅无存活受管实例；只删注册表条目，运行记录与日志证据保留
 prune [--dry-run] [--apply] [--json]     # 回收三类残留：超保留期批次日志（对齐 PREV_RUNS_KEEP=20）、locks/*.stale-*、.tmp-* 孤儿临时文件；默认 dry-run

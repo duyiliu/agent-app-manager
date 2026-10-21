@@ -20,7 +20,7 @@ import { usageError } from './lib/errors.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
   parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdStart, cmdStop, cmdRestart,
-  cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi,
+  cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi, cmdCleanupWrapper,
 } from './lib/commands.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource } from './lib/log-sources.mjs';
 
@@ -106,6 +106,7 @@ function renderHuman(command, data) {
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
         data.run ? `run=${data.run.runId} phase=${data.run.phase} managed=${data.run.managed} started=${data.run.startedAt ?? '-'}` : 'run=无',
         data.run?.pid != null ? `pid=${data.run.pid}${data.run.creationFileTime ? ` creationFileTime=${data.run.creationFileTime}` : ''}${data.run.image ? ` image=${data.run.image}` : ''}` : null,
+        data.run?.wrapperPid != null ? `wrapperPid=${data.run.wrapperPid}${data.run.wrapperCreationFileTime ? ` wrapperCreationFileTime=${data.run.wrapperCreationFileTime}` : ''}${data.run.wrapperImage ? ` wrapperImage=${data.run.wrapperImage}` : ''}` : null,
         Object.keys(data.env ?? {}).length ? `env=${JSON.stringify(data.env)}` : null,
         data.run?.lastError ? `lastError: ${data.run.lastError}` : null,
         data.run?.logPaths?.stdout ? `stdout=${data.run.logPaths.stdout}` : null,
@@ -139,6 +140,8 @@ function renderHuman(command, data) {
       ].filter(Boolean).join('\n');
     case 'stop':
       return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.note ? `；${data.note}` : ''}`;
+    case 'cleanup-wrapper':
+      return `cleanup-wrapper ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.wrapperPid ? ` wrapperPid=${data.wrapperPid}` : ''}${data.phase ? ` phase=${data.phase}` : ''}${data.note ? `；${data.note}` : ''}`;
     case 'remove':
       return [
         `已移除登记 ${data.alias} (${data.appId})`,
@@ -197,7 +200,8 @@ function usageText() {
     '  doctor [--json]                    只读自检（不修复）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
-    '  stop <alias|appId>                有界强制停止（仅受管实例）',
+    '  stop <alias|appId> [--wrapper]  有界强制停止（仅受管实例）；--wrapper 仅清理 UNKNOWN 未结记录的残留 cmd wrapper',
+    '  cleanup-wrapper <alias|appId>     显式清理 UNKNOWN 未结记录残留的 cmd wrapper（同句柄核验；不改 phase/prevRuns）',
     '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
@@ -219,6 +223,9 @@ function usageText() {
     '',
     'STARTING/UNKNOWN 未结记录默认拒绝启动或移除（UNRESOLVED_RUN）；人工核验进程已退出后，',
     '用 --ack-unresolved <runId> 显式放弃旧账：start <ref> --ack-unresolved <runId> 重启，或 remove <ref> --ack-unresolved <runId> 移除登记',
+    '命令模式发现失败（DISCOVERY_AMBIGUOUS/TIMEOUT/FAILED）后 wrapper 不会被自动终止：',
+    '确认需清理时用 cleanup-wrapper <ref> 或 stop <ref> --wrapper；仅 phase=UNKNOWN 且 wrapper 身份完整时允许，',
+    'wrapper 已退出返回 alreadyStopped，身份不匹配拒绝且不触碰其他进程；成功后 phase 与 prevRuns 证据保留',
     '',
     '退出码：0 成功 | 1 用法 | 2 未找到 | 3 状态冲突 | 4 环境依赖 | 5 数据损坏',
   ].join('\n');
@@ -249,12 +256,12 @@ async function main() {
   }
   try {
     let data;
-    const refCommands = new Set(['status', 'stop', 'restart']);
+    const refCommands = new Set(['status', 'stop', 'restart', 'cleanup-wrapper']);
     if (command === 'start' || command === 'remove') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
-      const allowedFlag = { status: '--probe', restart: '--force' }[command];
+      const allowedFlag = { status: '--probe', restart: '--force', stop: '--wrapper' }[command];
       const bad = ctx.rest.slice(1).find((a) => a !== allowedFlag);
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
     }
@@ -271,6 +278,7 @@ async function main() {
       }
       case 'start': data = cmdStart(ctx, ctx.rest[0]); break;
       case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
+      case 'cleanup-wrapper': data = cmdCleanupWrapper(ctx, ctx.rest[0]); break;
       case 'restart': data = cmdRestart(ctx, ctx.rest[0]); break;
       case 'remove': data = cmdRemove(ctx, ctx.rest[0]); break;
       case 'prune': data = cmdPrune(ctx); break;

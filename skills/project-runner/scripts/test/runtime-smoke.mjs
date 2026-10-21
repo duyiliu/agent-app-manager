@@ -54,7 +54,6 @@ const logHas = async (file, needle) => {
 
 let failed = 0;
 let skipped = false;
-let strayWrapperPids = []; // 歧义/超时场景残留的命令模式 wrapper，兜底 taskkill
 const check = async (name, fn) => {
   try { await fn(); console.log(`  ok  ${name}`); }
   catch (e) {
@@ -185,9 +184,40 @@ try {
       command: 'node two.js', expectedImage: 'node.exe', discoverTimeoutMs: 15000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
-    strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? r.json.data?.wrapperPid ?? 0);
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS');
+    assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
+  });
+  await check('command 模式歧义后显式清理 wrapper：身份不匹配拒绝，成功后保留 UNKNOWN，重复清理 alreadyStopped', () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const before = cli('status', 'cmdamb');
+    assert.equal(before.json.data.status, 'UNKNOWN');
+    assert.ok(before.json.data.run.wrapperPid > 0, '缺少 wrapperPid 证据');
+    const rtFile = before.json.data.runtimeFile;
+    const original = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
+    const originalCreation = original.current.wrapperCreationFileTime;
+    // 模拟 PID 复用/身份不一致：同句柄核验必须拒绝且不终止
+    original.current.wrapperCreationFileTime = '0';
+    fs.writeFileSync(rtFile, JSON.stringify(original, null, 2));
+    const bad = cli('cleanup-wrapper', 'cmdamb');
+    assert.equal(bad.code, 3, bad.text);
+    assert.equal(bad.json.error.code, 'IDENTITY_UNKNOWN');
+    assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
+    // 恢复真实身份证据后再执行显式清理
+    const restored = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
+    restored.current.wrapperCreationFileTime = originalCreation;
+    fs.writeFileSync(rtFile, JSON.stringify(restored, null, 2));
+    const r = cli('cleanup-wrapper', 'cmdamb');
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    assert.ok(['stopped', 'alreadyStopped'].includes(r.json.data.result), `非预期结果：${r.json.data.result}`);
+    const after = cli('status', 'cmdamb');
+    assert.equal(after.json.data.status, 'UNKNOWN', '清理后应保留 UNKNOWN 证据');
+    assert.equal(after.json.data.run.wrapperPid, before.json.data.run.wrapperPid);
+    assert.match(after.json.data.run.lastError, /discovery_ambiguous/);
+    const again = cli('cleanup-wrapper', 'cmdamb');
+    assert.equal(again.code, 0, again.text);
+    assert.equal(again.json.data.result, 'alreadyStopped');
     assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
   });
   await check('command 模式发现超时：DISCOVERY_TIMEOUT 留证 UNKNOWN', () => {
@@ -197,9 +227,13 @@ try {
       command: 'ping -n 30 127.0.0.1 >nul', expectedImage: 'node.exe', discoverTimeoutMs: 5000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
-    strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'DISCOVERY_TIMEOUT');
+    // 超时同样留 wrapper：用产品命令清理，不依赖 taskkill
+    const c = cli('stop', 'cmdtmo', '--wrapper');
+    assert.equal(c.code, 0, c.text);
+    assert.ok(['stopped', 'alreadyStopped'].includes(c.json.data.result), `非预期结果：${c.json.data.result}`);
+    assert.equal(cli('status', 'cmdtmo').json.data.status, 'UNKNOWN');
   });
   await check('command 模式命令即死：wrapperExited → SPAWN_FAILED（可重试）', () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
@@ -287,12 +321,12 @@ try {
     assert(r.json.data.apps.some((a) => a.mode === 'node'));
   });
 } finally {
-  // 兜底：尽力停掉可能残留的受管进程与命令模式孤儿 wrapper
+  // 兜底：命令模式 wrapper 只用产品命令清理（不再 taskkill），随后停掉可能残留的受管进程
+  for (const a of ['cmdamb', 'cmdtmo']) {
+    try { cli('stop', a, '--wrapper'); } catch { /* 忽略 */ }
+  }
   for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'cmdamb', 'cmdtmo', 'cmdfail']) {
     try { cli('stop', a); } catch { /* 忽略 */ }
-  }
-  for (const p of strayWrapperPids.filter(Boolean)) {
-    try { spawnSync('taskkill', ['/T', '/F', '/PID', String(p)], { windowsHide: true, timeout: 10000 }); } catch { /* 忽略 */ }
   }
   try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* 进程刚退出时日志句柄可能短暂占用，残留由 temp 目录兜底 */ }
 }
