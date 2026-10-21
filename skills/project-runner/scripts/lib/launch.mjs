@@ -77,12 +77,12 @@ export function launchManaged(home, appId, app, opts = {}) {
     // The detached logger owns both output descriptors and launches the application
     // with pipes, allowing safe stdout rotation without touching a live app fd.
     // 命令模式：拉起 cmd wrapper 执行完整命令行；真实目标进程稍后按后代发现确定。
-    // 注意 wrapper 不能 detach——Windows 下 detached(无控制台) wrapper 的后代进程
-    // stdout 句柄全部失效（实测 echo/node/ping 写入丢失），必须共享父进程控制台。
-    // Windows 父退出不杀子进程，wrapper/目标仍会存活；代价是交互终端启动时
-    // 共享其控制台（典型 agent 管道调用下 manager 本无控制台，不受影响）。
+    // 必须 detached：Node 在 Windows 上把非 detached 子进程放入 kill-on-close
+    // 作业对象，manager 退出（CLI 必退）会整树终止 logger→cmd→目标，命令模式
+    // 受管进程活不过启动命令返回后的几秒。stdout 走 pipe 不经控制台，detach
+    // 不影响日志转发（已实测 node 通过 cmd 后代继承 pipe 正常输出）。
     child = spawn(process.execPath, [LOG_WRITER, sinkConfig], {
-      cwd: app.cwd, detached: !isCommand, windowsHide: true,
+      cwd: app.cwd, detached: true, windowsHide: true,
       // env 只在内存中合并传给 logger（不写入落盘的 sink 配置，避免把环境变量落成文件）。
       stdio: 'ignore',
       env: { ...process.env, ...(app.env ?? {}) },
