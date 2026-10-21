@@ -300,6 +300,16 @@ try {
     const s = cli('status', 'pyum');
     assert.equal(s.json.data.mode, 'python');
   });
+  await check('record-unmanaged 同 appId 已有受管登记时拒绝，--force 才覆盖', () => {
+    if (!nodeRunId) skip('无受管登记可构造冲突');
+    const r = cli('record-unmanaged', '--desc', descFile({ alias: 'dup', root: projNode, mode: 'node' }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 3, r.text);
+    assert.equal(r.json.error.code, 'ALREADY_REGISTERED');
+    const f = cli('record-unmanaged', '--desc', descFile({ alias: 'dup2', root: projNode, mode: 'node' }), '--force');
+    assert.equal(f.code, 0, f.text);
+    assert.equal(f.json.data.replacedManaged, true);
+  });
   await check('list 汇总有真实 mode 展示', () => {
     if (!nodeRunId) skip('无受管实例');
     const r = cli('list');

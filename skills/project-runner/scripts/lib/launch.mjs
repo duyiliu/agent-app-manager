@@ -106,7 +106,8 @@ export function launchManaged(home, appId, app, opts = {}) {
       env: { ...process.env, ...(app.env ?? {}) },
     });
     // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
-    // 具体失败仍由下方身份采集/发现路径统一落账并保留证据
+    // 具体失败仍由下方身份采集/发现路径统一落账并保留证据。spawnError 只是异步事件
+    // 的补充说明：同步 spawn 失败走 catch 分支，不拼接该字段。
     child.on('error', (err) => { spawnError = err.message; });
     child.unref();
   } catch (e) {
