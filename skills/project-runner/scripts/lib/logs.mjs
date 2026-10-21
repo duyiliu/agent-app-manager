@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-const MAX_LOG_BYTES = 4 * 1024 * 1024;
+export const MAX_LOG_BYTES = 4 * 1024 * 1024;   // 单次读取的日志字节上限
 export const MAX_LOG_LINES = 5000;
 
 export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
@@ -22,4 +22,13 @@ export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
   if (all.length && all[all.length - 1] === '') all.pop();
   const lines = all.slice(-want);
   return { lines, truncated: start > 0 || all.length > want, skippedBytes: start };
+}
+
+// 启动失败诊断用的 stderr 尾部摘录：读不到/不存在时给空串，不阻塞主错误路径。
+export function readStderrTailSafe(file) {
+  try {
+    return readTailLines(file, 20, 4 * 1024).lines.join('\n');
+  } catch {
+    return '';
+  }
 }
