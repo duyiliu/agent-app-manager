@@ -212,7 +212,7 @@ function usageText() {
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',
-    '  record-unmanaged --desc <file> [--log-hints p1,p2]   记录非受管启动尝试',
+    '  record-unmanaged --desc <file> [--log-hints p1,p2] [--force]   记录非受管启动尝试（同 appId 已有受管登记时须 --force）',
     '',
     '启动描述 mode 取值：java | jrebel | python | node | proc（其他真实可执行进程）。',
     '受管目标两种形态（desc 二选一）：',
@@ -225,7 +225,7 @@ function usageText() {
     'STARTING/UNKNOWN 未结记录默认拒绝启动或移除（UNRESOLVED_RUN）；人工核验进程已退出后，',
     '用 --ack-unresolved <runId> 显式放弃旧账：start <ref> --ack-unresolved <runId> 重启，或 remove <ref> --ack-unresolved <runId> 移除登记',
     '',
-    '退出码：0 成功 | 1 用法 | 2 未找到 | 3 状态冲突 | 4 环境依赖 | 5 数据损坏',
+    '退出码：0 成功 | 1 用法 | 2 未找到 | 3 状态冲突 | 4 环境依赖 | 5 数据损坏/内部错误（DATA_* | INTERNAL）',
   ].join('\n');
 }
 
@@ -291,8 +291,10 @@ async function main() {
     }
     emitOk(ctx, command, data);
   } catch (e) {
+    // 已知契约错误按 ManagerError 输出；未知内部错误用 INTERNAL code 明确区分（#57），
+    // 退出码仍为 5（数据损坏/内部错误一类），但不冒充 DATA_CORRUPT。
     if (e instanceof ManagerError) emitErr(ctx, command, e);
-    process.stderr.write(`内部错误：${e.stack}\n`);
+    else emitErr(ctx, command, new ManagerError('INTERNAL', `内部错误：${e.message}`, EXIT.DATA, { stack: e.stack }));
     process.exit(5);
   }
 }

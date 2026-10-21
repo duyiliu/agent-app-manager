@@ -41,9 +41,10 @@ function psProcOnce(action, params) {
   }
   if (r.status !== 0) {
     const e = dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
-    // 标记可重试：proc.ps1 每次都在进程内用 Add-Type 编译 C#，偶发 Roslyn 栈溢出崩溃
-    // （退出码 0xC00000FD / “type initializer ... threw an exception”），与进程状态无关。
-    e.psTransient = true;
+    // 短时探针可重试：proc.ps1 每次都在进程内用 Add-Type 编译 C#，偶发 Roslyn 栈溢出
+    // 崩溃（0xC00000FD / “type initializer ... threw an exception”），与进程状态无关。
+    // discover 单次调用内部已轮询到超时，重试会把最坏等待放大到分钟级，故不重试。
+    if (action !== 'discover') e.psTransient = true;
     throw e;
   }
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
@@ -82,7 +83,13 @@ export function portOccupants(port) {
   return rows.map((row) => {
     let identity = null;
     try { identity = psProc('capture', { id: row.pid }); } catch (e) { identity = { result: 'error', message: e.message }; }
-    return { ...row, identity };
+    // 与 status/capture 统一口径：端口诊断的 executablePath 取解析后的 image（#55），
+    // 避免 nvm/shim 场景下 port.ps1 的 Win32_Process.ExecutablePath 与 status 的 image 不一致。
+    return {
+      ...row,
+      executablePath: identity?.result === 'ok' ? identity.image : row.executablePath,
+      identity,
+    };
   });
 }
 

@@ -87,7 +87,7 @@ export function cmdStartNew(ctx) {
 }
 
 export function cmdRecordUnmanaged(ctx) {
-  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--log-hints': 'multi' });
+  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--log-hints': 'multi', '--force': 'flag' });
   const d = loadUnmanagedDesc(opts.get('--desc'));
   const root = realpathOrConflict('root', d.root);
   const entry = ENTRY_RE.test(d.entry ?? '') ? d.entry : 'default';
@@ -102,11 +102,26 @@ export function cmdRecordUnmanaged(ctx) {
       }
     }
     const now = new Date().toISOString();
-    if (reg.apps[appId]) {
-      const app = reg.apps[appId];
-      app.alias = d.alias;
-      app.displayName = d.displayName ?? d.alias;
-      app.updatedAt = now;
+    const existing = reg.apps[appId];
+    // 同 root+entry 的 appId 与 alias 无关：非受管登记覆盖已存在的受管登记会丢失
+    // 受管身份与进程追踪证据，必须显式拒绝或 --force（#49）。
+    const wasManaged = !!(existing && (existing.exe || existing.command));
+    if (wasManaged && !opts.has('--force')) {
+      throw conflictError('ALREADY_REGISTERED',
+        `appId=${appId}（root=${root}，entry=${entry}）已存在受管登记「${existing.alias}」，非受管登记会覆盖其受管身份与进程追踪证据；确认后用 --force 覆盖，或先 remove 该登记`,
+        { appId, alias: existing.alias, root, entry, managed: true });
+    }
+    if (existing) {
+      existing.alias = d.alias;
+      existing.displayName = d.displayName ?? d.alias;
+      // 转为非受管形态：清空受管启动能力，避免残留 exe/command 继续被当作可受管
+      existing.exe = null;
+      existing.args = [];
+      existing.command = null;
+      existing.expectedImage = null;
+      existing.discoverTimeoutMs = null;
+      existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
+      existing.updatedAt = now;
     } else {
       reg.apps[appId] = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
@@ -130,7 +145,11 @@ export function cmdRecordUnmanaged(ctx) {
     return {
       appId, alias: reg.apps[appId].alias, runId: rt.current.runId,
       managed: false, status: 'UNKNOWN', logHints,
-      note: '非受管登记不提供 RUNNING/STOPPED 断言与跨会话启停；日志线索仅原路径关联',
+      replaced: !!existing,
+      ...(wasManaged ? { replacedManaged: true } : {}),
+      note: wasManaged
+        ? '已用 --force 覆盖同 appId 的受管登记：原受管身份与进程追踪证据不再可用（运行记录与日志证据仍保留）'
+        : '非受管登记不提供 RUNNING/STOPPED 断言与跨会话启停；日志线索仅原路径关联',
     };
   });
 }
@@ -226,7 +245,7 @@ export function cmdDoctor(ctx) {
     bootId: isLinux ? bootId() : null,
     procReadable,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports, problems,
-    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；端口监听不代表业务就绪',
+    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪',
   }));
 }
 
