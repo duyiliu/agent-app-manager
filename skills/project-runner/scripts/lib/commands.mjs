@@ -16,6 +16,7 @@ import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
 import { readTailLines, MAX_LOG_LINES } from './logs.mjs';
 import { planPrune, applyPrune } from './prune.mjs';
+import { bootId } from './proc-linux.mjs';
 
 // ---------- 简单选项解析 ----------
 
@@ -170,11 +171,23 @@ export function cmdDoctor(ctx) {
     }
   };
   for (const dir of [home, runtimeDir, path.join(home, 'logs'), locksDir]) scanTemps(dir);
-  const pw = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+  const isWin = process.platform === 'win32';
+  const isLinux = process.platform === 'linux';
+  let pw = { error: true, status: null, stdout: '' };
+  if (isWin) {
+    pw = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+  }
+  const procReadable = isLinux
+    ? (() => { try { fs.accessSync('/proc/self/stat', fs.constants.R_OK); return true; } catch { return false; } })()
+    : null;
   const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
   const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
   return Promise.all(portSummary.map(async (p) => ({ ...p, listening: await p.listening }))).then((ports) => ({
-    nodeVersion: process.version, pwshVersion: !pw.error && pw.status === 0 ? pw.stdout.trim() : null,
+    nodeVersion: process.version, platform: process.platform,
+    procBackend: isLinux ? 'linux-proc' : (isWin ? 'pwsh-win32' : null),
+    pwshVersion: isWin && !pw.error && pw.status === 0 ? pw.stdout.trim() : null,
+    bootId: isLinux ? bootId() : null,
+    procReadable,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports,
     note: '只读诊断；locks 项仅列出，不回收；端口监听不代表业务就绪',
   }));

@@ -3,7 +3,7 @@
 > 设计版本：v2（收敛版，替代 v1）
 > 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过。**AC03 分层结论：全量通过**（L1/L2 于 2026-10-19 隔离环境实测；L3「真实 pi 会话退出后的存活」于 2026-10-20 按同判据补验通过——真实嵌套 pi 会话正常退出后，会话外全新进程实测 status/logs/stop 四项判据全过，Managed 启动路径无需阻塞）。实测命令与原始输出见 `docs/verification/ac03-l1-l2-evidence.md`（L3 见其 §4.5）。若未来更换运行器或宿主调度层（尤其新增 `KILL_ON_JOB_CLOSE` 包裹），须按同一判据重验后方可宣称 AC03 兼容。2026-10-20 新增 `manager ui` 本地只读管理台（§2.2、AC08），"简单部署"原则、非目标与 P2 表述已同步调整。
 > **v2.3（2026-10-21，多语言）**：受管范围由 JVM 推广到任意真实可执行进程——desc `mode` 扩展为 `java|jrebel|python|node|proc`；`resolveExe` 收紧为"必须解析为 .exe/.com 真实可执行文件"，拒绝 `.cmd`/`.bat`/`.ps1` 包装与 `Microsoft\WindowsApps` 应用执行别名 reparse point（npm/pnpm 等 shim 场景须先解析到底层 `node <entry>.js`）；`.tmp` 兼容日志新增 `runner-local-*` 通用名。生命周期、未结记录、锁与 ui 机制全部不变；冒烟见 `scripts/test/runtime-smoke.mjs`。
-> **v2.4（2026-10-21，命令模式）**：desc 新增 `command` + `expectedImage`（+可选 `discoverTimeoutMs`），与 `exe/args` 二选一。manager 亲自用 `cmd /d /s /c <command>` 拉起脚本/复合命令（`npm run dev`、`mvn spring-boot:run`、`*.cmd` 编排等），再按 PPID 链在后代进程中有界轮询匹配 `expectedImage` 映像基名：首次匹配后再观察 ~1.5s 取最终清单（防"假唯一"），恰好 1 个 → 采集 pid+创建时间+映像进既有受管模型（kind=`command`，wrapper 身份一并记录供清理佐证）；≥2 个 → `DISCOVERY_AMBIGUOUS` 拒绝并列候选，wrapper 留证标 UNKNOWN；wrapper 先退出且无目标 → `SPAWN_FAILED`；超时 → UNKNOWN。`stop` 终止目标进程（同句柄核验不变）并尽力终止残留 wrapper；`restart`=`stop`+重放命令+重新发现。**实测约束**：detached（无控制台）cmd wrapper 的后代 stdout 句柄全部失效（echo/node/ping 写入丢失），故命令模式 wrapper **不 detach**，共享 manager 控制台——agent 管道调用下 manager 本无控制台不受影响；交互终端启动则终端关闭会带走应用（命令模式已知边界）。安全边界不变：管理目标仍只能是 manager 自己启动的后代，不凭端口/事后断言认领外部进程。
+> **v2.4（2026-10-21，命令模式）**：desc 新增 `command` + `expectedImage`（+可选 `discoverTimeoutMs`），与 `exe/args` 二选一。manager 亲自用 `cmd /d /s /c <command>` 拉起脚本/复合命令（`npm run dev`、`mvn spring-boot:run`、`*.cmd` 编排等），再按 PPID 链在后代进程中有界轮询匹配 `expectedImage` 映像基名：首次匹配后再观察 ~1.5s 取最终清单（防"假唯一"），恰好 1 个 → 采集 pid+创建时间+映像进既有受管模型（kind=`command`，wrapper 身份一并记录供清理佐证）；≥2 个 → `DISCOVERY_AMBIGUOUS` 拒绝并列候选，wrapper 留证标 UNKNOWN；wrapper 先退出且无目标 → `SPAWN_FAILED`；超时 → UNKNOWN。`stop` 终止目标进程（同句柄核验不变）并尽力终止残留 wrapper；`restart`=`stop`+重放命令+重新发现。**实测约束**：5ec3fb4 起 logger 与 wrapper 一律 `detached: true`——非 detached 子进程在 Windows 会被放入 kill-on-close 作业对象，CLI 退出即整树终止；detached 后 stdout 经 pipe 转发不受影响（Windows cmd 与 Linux sh 均已实测）。安全边界不变：管理目标仍只能是 manager 自己启动的后代，不凭端口/事后断言认领外部进程。
 > 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill；日志查看能力自 v2.2 起并入 `manager ui`（原单项目 Viewer 已移除）
 > 评审说明：v1 的 same-context PASS 不继承为 v2 的代码审查或运行验证结论；实施后须按本文件验收。
 
@@ -23,7 +23,7 @@
 - **启动即登记**：不要求用户预先 `register`；首次由 Skill 在获得启动授权后提交经过确认的启动描述。
 - **管理范围最小化**：仅记录本 Skill 发起的启动；IDEA Run/Debug、手工 Maven/Gradle、手工 `java -jar`、Docker 启动均不纳入注册表或生命周期管理。外部进程只可用于端口冲突诊断，绝不被自动接管/停止。
 - **零项目侵入**：默认不改 `pom.xml`、`build.gradle`、`rebel.xml`、源码或项目启动脚本；构建、配置变更与初始化依 PR #5 的独立授权规则处理。
-- **简单部署**：Windows 11 + PowerShell 7 + Node.js 22，尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地只读管理台：按需启动、非常驻、仅绑定 127.0.0.1 且带一次性令牌（见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发。
+- **简单部署**：Windows 11 + PowerShell 7，或 Linux（`/proc`，不依赖 pwsh）；Node.js 22。尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地只读管理台：按需启动、非常驻、仅绑定 127.0.0.1 且带一次性令牌（见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发；Linux 路径不调用 PowerShell。macOS 暂不支持（无 `/proc`）。
 - **保持原能力**：PR #5 现有单项目启动规程、热加载验证、`.tmp` 日志与只读日志查看能力不被替换（v2.2 起并入 `manager ui`，原单项目 Viewer 移除）。
 
 非目标：项目全盘扫描、通用进程盘点、IDEA 进程关联与接管、批量启停、自动构建、跨机器管理、Docker 编排、JVM 监控、远程管理、对外网开放或常驻的 Web 控制台、多实例托管（本地只读管理台的边界见 §2.2）。
@@ -118,7 +118,7 @@ stop <alias|appId> [--json]              # 仅 Managed
 restart <alias|appId> [--force] [--json] # 仅 Managed
 remove <alias|appId> [--ack-unresolved <runId>] [--json]   # 移除登记：仅无存活受管实例；只删注册表条目，运行记录与日志证据保留
 prune [--dry-run] [--apply] [--json]     # 回收三类残留：超保留期批次日志（对齐 PREV_RUNS_KEEP=20）、locks/*.stale-*、.tmp-* 孤儿临时文件；默认 dry-run
-logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--src <run:…|hint:N|tmp:…>] [--list-sources] [--follow] [--json]
+logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--src <run:…|hint:<hash>|tmp:…>] [--list-sources] [--follow] [--json]
 ui [--port N] [--open]                      # 本地只读 Web 管理台（127.0.0.1 + 一次性令牌，--open 自动打开；Ctrl+C 退出）
 ~~~
 
@@ -130,7 +130,7 @@ ui [--port N] [--open]                      # 本地只读 Web 管理台（127.0
 
 ## 5. 最小可靠性要求
 
-**跨会话真实存活是 P0 核心能力**：受管 JVM 脱离启动 Agent/管理命令的管道与会话；新 Agent 用共享记录重新核验并安全操作。启动辅助进程只能短时存在，不能引入常驻服务。Windows 的 Job Object、沙箱等可能回收后代进程，必须在实际目标运行器上验证；不支持时明确阻塞 Managed 启动，不能假报能力。
+**跨会话真实存活是 P0 核心能力**：受管进程（Windows JVM / Linux 真实进程）脱离启动 Agent/管理命令的管道与会话；新 Agent 用共享记录重新核验并安全操作。启动辅助进程只能短时存在，不能引入常驻服务。Windows 的 Job Object、沙箱等可能回收后代进程，必须在实际目标运行器上验证；不支持时明确阻塞 Managed 启动，不能假报能力。
 
 为避免重复 JVM 或误杀，保留最少机制：
 
@@ -165,6 +165,7 @@ ui [--port N] [--open]                      # 本地只读 Web 管理台（127.0
 | AC06 | 日志按运行批次可查询且有界；受管与非受管、存活与就绪、JRebel 是否验证分别展示，无虚假成功 |
 | AC07 | 不改业务项目；普通 Java 模式无需 JRebel 配置；PR #5 单项目启动、JRebel 验证、只读日志查看（v2.2 起为 `manager ui`）、原 `.tmp` 日志继续可用 |
 | AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问，无令牌/令牌不符/Host 不符一律 403，仅允许 GET；只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）与项目文件（路径白名单、拒绝穿越与符号链接）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
+| AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
 
@@ -188,6 +189,15 @@ Job Object 观测旁证（2026-10-19/20 两次实测合并；不构成 L3 通过
 
 **v2.2（2026-10-20）**：移除按项目启动的单项目 `log-viewer`，日志与文件浏览能力并入 `manager ui` 统一入口——日志源选择器覆盖受管批次、非受管登记线索与 `root/.tmp` 兼容扫描；新增所选应用的项目文件只读浏览（路径白名单、拒绝穿越/符号链接、UTF-8 前 256 KB）；`manager ui` 默认固定 `127.0.0.1:8199`（`--port 0` 随机），重复启动探测已有实例并提示复用。这样保持“只有一个统一管理入口”的定位，避免同一机器上两套 Web 界面与端口竞争。
 
-**v2.5（2026-10-20）**：CLI 能力补齐——新增 `remove`（移除登记：仅无存活受管实例时允许，RUNNING 核验存活一律拒绝（退出码 3），STARTING/UNKNOWN 未结记录按既有 ack 流程；只删注册表条目，runtime 记录与日志证据保留）与 `prune`（默认 dry-run，`--apply` 才删除；回收 `logs/<appId>/` 超保留期历史批次日志（与 PREV_RUNS_KEEP=20 对齐）、`locks/*.stale-*` 死锁残留与 `.tmp-*` 原子写孤儿临时文件；不删 current 运行日志与证据，不触碰 home 之外文件，损坏数据按 DATA_* 契约整体拒绝）；`logs` 接入与 ui 相同的统一日志源（`--src run:…|hint:N|tmp:…` 复用 `resolveSource`、`--list-sources` 列出日志源、`--stream both` 双流合并）。
+**v2.5（2026-10-20）**：CLI 能力补齐——新增 `remove`（移除登记：仅无存活受管实例时允许，RUNNING 核验存活一律拒绝（退出码 3），STARTING/UNKNOWN 未结记录按既有 ack 流程；只删注册表条目，runtime 记录与日志证据保留）与 `prune`（默认 dry-run，`--apply` 才删除；回收 `logs/<appId>/` 超保留期历史批次日志（与 PREV_RUNS_KEEP=20 对齐）、`locks/*.stale-*` 死锁残留与 `.tmp-*` 原子写孤儿临时文件；不删 current 运行日志与证据，不触碰 home 之外文件，损坏数据按 DATA_* 契约整体拒绝）；`logs` 接入与 ui 相同的统一日志源（`--src run:…|hint:<hash>|tmp:…` 复用 `resolveSource`、`--list-sources` 列出日志源、`--stream both` 双流合并）。
 
 **v2.6（2026-10-20，issue #12 管理台体验增强）**：① `ui` 新增 `--open`：监听成功后用默认浏览器打开带令牌 URL；默认不开（Agent 前台拉起场景不期望弹浏览器），打开失败降级为仅打印 URL，不阻塞 ui；端口冲突时不拉浏览器。② 日志面板新增渲染层正则过滤输入框与「只看错误」开关（等价内置 errorPattern）：`lines` 数组保留全量、清空条件即恢复，增量 poll 新行按当前条件入视图，follow/滚动停止语义不变；无效正则给出标红与 meta 提示而非静默失效。③ 页面选择应用后 `history.replaceState` 回写 `?app=<别名>`，刷新保持选中。④ 未结记录（UNRESOLVED_RUN）告警中的 `start <alias> --ack-unresolved <runId>` 提供一键复制（`navigator.clipboard` 优先，选区 + `execCommand` 降级）。⑤ `document.title` 显示运行中应用数，如 `(2) Project Runner · 运行管理台`。
+
+**v2.7（2026-10-22，Linux 支持）**：在 Windows 11 + pwsh 7 之外新增 Linux 支持（纯 Node `/proc`，无 pwsh 依赖）；macOS 明确不支持并返回 `PLATFORM_UNSUPPORTED`。进程探针在 `lib/probe.mjs` 按平台分派，Windows 实现保持原位，Linux 使用 `lib/proc-linux.mjs`：
+- 身份：`creationFileTime` 在 Linux 为不透明字符串 `<boot_id>:<starttime>`（starttime 取 `/proc/<pid>/stat` 第 22 字段），`image` 为 `/proc/<pid>/exe`（剥离 `" (deleted)"`，不可读时降级 `comm:<comm>`）；`Z`/`X`/`x` 视为已退出。
+- 终止：同 bootId+starttime+image 核验后 `SIGKILL`，有界等待退出；PID 复用不触碰新进程。
+- 命令模式：Windows `cmd /d /s /c`，Linux `/bin/sh -c`；后代发现扫描 `/proc/*/stat` 的 ppid 树，`expectedImage` 按 exe basename（回退 comm）匹配。
+- desc：Linux 允许无扩展名真实可执行文件，要求普通文件 + 可执行位；`#!` 脚本与 `.cmd`/`.bat`/`.ps1` 拒绝（脚本是包装进程）；`where`/`.exe` 补全/WindowsApps 检查仅 Windows。
+- 端口诊断：Linux 解析 `/proc/net/tcp{,6}` 的 LISTEN inode，再扫 `/proc/*/fd` 反查 pid；权限不足时 `pid=null`，只报告监听。
+- 测试/CI：新增 `test/platform.mjs`；CI matrix `windows-latest` + `ubuntu-latest`，补齐 cli/runtime 冒烟。
+Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享。

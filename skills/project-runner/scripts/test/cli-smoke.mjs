@@ -7,13 +7,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
+import { hasProcessProbe, isWindows } from './platform.mjs';
+import { psProc } from '../lib/probe.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MANAGER = path.resolve(SCRIPT_DIR, '..', 'manager.mjs');
-const PROC_PS1 = path.resolve(SCRIPT_DIR, '..', 'ps', 'proc.ps1');
 
 // manager 的 resolveHome 对 home 做 realpathSync.native（展开 8.3 短名等），
 // 测试路径统一用 realpath 后的基目录，保证与 CLI 输出可直接比较
@@ -65,11 +66,8 @@ const regApp = (appId, alias, mode = 'java') => ({
 });
 const registryApps = { aok: regApp('aok', 'ok'), astuck: regApp('astuck', 'stuck'), aun: regApp('aun', 'unman') };
 
-const pwshOk = (() => {
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PROC_PS1, '-Action', 'capture', '-Id', String(process.pid)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-  return !r.error && r.status === 0 && /"result":"ok"/.test(r.stdout ?? '');
-})();
-if (pwshOk) {
+const probeOk = hasProcessProbe();
+if (probeOk) {
   // RUNNING 拒绝移除的受管应用：预登记 arun（别名 busy），运行记录在检查时用真实存活进程写入
   fs.mkdirSync(path.join(home, 'logs', 'arun'), { recursive: true });
   w(path.join(home, 'logs', 'arun', 'rrun1.stdout.log'), 'running log line\n');
@@ -116,7 +114,7 @@ const check = async (name, fn) => {
   catch (e) { failed++; console.log(`  FAIL ${name}: ${e.message}`); }
 };
 
-console.log(pwshOk ? 'pwsh 7 可用：执行全部检查' : '未检测到 pwsh 7：跳过依赖应用锁/身份核验的生命周期检查');
+console.log(probeOk ? `进程探针可用（${isWindows ? 'pwsh 7' : '/proc'}）：执行全部检查` : '未检测到进程探针：跳过依赖应用锁/身份核验的生命周期检查');
 
 // ---------- detect 只读启动描述候选 ----------
 const detectRoot = path.join(base, 'detect-fixtures');
@@ -138,12 +136,12 @@ await check('detect vite/maven/flask 生成与 start-new schema 对齐的候选'
   assert.equal(rows.length, 3);
   const vite = rows.find((x) => x.evidence.rule.includes('package-script:dev'));
   assert.equal(vite.desc.command, 'npm run dev');
-  assert.equal(vite.desc.expectedImage, 'node.exe');
+  assert.equal(vite.desc.expectedImage, isWindows ? 'node.exe' : 'node');
   const maven = rows.find((x) => x.evidence.rule.startsWith('maven-spring-boot'));
-  assert.equal(maven.desc.command, 'mvnw.cmd spring-boot:run');
+  assert.equal(maven.desc.command, isWindows ? 'mvnw.cmd spring-boot:run' : './mvnw spring-boot:run');
   assert.equal(maven.desc.mode, 'java');
   const flask = rows.find((x) => x.evidence.rule === 'flask-app.py');
-  assert.equal(flask.desc.command, 'python -m flask --app app run');
+  assert.equal(flask.desc.command, isWindows ? 'python -m flask --app app run' : 'python3 -m flask --app app run');
   assert.equal(flask.desc.mode, 'python');
   assert(rows.every((x) => x.confidence && x.evidence.file));
   assert.equal(fs.readFileSync(path.join(home, 'registry.json'), 'utf8'), before, 'detect 不得修改注册表');
@@ -247,7 +245,7 @@ await check('prune 默认 dry-run：列出将删内容且不删除任何文件',
   assert.equal(pd.code, 0, pd.text);
   assert.equal(pd.json.ok, true);
   assert.equal(pd.json.data.dryRun, true);
-  if (pwshOk) {
+  if (probeOk) {
     const files = pd.json.data.logs.flatMap((a) => a.files).map((f) => f.file);
     assert(files.includes(path.join(aokLogs, 'rold1.stdout.log')), `应列出超保留期日志：${files.join(',')}`);
     assert(files.includes(path.join(aokLogs, 'rold1.stdout.log.1')), `应列出超保留期轮转日志：${files.join(',')}`);
@@ -271,7 +269,7 @@ await check('prune --apply：回收超保留期日志、死锁残留与孤儿临
   const pa = await run(['prune', '--apply', '--json']);
   assert.equal(pa.code, 0, pa.text);
   assert.equal(pa.json.data.dryRun, false);
-  if (pwshOk) {
+  if (probeOk) {
     assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log')));
     assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log.1')));
     assert(!fs.existsSync(path.join(aokLogs, 'rold2.stderr.log')));
@@ -315,7 +313,7 @@ await check('损坏运行记录按 DATA_CORRUPT 整体拒绝且不删任何文�
 
 // ---------- remove ----------
 
-if (pwshOk) {
+if (probeOk) {
   await check('remove 缺 ref / 未知 ref 退出码 1/2', async () => {
     assert.equal((await run(['remove'])).code, 1);
     const r0 = await run(['remove', 'nope', '--json']);
@@ -325,8 +323,7 @@ if (pwshOk) {
   await check('remove RUNNING 受管实例拒绝（退出码 3 INSTANCE_RUNNING）', async () => {
     const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
-      const cap = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PROC_PS1, '-Action', 'capture', '-Id', String(live.pid)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-      const identity = JSON.parse(cap.stdout.trim().split(/\r?\n/).filter(Boolean).pop());
+      const identity = psProc('capture', { id: live.pid });
       assert.equal(identity.result, 'ok');
       rt('arun', {
         runId: 'rrun1', phase: 'RUNNING', managed: true, mode: 'java', intentAt: now, startedAt: now,

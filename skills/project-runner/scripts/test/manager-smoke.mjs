@@ -10,6 +10,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { hasProcessProbe, isWindows } from './platform.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-manager-smoke-'));
@@ -41,12 +42,12 @@ class Skip extends Error { }
 // 核验类断言：整条链路（锁/身份采集/核验/终止）依赖 pwsh，缺 pwsh 7 时按惯例跳过；
 // 跳过时输出底层响应，区分「未安装」与「pwsh 瞬时失败」（如 Add-Type 偶发崩溃重试后仍失败）
 const lifecycle = (name, fn) => {
-  if (!hasPwsh) { skipped.push(name); console.log(`  skip  ${name}（缺 pwsh 7，跳过核验类断言）`); return; }
+  if (!hasPwsh) { skipped.push(name); console.log(`  skip  ${name}（缺进程探针，跳过核验类断言）`); return; }
   try { fn(); console.log(`  ok  ${name}`); }
   catch (e) {
     if (e instanceof Skip) {
       skipped.push(name);
-      console.log(`  skip  ${name}（缺 pwsh 7，跳过核验类断言；底层响应：${e.message}）`);
+      console.log(`  skip  ${name}（缺进程探针，跳过核验类断言；底层响应：${e.message}）`);
       return;
     }
     failed++; console.log(`  FAIL ${name}: ${e.message}`);
@@ -65,10 +66,9 @@ const expectFail = (r, code, errCode) => {
   return r.json;
 };
 
-// ---------- pwsh 探测（一次，决定核验类断言是否执行） ----------
-const probe = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-const hasPwsh = !probe.error && probe.status === 0;
-if (!hasPwsh) console.log('（未安装 pwsh 7：仅覆盖不依赖核验的检查，核验类断言跳过）');
+// ---------- 进程探针（一次，决定核验类断言是否执行） ----------
+const hasPwsh = hasProcessProbe();
+if (!hasPwsh) console.log(`（未检测到进程探针 ${isWindows ? 'pwsh 7' : '/proc'}：仅覆盖不依赖核验的检查，核验类断言跳过）`);
 
 let currentPid = null;
 try {
@@ -97,7 +97,22 @@ try {
     assert.equal(r.json.error.code, 'NOT_FOUND');
   });
 
-  // ---------- 生命周期（依赖 pwsh） ----------
+  // POSIX 专属：shell 脚本是包装进程，真实目标会变成解释器子进程，必须拒绝。
+  if (!isWindows) {
+    check('POSIX: exe 指向 #! 脚本被拒绝（CONFIG_INVALID，退出码 3）', () => {
+      const fake = path.join(base, 'fake.sh');
+      fs.writeFileSync(fake, '#!/bin/sh\necho hi\n');
+      fs.chmodSync(fake, 0o755);
+      const f = path.join(base, 'desc-shebang.json');
+      fs.writeFileSync(f, JSON.stringify({ alias: 'shebang', root: proj, mode: 'proc', exe: fake, args: [] }));
+      const r = run(['start-new', '--desc', f]);
+      assert.equal(r.code, 3, r.stdout + r.stderr);
+      assert.equal(r.json.error.code, 'CONFIG_INVALID');
+      assert(r.json.error.message.includes('#!'));
+    });
+  }
+
+  // ---------- 生命周期（依赖进程探针） ----------
   const descFile = path.join(base, 'desc.json');
   fs.writeFileSync(descFile, JSON.stringify({
     alias: 'smoke', root: proj, entry: 'default', mode: 'java',

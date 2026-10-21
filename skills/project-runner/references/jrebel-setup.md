@@ -10,7 +10,7 @@
 
 1. **检查 JDK 前置条件**：从仓库构建配置/项目约定识别目标 JDK 版本，再检查本机可用 JDK 和启动命令实际选用路径。项目要求优先于通用的“JDK 8+”。不匹配时只报告项目要求与当前检测结果，等待用户安装/切换后再继续；不改 `JAVA_HOME` 或 PATH 来掩盖不匹配。
 2. **检查现有 JRebel 环境**：检查进程级/用户级 `REBEL_HOME`、该目录下与操作系统/CPU 架构匹配的 agent 文件、`~/.jrebel/` 用户数据目录及 PATH。只检查路径和文件是否存在，不读取或回显 `jrebel.properties` 的内容。已有可用安装则复用，不重复下载。
-3. **获取 standalone 发行包**：如果没有安装且用户已授权安装，从官方稳定版地址下载：<https://dl.zeroturnaround.com/jrebel-stable-nosetup.zip>。解压到用户指定目录；agent 库位于解压目录的 `lib/`。按第 1 步确定的平台和架构选择文件，例如 Windows 64 位通常为 `lib/jrebel64.dll`。下载失败或官方源不可达时停止并报告，不使用未知镜像。
+3. **获取 standalone 发行包**：如果没有安装且用户已授权安装，从官方稳定版地址下载：<https://dl.zeroturnaround.com/jrebel-stable-nosetup.zip>。解压到用户指定目录；agent 库位于解压目录的 `lib/`。按第 1 步确定的平台和架构选择文件（Windows 通常为 `lib/jrebel64.dll`，Linux 为对应的 `.so` agent，具体文件名以官方 `agent-setup.md` 为准）。下载失败或官方源不可达时停止并报告，不使用未知镜像。
 4. **配置安装路径**：将 `REBEL_HOME`（或项目已有约定的 `JREBEL_HOME`）指向解压后的 JRebel 根目录（不是 `lib/`），优先按用户要求设置用户级环境变量；除非用户明确要求，不修改系统级环境变量。当前进程通常不会自动继承刚设置的环境变量，后续启动时可显式提供该变量；验证新会话/进程能解析到正确目录。不得覆盖用户已有的有效值，若值冲突先报告。
 5. **初始化用户数据目录**：`REBEL_BASE`/`-Drebel.base` 用于许可、设置与日志，不是安装目录。默认用户目录为 `~/.jrebel/`；如需放置用户提供的 `jrebel.lic`，遵循用户指定位置（默认可放 `~/.jrebel/jrebel.lic`），也可在用户明确要求时配置 `rebel.license` 指向用户提供的许可文件。不要把许可证文件放进项目仓库、提交或复制到共享目录。
 6. **配置授权**：发行包下载不代表许可已激活。许可可来自用户提供的 `jrebel.lic`、组织 license server 或官方试用/激活流程。用户明确要求配置时，按其指定方式使用 license 文件或设置 license server；license URL 可能包含 team token，激活码和许可证内容都属于敏感信息，禁止回显、写入日志、仓库或本 skill。交互式激活需要用户本人输入/确认凭据时，交由用户完成。

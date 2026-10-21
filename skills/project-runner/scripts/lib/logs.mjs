@@ -21,7 +21,11 @@ export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
   }
   let text;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-  catch { text = new TextDecoder('gbk').decode(buf); }
+  catch {
+    // 精简 ICU 的 Node 可能不带 GBK 解码器：回退 lossy UTF-8，不让读取失败。
+    try { text = new TextDecoder('gbk').decode(buf); }
+    catch { text = new TextDecoder('utf-8').decode(buf); }
+  }
   let all = text.split(/\r?\n/);
   if (all.length && all[all.length - 1] === '') all.pop();
   const lines = all.slice(-want);

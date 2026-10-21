@@ -15,9 +15,19 @@ import { conflictError } from './errors.mjs';
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LOG_WRITER = path.join(SCRIPTS_DIR, 'log-writer.mjs');
 
-// 命令模式的顶层 wrapper：cmd.exe 是真实 exe，同样走候选校验保证不被 shim 冒充
-function resolveComspec(cwd) {
-  return resolveExe(process.env.ComSpec || 'cmd.exe', cwd);
+// 命令模式的顶层 wrapper：Windows 是 cmd.exe，Linux 是 /bin/sh；两者都必须是
+// 可校验的真实可执行文件（sh 不允许被 shebang 脚本冒充）。
+function resolveShell(cwd) {
+  if (process.platform === 'win32') return resolveExe(process.env.ComSpec || 'cmd.exe', cwd);
+  for (const candidate of ['/bin/sh', process.env.SHELL, 'sh']) {
+    if (!candidate) continue;
+    try { return resolveExe(candidate, cwd); } catch { /* 尝试下一个候选 */ }
+  }
+  throw conflictError('CONFIG_INVALID', '找不到可用的 POSIX shell（/bin/sh 或 $SHELL）');
+}
+
+function shellArgs(command) {
+  return process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
 }
 
 // 目标进程终止后尽力清理仍存活的 cmd wrapper（多数会随子进程退出自然消亡）。
@@ -69,18 +79,18 @@ export function launchManaged(home, appId, app, opts = {}) {
   try {
     const sinkConfig = path.join(logDir, `.${runId}.sink.json`);
     fs.writeFileSync(sinkConfig, JSON.stringify({
-      file: isCommand ? resolveComspec(app.cwd) : app.exe,
-      args: isCommand ? ['/d', '/s', '/c', app.command] : app.args,
+      file: isCommand ? resolveShell(app.cwd) : app.exe,
+      args: isCommand ? shellArgs(app.command) : app.args,
       cwd: app.cwd, outPath, errPath,
       runtimeFile: runtimePath(home, appId), runId, limit: app.logMaxBytes ?? RUN_LOG_MAX_BYTES, pidFile,
     }));
     // The detached logger owns both output descriptors and launches the application
     // with pipes, allowing safe stdout rotation without touching a live app fd.
-    // 命令模式：拉起 cmd wrapper 执行完整命令行；真实目标进程稍后按后代发现确定。
-    // 必须 detached：Node 在 Windows 上把非 detached 子进程放入 kill-on-close
-    // 作业对象，manager 退出（CLI 必退）会整树终止 logger→cmd→目标，命令模式
-    // 受管进程活不过启动命令返回后的几秒。stdout 走 pipe 不经控制台，detach
-    // 不影响日志转发（已实测 node 通过 cmd 后代继承 pipe 正常输出）。
+    // 命令模式：Windows 拉起 cmd /d /s /c，Linux 拉起 /bin/sh -c；真实目标进程
+    // 稍后按后代发现确定。必须 detached：Node 在 Windows 上把非 detached 子进程
+    // 放入 kill-on-close 作业对象，manager 退出（CLI 必退）会整树终止 logger→shell→目标；
+    // Linux 下 detached 让 logger 脱离当前会话，CLI 退出后仍存活。stdout 走 pipe
+    // 不依赖控制台，detach 不影响日志转发（Windows cmd 与 Linux sh 均已实测）。
     child = spawn(process.execPath, [LOG_WRITER, sinkConfig], {
       cwd: app.cwd, detached: true, windowsHide: true,
       // env 只在内存中合并传给 logger（不写入落盘的 sink 配置，避免把环境变量落成文件）。

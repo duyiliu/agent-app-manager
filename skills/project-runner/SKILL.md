@@ -43,34 +43,34 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ## 1A. 非 Java 项目识别与启动（Python / Node 前端与后端 / 其他栈）
 
-非 Java 项目遵循同一证据纪律：先项目事实、再本机事实、端口不猜默认值、歧义即停。受管按优先级三选一——① **exe 直连**（`exe`+`args` 解析为真实 `.exe`/`.com`，detached 最干净）；② **命令模式**（`command`+`expectedImage`：manager 拉起 cmd wrapper 执行脚本/复合命令，再按 PPID 后代发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run`、`.cmd`/`.ps1` 编排、turbo/nx 等解析不了唯一入口的场景；后代多候选 `DISCOVERY_AMBIGUOUS` 拒绝任选）；③ **非受管登记**（前两者都不行才走，不得伪造托管）。脚本包装、转发 shim、WindowsApps 应用执行别名直接填 `exe` 会被 `CONFIG_INVALID` 拒绝。desc 的 `mode` 取值：`python`、`node`、`proc`（其他真实进程，如 Go 产物、dotnet、php）。
+非 Java 项目遵循同一证据纪律：先项目事实、再本机事实、端口不猜默认值、歧义即停。受管按优先级三选一——① **exe 直连**（`exe`+`args` 解析为真实可执行进程：Windows 为 `.exe`/`.com`，Linux 为无扩展名的真实 ELF/可执行文件）；② **命令模式**（`command`+`expectedImage`：manager 在 Windows 拉起 `cmd /d /s /c`、在 Linux 拉起 `/bin/sh -c` 执行脚本/复合命令，再按 PPID 后代发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run`、`.cmd`/`.ps1` 编排、turbo/nx 等解析不了唯一入口的场景；后代多候选 `DISCOVERY_AMBIGUOUS` 拒绝任选）；③ **非受管登记**（前两者都不行才走，不得伪造托管）。Windows 的 `.cmd`/`.bat`/`.ps1` 包装、WindowsApps 应用执行别名、Linux 的 `#!` 脚本包装与转发 shim 直接填 `exe` 会被 `CONFIG_INVALID` 拒绝。desc 的 `mode` 取值：`python`、`node`、`proc`（其他真实进程，如 Go 产物、dotnet、php）。
 
 ### Python
 
 1. **[项目] 依赖与框架**：`requirements.txt`、`pyproject.toml`、`Pipfile`/`poetry.lock`/`uv.lock`、`setup.py`、`environment.yml`（conda）。先读 README/AGENTS.md 的约定命令，再凭依赖声明判断框架（django/flask/fastapi/uvicorn 等），不凭目录名猜。
-2. **[比对] 解释器**：优先项目内虚拟环境 `.venv/Scripts/python.exe`、`venv/Scripts/python.exe`（或项目约定的 conda/uv/poetry 环境路径）；其次 PATH `python`——manager 会跳过/拒绝 `Microsoft\WindowsApps\python*.exe` 应用执行别名（未装应用时为 0 字节 stub），全部候选不可用时按报错改用真实解释器路径。**`py` 启动器是拉起子进程的包装，不得作受管 exe**。venv 或依赖缺失（如 import 失败）时报告所需命令（`python -m venv .venv`、`pip install -r requirements.txt` 等），venv 创建与安装属项目环境改动，按第 3 节授权规则先报告后执行。
+2. **[比对] 解释器**：优先项目内虚拟环境——Windows 为 `.venv/Scripts/python.exe`、`venv/Scripts/python.exe`，Linux 为 `.venv/bin/python`、`venv/bin/python`（或项目约定的 conda/uv/poetry 环境路径）；其次 PATH `python`（Linux 常用 `python3`）——manager 在 Windows 会跳过/拒绝 `Microsoft\WindowsApps\python*.exe` 应用执行别名（未装应用时为 0 字节 stub），全部候选不可用时按报错改用真实解释器路径。**Windows 的 `py` 启动器是拉起子进程的包装，不得作受管 exe**。venv 或依赖缺失（如 import 失败）时报告所需命令（`python -m venv .venv`、`pip install -r requirements.txt` 等），venv 创建与安装属项目环境改动，按第 3 节授权规则先报告后执行。
 3. **[项目] 入口**：Django（`manage.py` + settings 模块）→ `python manage.py runserver [addr:port]`；Flask → `python -m flask --app <module> run` 或项目自带 `app.py`；FastAPI/ASGI → `python -m uvicorn <module>:<app>`；脚本型 → `python main.py`/`python -m <pkg>`。多入口候选按第 1 节第 3 项歧义规则报告，不任选一个。
 4. **[比对] 端口**：以项目配置与启动参数为准；框架默认（Django 8000、Flask 5000、uvicorn 8000）只是候选，不冒充实际监听。
-5. **desc 形态**：`exe`=真实 `python.exe`（venv 优先），`args`=命令去掉 `python` 后的数组，`cwd`=项目根或项目约定目录，`mode`=`python`，`expectedPort` 有证据才填。
+5. **desc 形态**：`exe`=真实解释器（Windows 为 venv 内的 `python.exe`；Linux 为 venv 内的 `bin/python` 或真实 `python3`），`args`=命令去掉解释器后的数组，`cwd`=项目根或项目约定目录，`mode`=`python`，`expectedPort` 有证据才填。
 
 ### Node（Vue / React / Angular / Next / Nuxt / Vite / Node 后端等）
 
 1. **[项目] 包管理器**：`package.json` 的 `packageManager` 字段 > `pnpm-lock.yaml`/`yarn.lock`/`bun.lock(b)`/`package-lock.json`。包管理器只决定"如需安装依赖用什么命令"，不影响受管启动形态。
 2. **[项目] 启动脚本**：`package.json` `scripts` 里的 `dev`/`serve`/`start`/`dev:*` 等及 README 约定；多候选时选一个并说明理由，不擅自全试。
 3. **[比对] 依赖就绪**：`node_modules` 缺失或明显过期（lockfile 更新于 `node_modules`）时报告所需安装命令，按授权规则处理，不擅自 `install`。
-4. **受管启动形态（关键）**：`npm run dev`/`pnpm dev`/`yarn dev` 在 Windows 下经 `.cmd` shim + cmd 包装拉起真实 node——包装进程不是受管目标，`.cmd` 也会被 manager 直接拒绝。**受管做法是把 script 映射为真实 node 入口**：
-   - script 形如 `<bin> <args…>`：读 `node_modules/.bin/<bin>.cmd` 里被调用的 js 入口（`%dp0%` 相对路径），或读对应包的 `package.json` `bin` 字段解析。常见映射：vite→`node_modules/vite/bin/vite.js`，vue-cli-service→`node_modules/@vue/cli-service/bin/vue-cli-service.js`，react-scripts→`node_modules/react-scripts/scripts/start.js`，next→`node_modules/next/dist/bin/next`，nuxt→`node_modules/nuxt/bin/nuxt.mjs`，ng→`node_modules/@angular/cli/bin/ng.js`（`.mjs`/`.cjs` 同理）。
+4. **受管启动形态（关键）**：`npm run dev`/`pnpm dev`/`yarn dev` 在 Windows 下经 `.cmd` shim + cmd 包装拉起真实 node——包装进程不是受管目标，`.cmd` 会被 manager 直接拒绝；Linux 下 `npm`/`pnpm` 通常是 `#!` 脚本，同样会被 `exe` 校验拒绝。**受管做法是把 script 映射为真实 node 入口**：
+   - script 形如 `<bin> <args…>`：Windows 读 `node_modules/.bin/<bin>.cmd` 里被调用的 js 入口（`%dp0%` 相对路径）；Linux 读 `node_modules/.bin/<bin>` 符号链接目标。两种平台都可直接读对应包的 `package.json` `bin` 字段解析。常见映射：vite→`node_modules/vite/bin/vite.js`，vue-cli-service→`node_modules/@vue/cli-service/bin/vue-cli-service.js`，react-scripts→`node_modules/react-scripts/scripts/start.js`，next→`node_modules/next/dist/bin/next`，nuxt→`node_modules/nuxt/bin/nuxt.mjs`，ng→`node_modules/@angular/cli/bin/ng.js`（`.mjs`/`.cjs` 同理）。
    - script 形如 `node <file>`（Node 后端）→ 该文件即 args[0]。
    - 复合命令（`&&` 串联、`cross-env KEY=V <bin>`）：把最终真正拉起服务的那个进程解析出来；**非敏感字面值**（如 `PORT=3001`）放入 desc 的 `env` 对象持久化（跨会话 start/restart 保留，并覆盖调用 manager 时同名环境变量）；**禁止将机密写入 env**，机密由系统环境变量提供并以 `envRefs` 只记名称（值不落注册表）。
-   - desc（直连）：`exe`=真实 `node.exe`（`where node` 解析；agent 自身运行在 Node 上时直接用 `process.execPath` 更可靠），`args`=[入口 js 路径, 其余参数]，`cwd`=项目根，`mode`=`node`。
-   - **解析不了唯一入口时的命令模式**：`command`=`npm run dev`/`pnpm dev`/原始项目命令原样，`expectedImage`=`node.exe`，`mode`=`node`——manager 拉 cmd wrapper 后在后代中自动定位真实 node 进程托管（含 turbo/nx、自定义串联）。若后代出现多个 node.exe（并行编排多服务）→ `DISCOVERY_AMBIGUOUS` 拒绝并报候选，此时才转非受管。
+   - desc（直连）：`exe`=真实解释器（Windows `node.exe`，可用 `where node` 解析；Linux `node`，按 PATH 或 `process.execPath`；agent 自身运行在 Node 上时直接用 `process.execPath` 最可靠），`args`=[入口 js 路径, 其余参数]，`cwd`=项目根，`mode`=`node`。
+   - **解析不了唯一入口时的命令模式**：`command`=`npm run dev`/`pnpm dev`/原始项目命令原样，`expectedImage`=Windows `node.exe` / Linux `node`，`mode`=`node`——manager 拉起对应 shell wrapper（Windows `cmd /d /s /c`、Linux `/bin/sh -c`）后在后代中自动定位真实 node 进程托管（含 turbo/nx、自定义串联）。若后代出现多个 node 进程（并行编排多服务）→ `DISCOVERY_AMBIGUOUS` 拒绝并报候选，此时才转非受管。
    - 命令模式与直连都不可行 → 报 `UNSUPPORTED_LAUNCH` 类限制说明后按原授权执行项目命令，`record-unmanaged` 登记日志线索（`--log-hints` 指向 `.tmp/runner-local-*` 日志），不伪造托管。
 5. **[比对] 端口**：以实际输出/配置为准；`vite.config.*`/`vue.config.js`/`next.config.*`/`.env*` 中的 `server.port`/`PORT` 优先于框架默认（vite 5173、next 3000、ng 4200、vue-cli 8080）。注意 vite 等在端口被占用时可能自动换用下一个端口并在输出中说明——就绪端口以实际输出为准，不是配置文件。`.env*` 只读取值，不改写、不外泄。
 6. **热更新**：前端 dev server 的 HMR/文件监听是框架能力，不是本 Skill 承诺；验证方式=改动源文件后看 dev server 输出或页面。Python 同理（uvicorn `--reload`、flask debug 等由项目配置决定，不擅自添加参数）。
 
 ### 其他栈（Go / .NET / PHP / Rust 等）
 
-受管形态首选**真实可执行进程**直连：编译产物 exe、`dotnet <app>.dll`、`php -S`/`php artisan serve`（真实 `php.exe`+参数）这类"运行时+产物"形态。`go run`、`dotnet run` 这类工具链命令的目标是子进程——可直接用命令模式（`command`=原命令，`expectedImage`=最终服务进程映像基名如 `dotnet.exe`/`app.exe`/`php.exe`）托管；两者都不行才走非受管登记，`mode`=`proc`。
+受管形态首选**真实可执行进程**直连：编译产物 exe、`dotnet <app>.dll`、`php -S`/`php artisan serve`（真实 `php.exe`+参数）这类"运行时+产物"形态。`go run`、`dotnet run` 这类工具链命令的目标是子进程——可直接用命令模式（`command`=原命令，`expectedImage`=最终服务进程映像基名，Windows 如 `dotnet.exe`/`app.exe`/`php.exe`，Linux 如 `dotnet`/`php`）托管；两者都不行才走非受管登记，`mode`=`proc`。
 
 ## 2. 展示匹配结果与处理不确定项
 
@@ -95,7 +95,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 - 先判断目标模块的编译产物是否存在且与源码相符。遵循仓库文档指定的构建命令和模块范围；不要默认用 `clean`（它会删除输出）或整个仓库 `install`。
 - 启动任务本身不等于授权执行任意构建。如果缺少/过期的 class 文件导致无法启动，说明将执行的精确构建命令及影响；用户已明确要求“编译后启动/验证”时按项目约定执行，否则先停在方案并告知需要构建。
 - 项目脚本存在且安全时，按项目约定调用它。项目脚本通常负责模块 classpath、JVM 参数、插件和日志，skill 不重复实现其内部逻辑。
-- 无项目脚本时，根据已确认的项目构建结果组装启动命令：Windows classpath 分隔符为 `;`，引用路径和 `-D` 参数；依赖从项目生成的 classpath 或已准备好的依赖目录获取。fat jar 使用 `-jar`。不要把示例中的占位主类或 classpath 当作真实配置。
+- 无项目脚本时，根据已确认的项目构建结果组装启动命令：Windows classpath 分隔符为 `;`，Linux 为 `:`；引用路径和 `-D` 参数；依赖从项目生成的 classpath 或已准备好的依赖目录获取。fat jar 使用 `-jar`。不要把示例中的占位主类或 classpath 当作真实配置。
 - 以下 JRebel 参数仅在按第 1 节第 6 项选定 `mode: jrebel` 时添加；`mode: java` 的普通启动一律不带。
 - 将 `REBEL_HOME`/`JREBEL_HOME` 展开为实际绝对路径，再传给 `-agentpath`，不要把变量占位符原样传给 JVM。通常优先用平台原生 agent；只有原生 agent 不适用于目标架构时，才按官方 `agent-setup.md` 使用 `-javaagent` 两段式 bootstrap。
 - `-Drebel.base` 指向用户配置目录。关闭 Spring DevTools 仅在项目确实使用 DevTools 且项目约定要求时添加。
@@ -152,7 +152,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 **管理台入口是每次汇报的固定项**，不要等用户问。口径：
 
-- ui 已在运行 → 直接给出该实例终端打印的**带令牌完整 URL**（形如 `http://127.0.0.1:8199/?t=<令牌>`），并说明可 `?app=<别名>` 直达某个应用。
+- ui 已在运行 → 直接给出该实例终端打印的**带令牌完整 URL**（形如 `http://127.0.0.1:8199/?token=<令牌>`），并说明可 `?app=<别名>` 直达某个应用。
 - ui 未运行 → 给出固定地址 `http://127.0.0.1:8199`，同时说明它需要先启动 ui（`node "<安装目录>/scripts/manager.mjs" ui`）才能访问，令牌每次启动变化，因此固定端口不等于可直接收藏的 URL。
 - 地址含访问令牌，只在当前会话交给用户本人，不转发、不写入文件、不贴进提交信息。
 

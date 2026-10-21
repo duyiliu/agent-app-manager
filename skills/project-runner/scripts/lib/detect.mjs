@@ -27,6 +27,8 @@ export function detectProjects(root) {
   };
   const candidates = [];
   const notes = [];
+  const exeSuffix = process.platform === 'win32' ? '.exe' : '';
+  const pythonExec = process.platform === 'win32' ? 'python' : 'python3';
   const aliasBase = path.basename(absoluteRoot).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 24) || 'project';
   for (const rel of files.filter((f) => path.basename(f) === 'package.json')) {
     const pkg = readJson(rel);
@@ -38,7 +40,7 @@ export function detectProjects(root) {
     const framework = ['vite', '@vue/cli-service', 'next', 'nuxt', '@angular/cli'].find((name) => deps[name]);
     const projectRoot = path.resolve(absoluteRoot, path.dirname(rel));
     const alias = `${aliasBase}-${candidates.length + 1}`.slice(0, 32);
-    candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'node', command: `npm run ${script}`, expectedImage: 'node.exe' }, confidence: framework ? 'high' : 'medium', evidence: { file: rel, rule: `package-script:${script}${framework ? `; dependency:${framework}` : ''}` } });
+    candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'node', command: `npm run ${script}`, expectedImage: `node${exeSuffix}` }, confidence: framework ? 'high' : 'medium', evidence: { file: rel, rule: `package-script:${script}${framework ? `; dependency:${framework}` : ''}` } });
   }
   for (const rel of files.filter((f) => path.basename(f) === 'pom.xml')) {
     const text = (() => { try { return fs.readFileSync(path.join(absoluteRoot, rel), 'utf8'); } catch { return ''; } })();
@@ -47,7 +49,7 @@ export function detectProjects(root) {
     const wrapper = files.includes(path.posix.join(path.posix.dirname(rel), 'mvnw')) || files.includes(path.posix.join(path.posix.dirname(rel), 'mvnw.cmd'));
     const cmd = wrapper ? (process.platform === 'win32' ? 'mvnw.cmd spring-boot:run' : './mvnw spring-boot:run') : 'mvn spring-boot:run';
     const alias = `${aliasBase}-${candidates.length + 1}`.slice(0, 32);
-    candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'java', command: cmd, expectedImage: 'java.exe' }, confidence: 'medium', evidence: { file: rel, rule: wrapper ? 'maven-spring-boot-wrapper' : 'maven-spring-boot-plugin' } });
+    candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'java', command: cmd, expectedImage: `java${exeSuffix}` }, confidence: 'medium', evidence: { file: rel, rule: wrapper ? 'maven-spring-boot-wrapper' : 'maven-spring-boot-plugin' } });
   }
   for (const marker of ['requirements.txt', 'pyproject.toml']) {
     for (const rel of files.filter((f) => path.basename(f) === marker)) {
@@ -62,8 +64,8 @@ export function detectProjects(root) {
       if (!app && !django) continue;
       const projectRoot = path.resolve(absoluteRoot, path.dirname(rel));
       const alias = `${aliasBase}-${candidates.length + 1}`.slice(0, 32);
-      const command = django ? 'python manage.py runserver' : `python -m flask --app ${app} run`;
-      candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'python', command, expectedImage: 'python.exe' }, confidence: 'medium', evidence: { file: rel, rule: django ? 'django-manage.py' : 'flask-app.py' } });
+      const command = django ? `${pythonExec} manage.py runserver` : `${pythonExec} -m flask --app ${app} run`;
+      candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'python', command, expectedImage: `python${exeSuffix}` }, confidence: 'medium', evidence: { file: rel, rule: django ? 'django-manage.py' : 'flask-app.py' } });
     }
   }
   for (const rel of files.filter((f) => path.basename(f) === 'go.mod')) {

@@ -4,7 +4,9 @@
 
 > 当前可用：Java / Spring Boot、Python、Vue/React/Vite 等 Node 前端及其他主流栈的项目识别与启动、Standalone JRebel 环境初始化、热加载验证，以及 `manager.mjs` 跨项目运行管理 P0 与其 `ui` 统一只读 Web 管理台（日志 + 项目文件；命令与使用规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节，能力与验收基线见 [design.md](docs/design.md)）。
 >
-> 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管进程跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的应用进程，**不接管 IDEA / 手工启动的外部进程**。受管两种形态：直连真实可执行进程（`.exe`/`.com`），或命令模式（`command`+`expectedImage`——manager 拉起脚本命令后在后代中发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run` 等脚本/复合命令）。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
+> 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管进程跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的应用进程，**不接管 IDEA / 手工启动的外部进程**。受管两种形态：直连真实可执行进程（`.exe`/`.com`，Linux 为无扩展名的真实 ELF），或命令模式（`command`+`expectedImage`——manager 拉起脚本命令后在后代中发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run` 等脚本/复合命令）。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
+>
+> **平台支持**：Windows 11 + PowerShell 7（受管身份核验/终止/端口诊断走 `ps/*.ps1`）与 **Linux（`/proc`，纯 Node，无 pwsh 依赖）**。macOS 暂不支持（无 `/proc`），命令会以 `PLATFORM_UNSUPPORTED` 明确拒绝。Windows 与 Linux 的受管目标都必须是可核验身份的真实进程；shell 脚本（`#!`）与 `.cmd`/`.bat`/`.ps1` 包装不能作为 `exe`，请用命令模式或解析到真实解释器。
 
 ## 安装
 
@@ -32,16 +34,23 @@ docs/design.md                   # 跨项目管理设计与验收基线（P0 已
 skills/project-runner/
 ├── SKILL.md
 └── scripts/
-    ├── manager.mjs              # 跨项目运行管理 P0
+    ├── manager.mjs              # 跨项目运行管理 P0（CLI 入口）
+    ├── log-writer.mjs           # detached 日志转发/轮转
+    ├── lib/                     # 领域模块：probe/locks/runtime/launch/desc/commands/...
+    │   └── proc-linux.mjs       # Linux /proc 身份核验、终止、后代发现、端口诊断
     ├── manager-ui/
     │   ├── index.html           # manager ui 只读管理台页面
     │   └── server.mjs           # ui 本地服务（127.0.0.1 + 一次性令牌）
     ├── ps/
-    │   └── proc.ps1             # 受管进程身份核验与终止适配
+    │   ├── proc.ps1             # Windows 受管进程身份核验与终止适配
+    │   └── port.ps1             # Windows 端口占用诊断
     └── test/
+        ├── platform.mjs         # 跨平台测试辅助（探针探测/可执行文件查找/进程清理）
         ├── ui-smoke.mjs         # manager ui 冒烟测试（隔离 --home，不碰真实数据）
-        ├── cli-smoke.mjs        # manager CLI 冒烟测试（remove / prune / logs 统一日志源）
-        └── runtime-smoke.mjs    # 受管生命周期冒烟（真实 node/python 直连 + 命令模式 + 拒绝路径）
+        ├── manager-smoke.mjs    # CLI 生命周期/未结记录/ack 冒烟
+        ├── cli-smoke.mjs        # remove / prune / logs 统一日志源
+        ├── runtime-smoke.mjs    # 受管生命周期冒烟（真实 node/python 直连 + 命令模式 + 拒绝路径）
+        └── log-rotation.mjs     # 日志大小上限与轮转
 ```
 
 ## 来源与兼容性
@@ -56,4 +65,14 @@ skills/project-runner/
 
 Skill 负责理解目标项目，确定性脚本只负责需要可靠重复执行的操作。不要为了支持更多语言预先引入通用适配框架、Daemon、数据库或 MCP。跨项目能力的验收要求见 [design.md](docs/design.md)。
 
-改动 `manager.mjs` / `manager-ui` 后运行冒烟测试：`node skills/project-runner/scripts/test/ui-smoke.mjs`、`node skills/project-runner/scripts/test/runtime-smoke.mjs` 与 `node skills/project-runner/scripts/test/cli-smoke.mjs`（未安装 pwsh 7 时自动跳过依赖应用锁与身份核验的检查）。
+改动 `manager.mjs` / `manager-ui` / `lib` 后运行全部冒烟测试：
+
+```bash
+node skills/project-runner/scripts/test/log-rotation.mjs
+node skills/project-runner/scripts/test/ui-smoke.mjs
+node skills/project-runner/scripts/test/manager-smoke.mjs
+node skills/project-runner/scripts/test/cli-smoke.mjs
+node skills/project-runner/scripts/test/runtime-smoke.mjs
+```
+
+CI 在 `windows-latest` 与 `ubuntu-latest` 上跑同一组测试：Windows 使用 pwsh 7 的真实探针；Linux 使用 `/proc`，缺 pwsh 时自动跳过仅 Windows 的断言。macOS 未纳入支持范围。

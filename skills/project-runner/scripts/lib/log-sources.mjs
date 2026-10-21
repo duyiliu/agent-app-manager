@@ -246,7 +246,10 @@ export function followLogs(rt, runId, file, initialLines) {
               const buf = Buffer.alloc(len);
               fs.readSync(fd, buf, 0, len, pos);
               try { process.stdout.write(decoder.decode(buf, { stream: true })); }
-              catch { decoder = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
+              catch {
+                try { decoder = new TextDecoder('gbk'); } catch { decoder = new TextDecoder('utf-8'); }
+                process.stdout.write(decoder.decode(buf));
+              }
             } finally {
               fs.closeSync(fd);
             }
