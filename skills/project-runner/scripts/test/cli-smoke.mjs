@@ -121,7 +121,7 @@ await check('list-sources：JSON 输出与 ui 同一数据（hint + .tmp + 批�
   assert.equal(ls.json.ok, true);
   assert.equal(ls.json.command, 'logs');
   const srcs = ls.json.data.sources.map((s) => s.src);
-  assert(srcs.includes('hint:0'), `缺 hint:0：${srcs.join(',')}`);
+  assert(srcs.some((s) => /^hint:[0-9a-f]{12}$/.test(s)), `缺 hint:<hash> 线索源：${srcs.join(',')}`);
   assert(srcs.some((s) => s.startsWith('tmp:jrebel-local-')), `缺 .tmp 兼容日志：${srcs.join(',')}`);
 });
 await check('list-sources：受管应用列批次源，人类可读输出可用', async () => {
@@ -130,12 +130,15 @@ await check('list-sources：受管应用列批次源，人类可读输出可用'
   assert(ls.text.includes('run:rkeep1.stdout'));
   assert(ls.text.includes('run:rold1.stdout'));
 });
-await check('--src hint:0 与 ui 同源同内容', async () => {
-  const hint = await run(['logs', 'unman', '--src', 'hint:0', '--json']);
+await check('--src hint:<hash> 与 ui 同源同内容', async () => {
+  const ls = await run(['logs', 'unman', '--list-sources', '--json']);
+  const hintSrc = ls.json.data.sources.find((s) => s.src.startsWith('hint:'))?.src;
+  assert(hintSrc, '应有 hint:<hash> 线索源');
+  const hint = await run(['logs', 'unman', '--src', hintSrc, '--json']);
   assert.equal(hint.code, 0);
-  const t = mgr.resolveSource(home, 'unman', 'hint:0'); // ui /api/tail 用同一解析
+  const t = mgr.resolveSource(home, 'unman', hintSrc); // ui /api/tail 用同一解析
   assert.equal(hint.json.data.file, t.file);
-  assert.equal(hint.json.data.src, 'hint:0');
+  assert.equal(hint.json.data.src, hintSrc);
   assert.equal(hint.json.data.lines.join('\n'), fs.readFileSync(t.file, 'utf8').trimEnd());
 });
 await check('--src tmp:<name> 与 ui 同源同内容', async () => {
@@ -180,12 +183,12 @@ await check('--stream both + --follow、--follow + --json 退出码 1', async ()
   assert.equal((await run(['logs', 'ok', '--stream', 'both', '--follow'])).code, 1);
   assert.equal((await run(['logs', 'ok', '--follow', '--json'])).code, 1);
 });
-await check('非受管默认 logs 报错并指引 --src hint:N（退出码 2）', async () => {
+await check('非受管默认 logs 报错并指引 --src hint:<hash>（退出码 2）', async () => {
   const r = await run(['logs', 'unman']);
   assert.equal(r.code, 2);
   assert(r.text.includes('非受管'));
   assert(r.text.includes('nohup.out'));
-  assert(r.text.includes('--src hint:N'));
+  assert(r.text.includes('--src hint:<hash>'));
 });
 
 // ---------- prune ----------
