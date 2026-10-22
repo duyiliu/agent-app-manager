@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { hasProcessProbe, isWindows } from './platform.mjs';
+import { psProc, verifyRuns } from '../lib/probe.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-manager-smoke-'));
@@ -190,6 +191,13 @@ try {
     assert.equal(j.data.run.pid, currentPid);
   });
 
+  lifecycle('批量核验 verify-batch 与逐条核验结果一致', () => {
+    const cur = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${appId}.json`), 'utf8')).current;
+    const one = psProc('verify', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+    const batch = verifyRuns([{ pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image }]);
+    assert.equal(batch.length, 1);
+    assert.equal(batch[0].result, one.result, `批量与逐条不一致：${JSON.stringify(batch[0])} vs ${JSON.stringify(one)}`);
+  });
   lifecycle('重复 start → ALREADY_RUNNING（退出码 3）', () => {
     const j = expectFail(run(['start', 'smoke']), 3, 'ALREADY_RUNNING');
     assert(j.error.message.includes('已有受管实例在运行'));
