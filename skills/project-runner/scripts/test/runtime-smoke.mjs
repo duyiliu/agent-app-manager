@@ -32,6 +32,12 @@ fs.writeFileSync(path.join(projAmb, 'srv.js'),
 // 自身再 spawn 一个 node 子进程 → wrapper 后代中稳定出现 2 个 node.exe，用于歧义拒绝
 fs.writeFileSync(path.join(projAmb, 'two.js'),
   'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1e3)"],{stdio:"ignore"});\nsetInterval(() => {}, 1000);\n', 'utf8');
+// 自身 spawn 一个非 node 后代（cmd→ping / sh→sleep 两级链）：--tree 验收用，
+// 后代不含 node.exe，expectedImage 发现仍唯一（#39）。
+fs.writeFileSync(path.join(projAmb, 'tree-parent.js'),
+  'require("node:child_process").spawn(process.platform==="win32"?"cmd.exe":"sh",'
+  + 'process.platform==="win32"?["/c","ping -n 600 127.0.0.1 >nul"]:["-c","sleep 600"],{stdio:"ignore"});\n'
+  + 'console.log("tree-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
 fs.writeFileSync(path.join(projPy, 'srv.py'),
   'import time\nprint("py-ready", flush=True)\nwhile True:\n    time.sleep(1)\n', 'utf8');
 
@@ -54,6 +60,17 @@ const logHas = async (file, needle) => {
     await wait(500);
   }
   return false;
+};
+// 单 pid 存活探测（--tree 验收断言用）
+const pidAlive = (pid) => {
+  if (!pid) return false;
+  if (isWindows) {
+    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue) -ne $null`],
+      { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    return (r.stdout || '').trim() === 'True';
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
 let failed = 0;
@@ -189,6 +206,42 @@ try {
     assert.equal(cli('restart', 'cmdapp').code, 0);
     assert.equal(cli('status', 'cmdapp').json.data.status, 'RUNNING');
     assert.equal(cli('stop', 'cmdapp').code, 0);
+  });
+  // ---------- stop --tree：仅终止当时仍在的后代（#39） ----------
+  await check('默认 stop 不触碰目标后代（存活留证）', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdtree', root: projAmb, entry: 'tree', mode: 'node',
+      command: 'node tree-parent.js', expectedImage: NODE_IMAGE,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
+    assert(await logHas(rt.current.logPaths.stdout, 'tree-ready'), 'stdout 未见 tree-ready');
+    const kids = listDescendants(rt.current.pid);
+    assert.ok(kids.length >= 1, '目标未产生后代进程');
+    const stop = cli('stop', 'cmdtree');
+    assert.equal(stop.code, 0, stop.text);
+    assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
+    assert.ok(!stop.json.data.treeKilled?.length, '不带 --tree 不应有树终止证据');
+    const alive = kids.filter(pidAlive);
+    assert.ok(alive.length >= 1, '不带 --tree 时后代被误杀');
+    for (const p of alive) strayPids.push(p);
+  });
+  await check('stop --tree 连当时仍在的后代一并终止并留证', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('restart', 'cmdtree');
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
+    assert(await logHas(rt.current.logPaths.stdout, 'tree-ready'), '重启后 stdout 未见 tree-ready');
+    const kids = listDescendants(rt.current.pid);
+    assert.ok(kids.length >= 1, '重启后目标未产生后代进程');
+    const stop = cli('stop', 'cmdtree', '--tree');
+    assert.equal(stop.code, 0, stop.text);
+    const killed = stop.json.data.treeKilled ?? [];
+    assert.ok(killed.length >= 1, 'treeKilled 未留证');
+    for (const p of kids) assert(!pidAlive(p), `--tree 后后代 ${p} 仍存活`);
   });
   await check('command 模式歧义拒绝：多候选 DISCOVERY_AMBIGUOUS 不任选', () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');

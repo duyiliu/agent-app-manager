@@ -101,6 +101,26 @@ export function portConflict(port, force, ignorePid = null) {
   throw conflictError('PORT_IN_USE', `预期端口 ${port} 已监听，拒绝启动；占用证据见详情。外部进程仅诊断，不接管、不停止；如确认仍要继续请用 --force`, { port, occupants, forced: false });
 }
 
+// 枚举目标进程当时仍在的后代（PPID 树）：stop --tree 在终止目标前留证（#39）。
+// 只返回当时仍在的后代链，不向上爬、不认领外部进程。
+export function listDescendants(pid) {
+  ensureSupported();
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  if (IS_LINUX) return linuxProc.descendants(pid);
+  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'descendants', '-Id', String(pid)],
+    { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  if (r.error) {
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
+    throw dependencyError(`pwsh 调用失败：${r.error.message}`);
+  }
+  if (r.status !== 0) throw dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+  const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
+  if (!line) return [];
+  let parsed;
+  try { parsed = JSON.parse(line); } catch { throw dependencyError(`proc.ps1 输出无法解析：${line}`); }
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
 // 批量核验受管运行记录：一次 pwsh 调用处理 N 项（Linux 走 /proc，无 spawn 开销）。
 // 结果顺序与入参一致；失败时抛环境依赖错误，调用方应回退逐条核验。
 export function verifyRuns(runs) {

@@ -9,7 +9,7 @@ import { SCHEMA_VERSION } from './constants.mjs';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
-import { psProc, verifyRun, verifyRuns, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
+import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
 import { withLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
@@ -389,21 +389,52 @@ export function cmdStart(ctx, ref) {
   });
 }
 
+// stop --tree：先采集当时仍在的后代身份。目标终止后 Linux 会把子进程 reparent，
+// 届时无法再按 PPID 定位，因此必须在终止前留证（#39）。
+function snapshotDescendants(pid) {
+  let kids = [];
+  try { kids = listDescendants(pid); } catch { return []; }
+  const out = [];
+  for (const kid of kids) {
+    if (!Number.isInteger(kid?.pid)) continue;
+    try {
+      const id = psProc('capture', { id: kid.pid });
+      if (id.result === 'ok') out.push({ pid: kid.pid, creationFileTime: id.creationFileTime, image: id.image });
+    } catch { /* 后代可能已自行退出 */ }
+  }
+  return out;
+}
+
+function killDescendantSnapshot(snapshot) {
+  const killed = [];
+  for (const item of snapshot) {
+    let t;
+    try { t = psProc('terminate', { id: item.pid, creationFileTime: item.creationFileTime, image: item.image }); }
+    catch { continue; }
+    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound') {
+      killed.push({ pid: item.pid, image: item.image });
+    }
+  }
+  return killed;
+}
+
 // 停止核心逻辑：返回 {result: stopped|alreadyStopped} 或抛错；调用方负责落账
-function stopCurrent(home, appId, app, rt) {
+function stopCurrent(home, appId, app, rt, opts = {}) {
   const cur = rt.current;
   if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供停止`);
   if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
   if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
   if (cur.phase === 'STOPPED') return { result: 'alreadyStopped', runId: cur.runId };
+  const treeSnapshot = opts.tree ? snapshotDescendants(cur.pid) : [];
   const t = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
   if (t.result === 'terminated') {
+    const treeKilled = killDescendantSnapshot(treeSnapshot); // --tree：终止当时仍在的后代
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = 'terminated(137) 有界强制停止；不保证优雅关机';
     cleanupWrapper(rt); // 命令模式：目标死后尽力清理残留 cmd wrapper
     writeRuntime(home, appId, rt);
-    return { result: 'stopped', runId: cur.runId, pid: cur.pid };
+    return { result: 'stopped', runId: cur.runId, pid: cur.pid, treeKilled };
   }
   if (t.result === 'exited' || t.result === 'notfound') {
     cur.phase = 'STOPPED';
@@ -490,6 +521,7 @@ export function cmdCleanupWrapper(ctx, ref) {
 
 export function cmdStop(ctx, ref) {
   if (!ref) throw usageError('stop 需要 <alias|appId>');
+  const tree = ctx.rest.includes('--tree');
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLock(ctx.home, appId, 'stop', () => {
@@ -497,13 +529,13 @@ export function cmdStop(ctx, ref) {
     const app = reg.apps[appId];
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
-    return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt) };
+    return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt, { tree }) };
   });
 }
 
 export function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag' });
+  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag', '--tree': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
@@ -516,7 +548,7 @@ export function cmdRestart(ctx, ref) {
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = app.command ? null : resolveExe(app.exe, cwd);
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
-    const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
+    const stopResult = stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree') }); // 必须确认退出才继续；抛错则中止，绝不先起后停
     app.cwd = cwd;
     app.exe = exe;
     app.updatedAt = new Date().toISOString();

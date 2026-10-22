@@ -253,6 +253,32 @@ export function selfIdentity() {
 
 // 批量核验：与 verify 同语义（boot_id:starttime + image），Linux 侧无 spawn 成本，
 // 仅为与 Windows 的 verify-batch 保持同一接口。
+// 枚举目标 pid 当时仍在的后代（PPID 树）：供 stop --tree 在终止目标前留证。
+export function descendants(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  const rows = snapshotProcesses();
+  if (rows.error) return [];
+  const byParent = new Map();
+  for (const [child, s] of rows) {
+    if (!byParent.has(s.ppid)) byParent.set(s.ppid, []);
+    byParent.get(s.ppid).push(child);
+  }
+  const out = [];
+  const queue = [pid];
+  const seen = new Set();
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const child of byParent.get(cur) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      queue.push(child);
+      const s = rows.get(child);
+      out.push({ pid: child, image: readImage(child, s.comm), comm: s.comm });
+    }
+  }
+  return out;
+}
+
 export function verifyBatch(items) {
   return (items ?? []).map((it) => {
     try { return verify(it.id ?? it.pid, it); } catch (e) { return { result: 'error', code: 'verifyFailed', message: e.message }; }
@@ -261,6 +287,7 @@ export function verifyBatch(items) {
 
 export function run(action, params = {}) {
   switch (action) {
+    case 'descendants': return descendants(params.id);
     case 'verify-batch': return verifyBatch(params.items);
     case 'capture': return capture(params.id);
     case 'verify': return verify(params.id, params);

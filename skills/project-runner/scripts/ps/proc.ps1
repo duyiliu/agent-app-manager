@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'discover')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'discover', 'descendants')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -139,6 +139,41 @@ function Convert-Result([string]$raw) {
 
 # verify-batch：一次 pwsh 调用逐项核验，避免 list 对 N 个应用 spawn N 次（#15/#51）。
 # 与 verify 走同一 ProcUtil.Verify（同句柄核验），语义完全一致。
+# descendants：枚举目标 pid 当时仍在的后代（PPID 树），供 stop --tree 留证（#39）。
+# 只向下遍历，不向上爬、不认领外部进程。
+if ($Action -eq 'descendants') {
+  $procs = @()
+  try {
+    $procs = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath -ErrorAction SilentlyContinue)
+  } catch {
+    '[]'
+    exit 0
+  }
+  $byParent = @{}
+  foreach ($p in $procs) {
+    $pp = [int64]$p.ParentProcessId
+    if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = New-Object System.Collections.ArrayList }
+    [void]$byParent[$pp].Add([int64]$p.ProcessId)
+  }
+  $out = New-Object System.Collections.ArrayList
+  $queue = New-Object System.Collections.Queue
+  $queue.Enqueue([int64]$Id)
+  $seen = @{}
+  while ($queue.Count -gt 0) {
+    $cur = $queue.Dequeue()
+    if (-not $byParent.ContainsKey($cur)) { continue }
+    foreach ($child in $byParent[$cur]) {
+      if ($seen.ContainsKey($child)) { continue }
+      $seen[$child] = $true
+      $queue.Enqueue($child)
+      $proc = $procs | Where-Object { [int64]$_.ProcessId -eq $child } | Select-Object -First 1
+      [void]$out.Add([pscustomobject]@{ pid = [int]$child; image = [string]$proc.ExecutablePath })
+    }
+  }
+  if ($out.Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress }
+  exit 0
+}
+
 if ($Action -eq 'verify-batch') {
   if (-not $Json) {
     [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
@@ -164,7 +199,7 @@ if (($Action -in 'verify', 'terminate') -and (($Id -le 0) -or (-not $CreationFil
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
-if (($Action -in 'capture') -and ($Id -le 0)) {
+if (($Action -in 'capture', 'descendants') -and ($Id -le 0)) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }

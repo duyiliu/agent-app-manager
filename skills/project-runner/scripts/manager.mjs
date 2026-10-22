@@ -142,7 +142,7 @@ function renderHuman(command, data) {
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'stop':
-      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.note ? `；${data.note}` : ''}`;
+      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.treeKilled?.length ? `；后代已终止 ${data.treeKilled.length} 个` : ''}${data.note ? `；${data.note}` : ''}`;
     case 'remove':
       return [
         `已移除登记 ${data.alias} (${data.appId})`,
@@ -201,9 +201,9 @@ function usageText() {
     '  doctor [--json]                    只读自检（不修复）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
-    '  stop <alias|appId>                有界强制停止（仅受管实例）',
+    '  stop <alias|appId> [--tree]       有界强制停止（仅受管实例）；--tree 连同当时仍在的后代进程一并终止',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
-    '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
+    '  restart <alias|appId> [--force] [--tree]   确认退出后重启（仅受管实例；--tree 同 stop）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
@@ -262,8 +262,8 @@ async function main() {
       if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
-      const allowedFlag = { status: '--probe', restart: '--force' }[command];
-      const bad = ctx.rest.slice(1).find((a) => a !== allowedFlag);
+      const allowedFlags = { status: new Set(['--probe']), stop: new Set(['--tree']), restart: new Set(['--force', '--tree']) }[command] ?? new Set();
+      const bad = ctx.rest.slice(1).find((a) => !allowedFlags.has(a));
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
     }
     switch (command) {
