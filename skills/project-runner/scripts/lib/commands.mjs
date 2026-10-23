@@ -10,7 +10,7 @@ import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWrite
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
 import { psProc, verifyRun, verifyRuns, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
-import { withLock } from './locks.mjs';
+import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
@@ -52,14 +52,13 @@ export function parseNamed(args, spec) {
   };
 }
 
-export function cmdStartNew(ctx) {
+export async function cmdStartNew(ctx) {
   const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value', '--force': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
   const appId = computeAppId(desc.root, desc.entry);
-  return withLock(ctx.home, appId, 'start-new', () => {
-    const reg = readRegistry(ctx.home);
+  return withLockAsync(ctx.home, appId, 'start-new', async () => {
     // 已有受管实例在运行则拒绝（并发/重复启动只允许一份实例）
     const rt = readRuntimeStrict(ctx.home, appId);
     if (rt && rt.current && rt.current.managed && rt.current.phase === 'RUNNING') {
@@ -71,9 +70,13 @@ export function cmdStartNew(ctx) {
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const portEvidence = portConflict(desc.expectedPort, opts.has('--force'));
-    const app = upsertApp(reg, appId, desc);
-    atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
+    const app = withRegistryLock(ctx.home, 'start-new', () => {
+      const reg = readRegistry(ctx.home);
+      const a = upsertApp(reg, appId, desc);
+      atomicWriteJson(registryPath(ctx.home), reg);
+      return a;
+    });
+    const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
@@ -95,6 +98,7 @@ export function cmdRecordUnmanaged(ctx) {
   const logHints = (opts.getAll('--log-hints') ?? []).flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
   if (logHints.some((h) => !path.isAbsolute(h))) throw usageError('--log-hints 需要绝对路径');
   return withLock(ctx.home, appId, 'record-unmanaged', () => {
+    const regResult = withRegistryLock(ctx.home, 'record-unmanaged', () => {
     const reg = readRegistry(ctx.home);
     for (const app of Object.values(reg.apps)) {
       if (app.appId !== appId && app.alias.toLowerCase() === String(d.alias).toLowerCase()) {
@@ -132,22 +136,24 @@ export function cmdRecordUnmanaged(ctx) {
       };
     }
     atomicWriteJson(registryPath(ctx.home), reg);
+    return { mode: reg.apps[appId].mode, alias: reg.apps[appId].alias, replaced: !!existing, wasManaged, now };
+    });
     const rt = readRuntimeStrict(ctx.home, appId) ?? { schemaVersion: SCHEMA_VERSION, appId, prevRuns: [] };
     archiveCurrent(rt);
     rt.current = {
-      runId: newRunId(), phase: 'UNKNOWN', managed: false, mode: reg.apps[appId].mode,
-      intentAt: now, startedAt: now, pid: null, creationFileTime: null, image: null,
+      runId: newRunId(), phase: 'UNKNOWN', managed: false, mode: regResult.mode,
+      intentAt: regResult.now, startedAt: regResult.now, pid: null, creationFileTime: null, image: null,
       envResolved: [], logPaths: null, logHints,
       lastError: null, endedAt: null,
       note: 'Skill 在既有授权下执行的启动，未托管目标进程；仅记录尝试与日志线索',
     };
     writeRuntime(ctx.home, appId, rt);
     return {
-      appId, alias: reg.apps[appId].alias, runId: rt.current.runId,
+      appId, alias: regResult.alias, runId: rt.current.runId,
       managed: false, status: 'UNKNOWN', logHints,
-      replaced: !!existing,
-      ...(wasManaged ? { replacedManaged: true } : {}),
-      note: wasManaged
+      replaced: regResult.replaced,
+      ...(regResult.wasManaged ? { replacedManaged: true } : {}),
+      note: regResult.wasManaged
         ? '已用 --force 覆盖同 appId 的受管登记：原受管身份与进程追踪证据不再可用（运行记录与日志证据仍保留）'
         : '非受管登记不提供 RUNNING/STOPPED 断言与跨会话启停；日志线索仅原路径关联',
     };
@@ -349,16 +355,15 @@ export async function cmdStatus(ctx, ref, probeRequested = false) {
 }
 
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
-export function cmdStart(ctx, ref) {
+export async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value', '--force': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
-  return withLock(ctx.home, appId, 'start', () => {
-    const reg = readRegistry(ctx.home);
-    const app = reg.apps[appId];
+  return withLockAsync(ctx.home, appId, 'start', async () => {
+    const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) {
       throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置；需 Skill 重新分析该项目并走 start-new`);
     }
@@ -373,11 +378,16 @@ export function cmdStart(ctx, ref) {
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
-    app.cwd = cwd;
-    app.exe = exe;
-    app.updatedAt = new Date().toISOString();
-    atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
+    const appForLaunch = withRegistryLock(ctx.home, 'start', () => {
+      const reg = readRegistry(ctx.home);
+      const a = reg.apps[appId];
+      a.cwd = cwd;
+      a.exe = exe;
+      a.updatedAt = new Date().toISOString();
+      atomicWriteJson(registryPath(ctx.home), reg);
+      return a;
+    });
+    const cur = await launchManaged(ctx.home, appId, appForLaunch, { abandonRunId: abandon?.runId ?? null });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
@@ -501,15 +511,14 @@ export function cmdStop(ctx, ref) {
   });
 }
 
-export function cmdRestart(ctx, ref) {
+export async function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
-  return withLock(ctx.home, appId, 'restart', () => {
-    const reg = readRegistry(ctx.home);
-    const app = reg.apps[appId];
+  return withLockAsync(ctx.home, appId, 'restart', async () => {
+    const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
@@ -517,11 +526,16 @@ export function cmdRestart(ctx, ref) {
     const exe = app.command ? null : resolveExe(app.exe, cwd);
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
     const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
-    app.cwd = cwd;
-    app.exe = exe;
-    app.updatedAt = new Date().toISOString();
-    atomicWriteJson(registryPath(ctx.home), reg);
-    const cur = launchManaged(ctx.home, appId, app);
+    const appForLaunch = withRegistryLock(ctx.home, 'restart', () => {
+      const reg = readRegistry(ctx.home);
+      const a = reg.apps[appId];
+      a.cwd = cwd;
+      a.exe = exe;
+      a.updatedAt = new Date().toISOString();
+      atomicWriteJson(registryPath(ctx.home), reg);
+      return a;
+    });
+    const cur = await launchManaged(ctx.home, appId, appForLaunch);
     return {
       appId, alias: app.alias, stop: stopResult,
       start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths, ...(portEvidence ? { portEvidence } : {}) },
@@ -569,8 +583,11 @@ export function cmdRemove(ctx, ref) {
           { ackRunId, current: { runId: rt.current.runId, phase: rt.current.phase, managed: rt.current.managed } });
       }
     }
-    delete reg.apps[appId];
-    atomicWriteJson(registryPath(ctx.home), reg);
+    withRegistryLock(ctx.home, 'remove', () => {
+      const regW = readRegistry(ctx.home);
+      delete regW.apps[appId];
+      atomicWriteJson(registryPath(ctx.home), regW);
+    });
     return {
       appId, alias: app.alias, removed: true,
       runtimeFile: runtimePath(ctx.home, appId),

@@ -312,6 +312,38 @@ try {
     expectFail(run(['start', 'smoke', '--ack-unresolved', 'rfakestuck1']), 3, 'ACK_MISMATCH');
   });
 
+  lifecycle('并发 start-new 不同 alias 双双登记（#22 registry 全局锁防丢更新）', () => {
+    const mkDesc = (alias) => {
+      const f = path.join(base, `desc-${alias}.json`);
+      fs.writeFileSync(f, JSON.stringify({
+        alias, root: proj, entry: alias, mode: 'java',
+        exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'], envRefs: [],
+      }));
+      return f;
+    };
+    const files = [mkDesc('conc-a'), mkDesc('conc-b')];
+    const driver = path.join(base, 'concurrent-driver.cjs');
+    fs.writeFileSync(driver,
+      `const {spawn}=require('child_process');`
+      + `const M=${JSON.stringify(MANAGER)},H=${JSON.stringify(home)},F=${JSON.stringify(files)};`
+      + 'Promise.all(F.map((f)=>new Promise((res)=>{'
+      + "const c=spawn(process.execPath,[M,'--home',H,'--json','start-new','--desc',f]);"
+      + "let o='';c.stdout.on('data',(d)=>{o+=d;});"
+      + "c.on('close',(code)=>res({code,out:o}));}))).then((rs)=>console.log(JSON.stringify(rs)));");
+    const r = spawnSync(process.execPath, [driver], { encoding: 'utf8', timeout: 120000 });
+    const rs = JSON.parse(r.stdout);
+    assert.equal(rs.length, 2, `驱动输出异常：${r.stdout}${r.stderr}`);
+    for (const x of rs) {
+      const j = JSON.parse(x.out);
+      assert(j.ok, `并发 start-new 失败（code=${x.code}）：${x.out}`);
+    }
+    const list = expectOk(run(['list']));
+    const aliases = list.data.apps.map((a) => a.alias);
+    assert(aliases.includes('conc-a') && aliases.includes('conc-b'), `注册表丢更新：${JSON.stringify(aliases)}`);
+    expectOk(run(['stop', 'conc-a']));
+    expectOk(run(['stop', 'conc-b']));
+  });
+
   lifecycle('文本模式人类可读输出抽查（status 含 port/状态）', () => {
     const r = run(['status', 'smoke'], { json: false });
     assert.equal(r.code, 0);

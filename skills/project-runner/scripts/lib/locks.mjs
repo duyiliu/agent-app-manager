@@ -15,6 +15,30 @@ function holderAlive(holder) {
   return String(r.creationFileTime) === String(holder.creationFileTime); // 复用 → 视为死锁可回收
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// 读取锁持有者，容忍「先占位后补全」的写入窗口：内容不完整时短时重试，
+// 仍不完整返回 null（调用方按 LOCK_CORRUPT 拒绝静默处理）。
+function readHolder(file) {
+  for (let i = 0; i < 4; i++) {
+    let holder;
+    try { holder = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { holder = null; }
+    if (holder && typeof holder === 'object' && typeof holder.pid === 'number') return holder;
+    if (i < 3) sleepSync(100);
+  }
+  return null;
+}
+
+// 占位持有者（pid 有值、creationFileTime 未补全）只能按 pid 查存活：进程明确
+// 已退出才可回收；存活或无法核验一律保守视为存活（无法排除 PID 复用）。
+function placeholderAlive(holder) {
+  const r = psProc('capture', { id: holder.pid });
+  if (r.result === 'notfound' || r.result === 'exited') return false;
+  return true;
+}
+
 function acquireLock(home, name, op) {
   const file = lockPath(home, name);
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -23,19 +47,14 @@ function acquireLock(home, name, op) {
       fd = fs.openSync(file, 'wx');
     } catch (e) {
       if (e.code !== 'EEXIST') throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
-      let holder;
-      try {
-        holder = JSON.parse(fs.readFileSync(file, 'utf8'));
-      } catch (e2) {
-        throw dataError('LOCK_CORRUPT', `锁文件损坏，拒绝静默处理；人工核验后删除：${file}（${e2.message}）`);
-      }
-      if (!holder || typeof holder !== 'object') {
-        throw dataError('LOCK_CORRUPT', `锁文件内容不是持有者对象，拒绝静默处理；人工核验后删除：${file}`);
+      const holder = readHolder(file);
+      if (!holder) {
+        throw dataError('LOCK_CORRUPT', `锁文件损坏，拒绝静默处理；人工核验后删除：${file}`);
       }
       holder.name = name;
       let alive;
       try {
-        alive = holderAlive(holder);
+        alive = holder.creationFileTime ? holderAlive(holder) : placeholderAlive(holder);
       } catch (e3) {
         if (e3.code === 'PWSH_MISSING' || e3.code === 'LOCK_CORRUPT' || e3.code === 'IDENTITY_UNAVAILABLE') throw e3;
         alive = true; // 权限等未知情形：保守视为存活，拒绝回收
@@ -50,8 +69,12 @@ function acquireLock(home, name, op) {
     }
     let wrote = false;
     try {
+      // 先写占位持有者再补全身份：selfIdentityCapture 可能耗时数百毫秒，
+      // 期间并发读方看到的是可重试的占位内容而不是空文件（#22）。
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
       const me = selfIdentityCapture();
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 'utf8');
+      fs.ftruncateSync(fd, 0);
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 0, 'utf8');
       wrote = true;
     } finally {
       try { fs.closeSync(fd); } catch { /* 忽略 */ }
@@ -75,6 +98,31 @@ export function withLock(home, name, op, fn) {
   } finally {
     release();
   }
+}
+
+// 异步版 withLock：fn 返回 Promise 时锁一直保持到其 settle（用于异步 launch 阶段）。
+export async function withLockAsync(home, name, op, fn) {
+  const release = acquireLock(home, name, op);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+// 注册表全局短时锁：任何 readRegistry→修改→atomicWriteJson 序列都必须在其中执行，
+// 否则不同 appId 并发写入会丢更新（#22）。锁顺序固定为 app 锁 → registry 锁。
+// 持有者每次只读写一瞬间，忙时做有界短重试而不是直接拒绝并发启动。
+export function withRegistryLock(home, op, fn) {
+  for (let i = 0; i < 100; i++) {
+    try {
+      return withLock(home, 'registry', op, fn);
+    } catch (e) {
+      if (e.code !== 'LOCK_BUSY') throw e;
+      sleepSync(50 + Math.floor(Math.random() * 50));
+    }
+  }
+  throw conflictError('LOCK_BUSY', '注册表锁竞争超时，拒绝执行');
 }
 
 export function lockHeld(home, name) {

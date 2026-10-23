@@ -48,7 +48,7 @@ export function cleanupWrapper(rt) {
   } catch { /* best-effort */ }
 }
 
-export function launchManaged(home, appId, app, opts = {}) {
+export async function launchManaged(home, appId, app, opts = {}) {
   const runId = newRunId();
   const logDir = path.join(home, 'logs', appId);
   fs.mkdirSync(logDir, { recursive: true });
@@ -105,10 +105,6 @@ export function launchManaged(home, appId, app, opts = {}) {
       stdio: 'ignore',
       env: { ...process.env, ...(app.env ?? {}) },
     });
-    // spawn 的异步 error（EACCES 等）必须有监听，否则会以未捕获事件终止 manager；
-    // 具体失败仍由下方身份采集/发现路径统一落账并保留证据。spawnError 只是异步事件
-    // 的补充说明：同步 spawn 失败走 catch 分支，不拼接该字段。
-    child.on('error', (err) => { spawnError = err.message; });
     child.unref();
   } catch (e) {
     rt.current.phase = 'UNKNOWN';
@@ -116,6 +112,19 @@ export function launchManaged(home, appId, app, opts = {}) {
     failUnresolved('SPAWN_FAILED', `进程启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: e.message });
   } finally {
     // Logger owns log descriptors; the manager never opens active log files.
+  }
+
+  // spawn 的异步 error（ENOENT/EACCES 等）要等 'spawn'/'error' 事件落定后再继续：
+  // 失败时 child.pid 为 undefined，直接采集会被记成 identity_capture_failed 悬案，
+  // 掩盖真实原因——此时直接落 spawn_failed（#22）。
+  const spawned = await new Promise((resolve) => {
+    child.once('spawn', () => resolve(true));
+    child.once('error', (err) => { spawnError = err; resolve(false); });
+  });
+  if (!spawned) {
+    rt.current.phase = 'UNKNOWN';
+    rt.current.lastError = `spawn_failed: ${spawnError.code ?? spawnError.message}`;
+    failUnresolved('SPAWN_FAILED', `进程启动失败（${spawnError.message}）；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: String(spawnError.code ?? spawnError.message) });
   }
 
   rt.current.startedAt = new Date().toISOString();
@@ -154,7 +163,7 @@ export function launchManaged(home, appId, app, opts = {}) {
       return rt.current;
     }
     rt.current.phase = 'UNKNOWN';
-    rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
+    rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : ''}`;
     failUnresolved('IDENTITY_CAPTURE_FAILED', `已拉起（logger pid=${child.pid}）但目标身份采集失败，标记 UNKNOWN；证据保留，拒绝自动重试`, { targetPid, loggerPid: child.pid, capture: cap });
   }
 
@@ -214,6 +223,6 @@ export function launchManaged(home, appId, app, opts = {}) {
   }
 
   rt.current.phase = 'UNKNOWN';
-  rt.current.lastError = `discovery_failed: ${JSON.stringify(d)}${spawnError ? `; spawn_error: ${spawnError}` : ''}`;
+  rt.current.lastError = `discovery_failed: ${JSON.stringify(d)}${spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : ''}`;
   failUnresolved('DISCOVERY_FAILED', `后代发现失败（${d.code ?? d.result}），标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { wrapperPid: child.pid, detail: d });
 }

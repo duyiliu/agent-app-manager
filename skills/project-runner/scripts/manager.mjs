@@ -63,19 +63,20 @@ const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list'
 
 function emitOk(ctx, command, data) {
   if (data && data.following) return; // follow 模式由自身控制生命周期
-  if (ctx.json) {
-    process.stdout.write(`${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: true, command, data }, null, 2)}\n`);
-  } else {
-    process.stdout.write(`${renderHuman(command, data)}\n`);
-  }
-  process.exit(EXIT.OK);
+  const out = ctx.json
+    ? `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: true, command, data }, null, 2)}\n`
+    : `${renderHuman(command, data)}\n`;
+  // 输出 flush 后再退出：Windows 管道下 stdout 是异步写，立即 exit 会截断大 JSON（#22）
+  process.stdout.write(out, () => process.exit(EXIT.OK));
 }
 
 function emitErr(ctx, command, e) {
   if (ctx.json) {
     const err = { code: e.code ?? 'UNKNOWN', message: e.message };
     if (e.detail !== undefined) err.detail = e.detail;
-    process.stdout.write(`${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: false, command, error: err }, null, 2)}\n`);
+    // 同 emitOk：flush 后再退出，避免 Windows 管道截断（#22）
+    process.stdout.write(`${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: false, command, error: err }, null, 2)}\n`, () => process.exit(e.exitCode ?? 1));
+    return;
   } else {
     let text = `错误[${e.code ?? 'UNKNOWN'}] ${e.message}`;
     if (e.detail) {
@@ -85,7 +86,8 @@ function emitErr(ctx, command, e) {
       text += `\n详情: ${body}`;
       if (typeof stderrTail === 'string' && stderrTail) text += `\nstderr 尾部:\n${stderrTail}`;
     }
-    process.stderr.write(`${text}\n`);
+    process.stderr.write(`${text}\n`, () => process.exit(e.exitCode ?? 1));
+    return;
   }
   process.exit(e.exitCode ?? 1);
 }
@@ -249,7 +251,7 @@ async function main() {
     ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command));
   } catch (e) {
     const c = command ?? 'cli';
-    if (e instanceof ManagerError) emitErr({ json: false }, c, e);
+    if (e instanceof ManagerError) { emitErr({ json: false }, c, e); return; }
     throw e;
   }
   try {
@@ -277,14 +279,14 @@ async function main() {
         data = detectProjects(path.resolve(opts.get('--root')));
         break;
       }
-      case 'start': data = cmdStart(ctx, ctx.rest[0]); break;
+      case 'start': data = await cmdStart(ctx, ctx.rest[0]); break;
       case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
       case 'cleanup-wrapper': data = cmdCleanupWrapper(ctx, ctx.rest[0]); break;
-      case 'restart': data = cmdRestart(ctx, ctx.rest[0]); break;
+      case 'restart': data = await cmdRestart(ctx, ctx.rest[0]); break;
       case 'remove': data = cmdRemove(ctx, ctx.rest[0]); break;
       case 'prune': data = cmdPrune(ctx); break;
       case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;
-      case 'start-new': data = cmdStartNew(ctx); break;
+      case 'start-new': data = await cmdStartNew(ctx); break;
       case 'record-unmanaged': data = cmdRecordUnmanaged(ctx); break;
       case 'ui': await cmdUi(ctx); return; // 前台常驻直到 Ctrl+C，不走 emitOk
       default: throw usageError(`未知命令：${command}\n${usageText()}`);
@@ -295,7 +297,6 @@ async function main() {
     // 退出码仍为 5（数据损坏/内部错误一类），但不冒充 DATA_CORRUPT。
     if (e instanceof ManagerError) emitErr(ctx, command, e);
     else emitErr(ctx, command, new ManagerError('INTERNAL', `内部错误：${e.message}`, EXIT.DATA, { stack: e.stack }));
-    process.exit(5);
   }
 }
 
