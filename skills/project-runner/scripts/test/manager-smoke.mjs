@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { hasProcessProbe, isWindows } from './platform.mjs';
+import { MANAGER_VERSION } from '../lib/constants.mjs';
 import { psProc, verifyRuns } from '../lib/probe.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
@@ -111,7 +112,18 @@ try {
     assert.equal(runAt(emptyHome, ['list']).code, 0);
     assert.equal(runAt(emptyHome, ['logs', 'ghost']).code, 2);
     assert.equal(runAt(emptyHome, ['prune']).code, 0);
+    assert.equal(runAt(emptyHome, ['version']).code, 0);
     assert.equal(fs.existsSync(emptyHome), false, '只读命令不应创建 home');
+  });
+
+  check('version/--version/-v 输出版本号（与 MANAGER_VERSION 一致）', () => {
+    for (const arg of ['version', '--version', '-v']) {
+      const r = runAt(path.join(base, 'empty-home'), ['--json', arg]);
+      assert.equal(r.code, 0, `${arg} 退出码`);
+      assert.equal(r.json.ok, true);
+      assert.equal(r.json.data.version, MANAGER_VERSION, `${arg} 版本号`);
+      assert.match(r.json.data.version, /^\d+\.\d+\.\d+$/, 'semver 形状');
+    }
   });
 
   check('doctor 逐项收集损坏记录并继续输出其余诊断', () => {

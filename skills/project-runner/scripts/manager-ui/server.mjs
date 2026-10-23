@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SCHEMA_VERSION, errorStatus } from '../lib/constants.mjs';
+import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
@@ -64,6 +64,9 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     }
     if (u.pathname === '/api/lifecycle') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '') });
+    }
+    if (u.pathname === '/api/meta') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { version: MANAGER_VERSION } });
     }
     if (u.pathname === '/api/apps') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...api.list(), home } });

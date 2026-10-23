@@ -481,7 +481,7 @@ aside {
 <header class="topbar">
   <div class="brand"><span class="live-dot" aria-hidden="true"></span><div class="brand-text"><span class="kicker">Project Runner</span><strong>运行管理台</strong></div></div>
   <button id="filesBtn" type="button" disabled>文件</button>
-  <span class="badge ro">本地 · v1</span>
+  <span class="badge ro" id="verBadge">本地</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
@@ -1226,6 +1226,7 @@ $('#fdFilter').addEventListener('input', applyTreeFilter);
 $('#fdFilterClear').addEventListener('click', () => { $('#fdFilter').value = ''; applyTreeFilter(); $('#fdFilter').focus(); });
 
 // ---------- 启动 ----------
+api('/api/meta').then((m) => { if (m?.version) $('#verBadge').textContent = `本地 · v${m.version}`; }).catch(() => {});
 loadApps().then(() => {
   const wanted = new URLSearchParams(location.search).get('app');
   const pick = wanted && appsCache.find(a => a.alias === wanted || a.appId === wanted);

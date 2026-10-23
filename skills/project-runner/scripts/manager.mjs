@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { EXIT, SCHEMA_VERSION, ManagerError } from './lib/constants.mjs';
+import { EXIT, SCHEMA_VERSION, MANAGER_VERSION, ManagerError } from './lib/constants.mjs';
 import { usageError } from './lib/errors.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
@@ -24,7 +24,7 @@ import {
 } from './lib/commands.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource } from './lib/log-sources.mjs';
 
-export { SCHEMA_VERSION };
+export { SCHEMA_VERSION, MANAGER_VERSION };
 
 // ---------- 参数与 home ----------
 
@@ -36,7 +36,7 @@ function parseArgv(argv) {
     else if (a === '--home') {
       ctx.home = argv[++i];
       if (!ctx.home) throw usageError('--home 需要绝对路径参数');
-    } else if (ctx.command === null) ctx.command = a;
+    } else if (ctx.command === null) ctx.command = (a === '--version' || a === '-v') ? 'version' : a;
     else ctx.rest.push(a);
   }
   if (!ctx.command || ctx.command === 'help') {
@@ -57,7 +57,7 @@ function resolveHome(argHome, readOnly = false) {
 
 // 只读命令绝不创建 home/子目录；数据缺失由数据层按空数据处理。
 // status 的 RUNNING→STOPPED 落账仅在 home 已存在且有记录时发生，不受影响。
-const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune']);
+const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune', 'version']);
 
 // ---------- 输出 ----------
 
@@ -94,6 +94,8 @@ function emitErr(ctx, command, e) {
 
 function renderHuman(command, data) {
   switch (command) {
+    case 'version':
+      return `project-runner manager v${data.version}`;
     case 'list': {
       if (!data.apps?.length) return data.note ?? '（空）';
       const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'lastRunId';
@@ -197,6 +199,7 @@ function usageText() {
     '用法：node manager.mjs [--home <绝对路径>] [--json] <命令> [参数]',
     '',
     '命令：',
+    '  version                           显示 manager 版本号（--version/-v 同效）',
     '  list                              列出已登记应用与实时状态',
     '  status <alias|appId> [--probe]    单应用详情；--probe 检测本机 TCP 监听',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
@@ -269,6 +272,7 @@ async function main() {
       if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
     }
     switch (command) {
+      case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
       case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
       case 'status': data = await cmdStatus(ctx, ctx.rest[0], ctx.rest.includes('--probe')); break;
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
