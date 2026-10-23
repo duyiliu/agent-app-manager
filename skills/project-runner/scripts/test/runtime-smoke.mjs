@@ -283,6 +283,11 @@ try {
       alias: 'npmdev', root: projNpm, mode: 'node', command: 'npm run dev', expectedImage: NODE_IMAGE, discoverTimeoutMs: 30000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
+    // 失败也先留证：wrapper 与候选进程交给 finally 兑底清理，避免残留孤儿
+    if (r.code !== 0) {
+      strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
+      for (const c of (r.json.error?.detail?.candidates ?? [])) strayPids.push(c.pid);
+    }
     assert.equal(r.code, 0, r.text);
     assert.equal(r.json.data.status, 'RUNNING');
     assert.equal(r.json.data.kind, 'command');
@@ -304,7 +309,7 @@ try {
     const pre = cli('port', String(PORT));
     if (pre.code === 0 && pre.json?.data?.occupants?.length) skip(`端口 ${PORT} 已被占用`);
     const r = cli('start-new', '--desc', descFile({
-      alias: 'portapp', root: projNpm, mode: 'node', exe: 'node', args: ['lsn.js'], env: { PORT: String(PORT) }, expectedPort: PORT,
+      alias: 'portapp', root: projNpm, entry: 'lsn', mode: 'node', exe: 'node', args: ['lsn.js'], env: { PORT: String(PORT) }, expectedPort: PORT,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 0, r.text);
@@ -427,7 +432,7 @@ try {
   // 回归断言：本轮启动的临时进程都已退出（kill 后进程退出需要一点时间，轮询等待）
   let leftover = [];
   for (let i = 0; i < 20; i++) {
-    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|lsn\\.js|npm-cli\\.js|setInterval|sleep 30').filter((pid) => pid !== process.pid);
+    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|lsn\\.js|npm-cli\\.js run dev|setInterval|sleep 30').filter((pid) => pid !== process.pid);
     if (!leftover.length) break;
     await wait(250);
   }

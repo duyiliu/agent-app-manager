@@ -11,8 +11,9 @@ const PIDFD_TERMINATE = fileURLToPath(new URL('../linux/pidfd-terminate.py', imp
 const DISCOVER_SETTLE_MS = 1500;
 const DISCOVER_POLL_MS = 400;
 // 已知包管理器/构建器启动器的命令行特征：同映像单链折叠时只别除命中特征的祖先
-// （npm-cli/yarn/pnpm/maven/gradle wrapper）；其余同映像链仍按歧义拒绝。
-const LAUNCHER_CMD_RE = /npm-cli\.js|yarn\.js|pnpm(\.cjs|\.js)?|[\\/]\.pnpm[\\/]|plexus-classworlds|org\.gradle\.wrapper|gradle-launcher|GradleMain/i;
+// （npm-cli/yarn/pnpm/maven/gradle wrapper，含 npm 重写进程标题后的 "npm run …" 形式）；
+// 其余同映像链仍按歧义拒绝。
+const LAUNCHER_CMD_RE = /npm-cli\.js|yarn\.js|pnpm(\.cjs|\.js)?|[\\/]\.pnpm[\\/]|plexus[.\-]classworlds|org\.gradle\.wrapper|gradle-launcher|GradleMain|^\s*(?:npm|npx|pnpm|yarn|bun)(?:[ /]|$)/i;
 
 function readCmdline(pid) {
   try { return fs.readFileSync(`${PROC}/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim(); }
