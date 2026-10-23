@@ -684,20 +684,15 @@ export function cmdLogs(ctx, ref) {
 
 // ---------- 本地只读 Web 管理台（ui，design.md §2.2 / AC08） ----------
 
-// 固定端口 8199 的占用探测：ui 对所有请求（含 /）都要求令牌，未带令牌时返回
-// 本工具固定形状的 403 JSON，可据此区分"已有 ui 实例"与"被其他程序占用"
+// 固定端口 8199 的占用探测：已有 ui 实例的 / 返回本页面 HTML（含可识别标记），
+// 据此区分"已有 ui 实例"与"被其他程序占用"
 function probeManagerUi(port) {
   return new Promise((resolve) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/', timeout: 800 }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (d) => { body += d; });
-      res.on('end', () => {
-        try {
-          const j = JSON.parse(body);
-          resolve(!!(j && j.schemaVersion === SCHEMA_VERSION && j.ok === false && j.error?.code === 'FORBIDDEN'));
-        } catch { resolve(false); }
-      });
+      res.on('end', () => resolve(res.statusCode === 200 && body.includes('id="roBanner"')));
     });
     req.on('timeout', () => { req.destroy(); resolve(false); });
     req.on('error', () => resolve(false));
@@ -739,7 +734,7 @@ export async function cmdUi(ctx) {
     if (e.code !== 'EADDRINUSE') throw e;
     const ours = await probeManagerUi(port);
     throw conflictError('PORT_IN_USE', ours
-      ? `端口 ${port} 已有 manager ui 实例在运行：请使用该实例启动终端打印的带令牌 URL（令牌每次启动不同），或 --port <N> 换端口`
+      ? `端口 ${port} 已有 manager ui 实例在运行：直接访问 http://127.0.0.1:${port}/，或 --port <N> 换端口另起实例`
       : `端口 ${port} 被其他程序占用：用 --port <N> 换端口（--port 0 为随机端口）`);
   }
 }

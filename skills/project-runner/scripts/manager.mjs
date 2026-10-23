@@ -213,7 +213,7 @@ function usageText() {
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
     '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
-    '  ui [--port N] [--open]              本地只读 Web 管理台（默认固定 127.0.0.1:8199 + 一次性令牌；--open 监听成功后用默认浏览器打开带令牌 URL，失败仅打印地址；Ctrl+C 退出）',
+    '  ui [--port N] [--open]              本地 Web 管理台（默认固定 127.0.0.1:8199，无令牌仅本机；--open 监听成功后用默认浏览器打开 URL，失败仅打印地址；Ctrl+C 退出）',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>]   首次受管启动：意图→启动→身份采集→登记',

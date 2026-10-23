@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // manager ui 冒烟测试：隔离 --home + 临时应用记录，不触碰真实注册表与业务进程。
-// 覆盖：令牌/Host/只读边界、应用列表、状态、批次列表、日志 tail、非受管 logs 报错、未结记录拒启。
+// 覆盖：Host 校验/只读边界、应用列表、状态、批次列表、日志 tail、非受管 logs 报错、未结记录拒启。
 // 用法：node scripts/test/ui-smoke.mjs   （无外部依赖，Node 22+；未安装 pwsh 7 时跳过生命周期检查）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -72,11 +72,10 @@ child.stdout.on('data', (d) => { banner += d; });
 child.stderr.on('data', (d) => { banner += d; });
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-let token = null;
-const get = (p, { method = 'GET', token: t = token, host } = {}) => new Promise((res, rej) => {
+const get = (p, { method = 'GET', host } = {}) => new Promise((res, rej) => {
   const headers = {};
   if (host) headers.Host = host;
-  const url = `http://127.0.0.1:${port}${p}${t ? (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(t) : ''}`;
+  const url = `http://127.0.0.1:${port}${p}`;
   const r = http.request(url, { method, headers }, (rs) => {
     let b = '';
     rs.on('data', (d) => { b += d; });
@@ -101,14 +100,12 @@ const check = async (name, fn) => {
 try {
   let up = false;
   for (let i = 0; i < 50 && !up; i++) {
-    const m = /token=([A-Za-z0-9_-]+)/.exec(banner);
-    if (m) token = m[1];
-    if (token) { try { up = (await get('/api/apps')).status === 200; } catch { /* 未就绪 */ } }
+    try { up = (await get('/api/apps')).status === 200; } catch { /* 未就绪 */ }
     if (!up) await wait(200);
   }
-  assert(up, 'manager ui 未在 10s 内就绪（未解析到令牌或端口未监听）');
+  assert(up, 'manager ui 未在 10s 内就绪（端口未监听）');
 
-  await check('启动横幅含带令牌 URL', () => assert(banner.includes(`http://127.0.0.1:${port}/?token=`)));
+  await check('启动横幅含 URL（无令牌，可收藏）', () => assert(banner.includes(`http://127.0.0.1:${port}/`) && !banner.includes('token=')));
 
   const page = await get('/');
   await check('管理台页面含过滤输入框与只看错误开关', () => {
@@ -123,8 +120,6 @@ try {
     new vm.Script(m[1]); // 只编译不执行
   });
 
-  await check('缺少令牌返回 403', async () => assert.equal((await get('/api/apps', { token: null })).status, 403));
-  await check('错误令牌返回 403', async () => assert.equal((await get('/api/apps', { token: 'wrong' })).status, 403));
   await check('Host 不匹配返回 403', async () => assert.equal((await get('/api/apps', { host: 'evil.example' })).status, 403));
   await check('POST 拒绝（405）', async () => assert.equal((await get('/api/apps', { method: 'POST' })).status, 405));
 

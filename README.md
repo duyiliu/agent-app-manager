@@ -25,7 +25,7 @@ npx skills add duyiliu/project-runner --skill project-runner -g
 - **当前项目启动**：读取 `AGENTS.md`、已有脚本及构建配置，确定运行时、模块、入口、profile、端口、启动参数。Java 走 Maven/Gradle 识别；Python 走 venv/依赖声明识别；Vue/React/Vite 等前端把 `package.json` script 解析为真实 `node` 入口进程后受管启动。
 - **JRebel**：初始化 / 检查 standalone JRebel、许可与 `rebel.xml`，按已有项目约定启动，验证加载与热更新证据（仅 Java）。
 - **跨项目运行管理**：`manager.mjs` 统一登记并管理**本 Skill 启动且具有可信进程身份**的应用进程；支持全局 `list`/`status`、已登记应用从任意目录 `start`、受管实例 `stop`/`restart`、不再需要的登记 `remove`（须无存活受管实例，运行证据保留）、残留回收 `prune`（默认 dry-run）、按运行批次或统一日志源（`logs --src`）查日志，以及跨 Agent 会话核验。只管理本 Skill 启动并记录的应用，**不接管 IDEA / 手工启动的外部进程**；`stop` 为有界强制终止，不承诺优雅关机。
-- **本地运行管理台**：`manager ui` 按需启动只读网页（默认固定 `127.0.0.1:8199` + 一次性令牌，`--port 0` 随机端口，`--open` 自动打开带令牌 URL；Ctrl+C 即退出，无常驻服务），查看全局应用状态、未结记录证据与日志（受管批次、非受管线索、项目 `.tmp` 兼容日志，支持正则过滤与只看错误；标题栏显示运行中应用数），并浏览所选应用的项目文件；原单项目 Viewer 已移除，能力并入本台。详情卡提供受管应用的启动/停止/重启按钮（与 CLI 同一实现与安全边界）。
+- **本地运行管理台**：`manager ui` 按需启动网页（默认固定 `127.0.0.1:8199`，无令牌仅本机可访问，`--port 0` 随机端口，`--open` 自动打开；Ctrl+C 即退出，无常驻服务），查看全局应用状态、未结记录证据与日志（受管批次、非受管线索、项目 `.tmp` 兼容日志，支持正则过滤与只看错误；标题栏显示运行中应用数），并浏览所选应用的项目文件；原单项目 Viewer 已移除，能力并入本台。详情卡提供受管应用的启动/停止/重启按钮（与 CLI 同一实现与安全边界）。
 - **非受管启动**：连命令模式也无法定位唯一目标进程的项目脚本仍可按原授权执行，但只记录启动尝试与日志线索并标记为非受管，不承诺跨会话启停。
 
 ## 目录
@@ -42,7 +42,7 @@ skills/project-runner/
     │   └── proc-linux.mjs       # Linux /proc 身份核验、终止、后代发现、端口诊断
     ├── manager-ui/
     │   ├── index.html           # manager ui 只读管理台页面
-    │   └── server.mjs           # ui 本地服务（127.0.0.1 + 一次性令牌）
+    │   └── server.mjs           # ui 本地服务（仅 127.0.0.1，无令牌）
     ├── ps/
     │   ├── proc.ps1             # Windows 受管进程身份核验与终止适配
     │   └── port.ps1             # Windows 端口占用诊断
