@@ -248,6 +248,18 @@ try {
   run('logSrc = null; logSrcWasCurrent = false;');
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
+
+  await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
+    run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);
+    const buttons = [...elFor('detailOps').querySelectorAll('.op-btn'), ...elFor('detail').querySelectorAll('.op-btn')];
+    const busy = buttons.filter((b) => b.classList.contains('busy'));
+    assert.equal(busy.length, 2, '摘要栏与详情卡头各应有一个 busy 按钮');
+    assert(busy.every((b) => b.disabled && b.textContent.includes('启动中')), '执行中按钮应禁用并显示“启动中…”');
+    assert(buttons.every((b) => b.disabled), '执行期间其余按钮应全部禁用');
+    run(`lifecycleBusy = false; lifecycleOpKey = null;`);
+    await run('loadStatus()');
+  });
 } finally {
   child.kill();
   fs.rmSync(base, { recursive: true, force: true });

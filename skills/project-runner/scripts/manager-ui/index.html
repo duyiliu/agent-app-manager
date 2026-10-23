@@ -151,6 +151,8 @@ select option { background:#151d27; color:var(--text) }
 .op-btn { font-size:12px; padding:3px 10px }
 .op-btn:disabled { opacity:.4; cursor:default }
 .op-btn.armed { color:#ffd9a8; border-color:rgba(255,178,94,.5); background:rgba(255,178,94,.12) }
+.op-btn.busy { opacity:1; cursor:progress; color:var(--accent); border-color:var(--accent); animation:opbusy 1.2s ease-in-out infinite }
+@keyframes opbusy { 50% { opacity:.45 } }
 #refreshBtn::before { content:"↻"; font-size:14px; line-height:1 }
 
 .topbar {
@@ -847,9 +849,10 @@ function renderDetail(d) {
       const mk = (label, op, enabled, title, extra = '') => {
         const needsConfirm = op !== 'start' || extra;
         const armed = armedOp === `${d.alias}:${op}:${extra}`;
-        const b = el('button', 'op-btn' + (armed ? ' armed' : ''), armed ? `确认${label}` : label);
-        b.disabled = !enabled || (lifecycleBusy && !armed);
-        b.title = armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
+        const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
+        const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
+        b.disabled = !enabled || lifecycleBusy;
+        b.title = running ? `${label}执行中，可能需要数秒，请稍候` : armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
         b.addEventListener('click', (e) => {
           e.stopPropagation();
           if (needsConfirm && !armed) armOp(d.alias, op, extra);
@@ -874,9 +877,10 @@ function renderDetail(d) {
     const mkUnmanagedRemove = () => {
       const ops = el('span', 'op-group');
       const armed = armedOp === `${d.alias}:remove:`;
-      const b = el('button', 'op-btn' + (armed ? ' armed' : ''), armed ? '确认移除' : '移除');
-      b.disabled = st !== 'STOPPED' || (lifecycleBusy && !armed);
-      b.title = armed ? '再次点击确认执行' : '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）（需再点一次确认）';
+      const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:remove:`;
+      const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? '移除中…' : armed ? '确认移除' : '移除');
+      b.disabled = st !== 'STOPPED' || lifecycleBusy;
+      b.title = running ? '移除执行中，请稍候' : armed ? '再次点击确认执行' : '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）（需再点一次确认）';
       b.addEventListener('click', (e) => {
         e.stopPropagation();
         if (!armed) armOp(d.alias, 'remove');
@@ -978,7 +982,7 @@ function renderDetail(d) {
   bar.hidden = false;
   applyDetail(detailTouched ? detailOpen : needsAttention);
 }
-let lifecycleBusy = false;
+let lifecycleBusy = false, lifecycleOpKey = null;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
 // 第一次点击把按钮变成“确认X”4 秒内有效，再点一次才执行。
 let armedOp = null, armedTimer = null;
@@ -992,7 +996,10 @@ function disarmOp() { armedOp = null; if (armedTimer) { clearTimeout(armedTimer)
 async function doLifecycle(alias, op, extra = '') {
   if (lifecycleBusy || !alias) return;
   lifecycleBusy = true;
-  conn(`${op} ${alias}…`);
+  lifecycleOpKey = `${alias}:${op}:${extra}`;
+  conn(`${op} ${alias} 执行中…`);
+  manualRefresh = true;
+  loadStatus(); // 立刻重绘按钮为执行中态，不等请求返回（stop/restart 可能数秒）
   try {
     const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}${extra}`, undefined, 'POST');
     const pid = r.pid ?? r.start?.pid;
@@ -1001,7 +1008,7 @@ async function doLifecycle(alias, op, extra = '') {
     showBanner(`${op} ${alias} 失败：${e.message}`, true);
   }
   lifecycleBusy = false;
-  manualRefresh = true;
+  lifecycleOpKey = null;
   await Promise.all([loadApps(), loadStatus(), loadSources()]);
   manualRefresh = false;
   pollTail();
