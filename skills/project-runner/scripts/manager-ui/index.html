@@ -1027,6 +1027,7 @@ function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
   selectedHistoryRun = null; wantedHistoryRun = null;
+  logSrcWasCurrent = false;
   detailOpen = false; detailTouched = false;
   try {
     const u = new URL(location.href);
@@ -1048,8 +1049,8 @@ const MAX_LINES = 8000;
 const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:/;
 const classify = t => errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
   : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(t) ? 'sql' : '';
-let logSrc = null, logSrcLabel = '', offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
-let renderedId = 0, sourcesVersion = 0, sourcesController = null;
+let logSrc = null, logSrcLabel = '', logSrcWasCurrent = false, offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
+let renderedId = 0, sourcesVersion = 0, sourcesController = null, sourcesBySrc = new Map();
 let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBusy = false;
 // 过滤在渲染层做：lines 数组始终保留全量，清空条件即恢复全视图；
 // errorsOnly 等价内置 errorPattern；自定义正则无效时给出提示而非静默失效（不过滤 + 输入框标红 + meta 提示）。
@@ -1195,6 +1196,8 @@ async function loadSources() {
       selectedHistoryRun = null;
       logSrc = null;
       logSrcLabel = '';
+      logSrcWasCurrent = false;
+      sourcesBySrc = new Map();
       logHint(missingRunId ? `历史批次 ${missingRunId} 没有 stdout 日志流。` : '该应用暂无可读日志源（受管批次、登记线索与项目 .tmp 日志都未找到）。');
       $('#logMeta').textContent = '';
       return;
@@ -1207,20 +1210,37 @@ async function loadSources() {
       $('#detail').querySelectorAll('.history-pick.selected').forEach(n => n.classList.remove('selected'));
       logSrc = null;
       logSrcLabel = '';
+      logSrcWasCurrent = false;
       runSel.value = '';
       logHint(`历史批次 ${missingRunId} 没有 stdout 日志流。`);
       $('#logMeta').textContent = '';
       return;
     }
-    let remembered = null;
-    try { remembered = selected ? sessionStorage.getItem('pr-ui-src:' + selected) : null; } catch {}
+    let remembered = null, rememberedWasCurrent = false;
+    try {
+      remembered = selected ? sessionStorage.getItem('pr-ui-src:' + selected) : null;
+      const flag = selected ? sessionStorage.getItem('pr-ui-src-cur:' + selected) : null;
+      // 旧会话没有标志位：run:/hint: 源按"当时在跟随当前批次"处理（重启后回到最新）；tmp: 从来不是当前源
+      rememberedWasCurrent = flag != null ? flag === '1' : /^(run|hint):/.test(remembered ?? '');
+    } catch {}
+    sourcesBySrc = new Map((d.sources ?? []).map((s) => [s.src, s]));
+    // 跟随语义：所选源当时是"当前批次"，如今失去 current 标记（重启产生了新批次）或文件已清理——
+    // 说明它在跟随旧批次，自动切到新当前源（优先保留 stdout/stderr 流）；刻意选的非当前源保持不动
+    const staleFollow = (src, wasCurrent) => !!src && wasCurrent && !sourcesBySrc.get(src)?.current;
+    const logSrcStale = staleFollow(logSrc, logSrcWasCurrent);
+    const remStale = staleFollow(remembered, rememberedWasCurrent);
+    const streamOf = (src) => sourcesBySrc.get(src)?.stream ?? 'stdout';
+    const followSrc = (src) => (d.sources ?? []).find((s) => s.current && s.stream === streamOf(src))?.src
+      ?? (d.sources ?? []).find((s) => s.current)?.src;
     const want = historicalSource
-      || (logSrc && [...runSel.options].some(o => o.value === logSrc) ? logSrc : null)
-      || (remembered && [...runSel.options].some(o => o.value === remembered) ? remembered : null)
+      || (!logSrcStale && logSrc && sourcesBySrc.has(logSrc) ? logSrc : null)
+      || (!remStale && remembered && sourcesBySrc.has(remembered) ? remembered : null)
+      || ((logSrcStale || remStale) ? followSrc(logSrcStale ? logSrc : remembered) : null)
       || runSel.options[0].value;
     runSel.value = want;
     const picked = (d.sources ?? []).find(s => s.src === want);
     logSrcLabel = picked ? picked.label : '';
+    logSrcWasCurrent = !!picked?.current;
     if (want !== logSrc) { logSrc = want; resetLog(); }
     if (wantedHistoryRun && want === historicalSource) {
       const pickedRun = wantedHistoryRun;
@@ -1257,6 +1277,7 @@ async function selectHistoryRun(runId) {
   const row = $('#detail').querySelector(`.history-pick[data-run-id="${CSS.escape(runId)}"]`);
   $('#detail').querySelectorAll('.history-pick').forEach(n => n.classList.toggle('selected', n === row));
   logSrc = source;
+  logSrcWasCurrent = false; // 历史批次必然非当前源；loadSources 会按 picked 重新落地
   resetLog();
   await loadSources();
   if (logSrc === source) pollTail();
@@ -1265,8 +1286,14 @@ async function selectHistoryRun(runId) {
 $('#runSel').addEventListener('change', e => {
   wantedHistoryRun = null;
   $('#detail').querySelectorAll('.history-pick.selected').forEach(n => n.classList.remove('selected'));
-  try { if (selected) sessionStorage.setItem('pr-ui-src:' + selected, e.target.value); } catch {}
   logSrc = e.target.value || null;
+  logSrcWasCurrent = !!sourcesBySrc.get(logSrc)?.current;
+  try {
+    if (selected) {
+      sessionStorage.setItem('pr-ui-src:' + selected, e.target.value);
+      sessionStorage.setItem('pr-ui-src-cur:' + selected, logSrcWasCurrent ? '1' : '0');
+    }
+  } catch {}
   const opt = e.target.selectedOptions[0];
   logSrcLabel = opt ? opt.textContent.replace(/^● /, '').replace(/ · [\d.]+ (KB|MB)$/, '') : '';
   resetLog();
