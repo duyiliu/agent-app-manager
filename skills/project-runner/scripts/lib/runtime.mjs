@@ -204,9 +204,10 @@ function settleStoppedWriteback(home, appId, marked) {
   }
 }
 
-// 查询即核验，并按 OS 事实落账
-export function statusWithFacts(home, appId, prefetched = null) {
-  const rt = readRuntimeStrict(home, appId);
+// 查询即核验，并按 OS 事实落账；rtPrefetched 允许调用方（如 cmdList）复用已读的运行
+// 记录避免二次磁盘读——settleStoppedWriteback 在锁内仍会重读最新值，不影响并发正确性。
+export function statusWithFacts(home, appId, prefetched = null, rtPrefetched = undefined) {
+  const rt = rtPrefetched !== undefined ? rtPrefetched : readRuntimeStrict(home, appId);
   const st = computeStatus(home, appId, rt, prefetched);
   if (st.writeback && rt && rt.current) {
     settleStoppedWriteback(home, appId, { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId });

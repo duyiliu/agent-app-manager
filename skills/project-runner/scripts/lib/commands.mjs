@@ -9,7 +9,7 @@ import { SCHEMA_VERSION } from './constants.mjs';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
-import { psProc, verifyRun, verifyRuns, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS } from './probe.mjs';
+import { psProc, verifyRun, verifyRuns, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
@@ -262,25 +262,38 @@ export function cmdList(ctx) {
   // 批量失败时回退逐条核验，语义与结果不变。
   const prefetched = new Map();
   const pending = [];
+  const runtimes = new Map();
   for (const app of apps) {
     try {
-      const cur = readRuntimeStrict(ctx.home, app.appId)?.current;
+      const rt = readRuntimeStrict(ctx.home, app.appId);
+      runtimes.set(app.appId, rt);
+      const cur = rt?.current;
       if (cur && cur.managed && cur.phase === 'RUNNING' && cur.pid != null && cur.creationFileTime && cur.image) {
         pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
       }
-    } catch { /* 损坏/不兼容记录在下方按 DATA_* 处理 */ }
+    } catch (e) {
+      // 损坏/不兼容记录：保留错误供下方按 DATA_* 呈现
+      runtimes.set(app.appId, e);
+    }
   }
   if (pending.length) {
     try {
       const results = verifyRuns(pending);
-      pending.forEach((p, i) => { if (results[i]) prefetched.set(p.appId, results[i]); });
+      pending.forEach((p, i) => {
+        if (!results[i]) return;
+        prefetched.set(p.appId, results[i]);
+        // 填充单条核验缓存：同一轮询周期内 /api/status 的 verifyRun 直接命中，不再多起 pwsh
+        try { cacheVerifyResult(p, interpretVerifyResult(results[i])); } catch { /* error 结果不缓存 */ }
+      });
     } catch { /* 回退逐条 */ }
   }
   const rows = apps.map((app) => {
     let rt;
     let st;
     try {
-      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null));
+      const cached = runtimes.get(app.appId);
+      if (cached instanceof Error) throw cached;
+      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
     } catch (e) {
       return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
     }
@@ -454,6 +467,7 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = note;
+    invalidateVerifyCache(cur.pid); // 终止后立即作废缓存存活结论，避免 stop→start 竞态读到旧值
     cleanupWrapper(rt); // 命令模式：目标死后尽力清理残留 cmd wrapper
     writeRuntime(home, appId, rt);
     return { result: 'stopped', runId: cur.runId, pid: cur.pid, ...extra };
@@ -491,6 +505,7 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = '进程已自行退出';
+    invalidateVerifyCache(cur.pid);
     cleanupWrapper(rt);
     writeRuntime(home, appId, rt);
     return { result: 'alreadyStopped', runId: cur.runId };
@@ -500,6 +515,7 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = '进程退出后 PID 被复用；未触碰新进程';
+    invalidateVerifyCache(cur.pid);
     cleanupWrapper(rt);
     writeRuntime(home, appId, rt);
     return { result: 'alreadyStopped', runId: cur.runId, note: '原实例已退出，PID 已被其他进程复用，未触碰新进程' };
@@ -720,7 +736,6 @@ export function cmdLogs(ctx, ref) {
     if (!fs.existsSync(t.file)) throw notFoundError(`日志不存在（src=${src}）`);
     if (opts.has('--follow')) {
       if (ctx.json) throw usageError('--follow 与 --json 不兼容');
-      const reg = readRegistry(ctx.home);
       const rt = readRuntimeStrict(ctx.home, t.appId);
       // hint/tmp 源没有受管身份，followLogs 会提示无法自动结束，直到 Ctrl+C
       followLogs(rt, t.runId, t.file, lines);
@@ -754,7 +769,6 @@ export function cmdLogs(ctx, ref) {
   if (!fs.existsSync(t.file)) throw notFoundError(`日志不存在（runId=${t.runId}, stream=${t.stream}）`);
   if (opts.has('--follow')) {
     if (ctx.json) throw usageError('--follow 与 --json 不兼容');
-    const reg = readRegistry(ctx.home);
     const rt = readRuntimeStrict(ctx.home, t.appId);
     followLogs(rt, t.runId, t.file, lines);
     return { following: true };

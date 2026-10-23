@@ -73,26 +73,29 @@ export function psProc(action, params = {}) {
 export function portOccupants(port) {
   ensureSupported();
   if (IS_LINUX) return linuxProc.portOccupants(port);
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', path.join(SCRIPTS_DIR, 'ps', 'port.ps1'), '-Port', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  // 单次 pwsh 调用完成端口+身份采集（proc.ps1 -Action port）：N 个监听人不再叠加
+  // N 次 capture；identity.image 与 capture 同源，保持 #55 的 image 统一口径。
+  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'port', '-Id', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
     throw dependencyError(`端口诊断调用失败：${r.error.message}`);
   }
   if (r.status !== 0) throw dependencyError(`端口诊断失败：${(r.stderr || '').trim()}`);
-  let rows;
-  try { rows = JSON.parse((r.stdout || '').trim() || '[]'); } catch { throw dependencyError('端口诊断输出无法解析'); }
-  if (!Array.isArray(rows)) rows = rows ? [rows] : [];
-  return rows.map((row) => {
-    let identity = null;
-    try { identity = psProc('capture', { id: row.pid }); } catch (e) { identity = { result: 'error', message: e.message }; }
-    // 与 status/capture 统一口径：端口诊断的 executablePath 取解析后的 image（#55），
-    // 避免 nvm/shim 场景下 port.ps1 的 Win32_Process.ExecutablePath 与 status 的 image 不一致。
-    return {
-      ...row,
-      executablePath: identity?.result === 'ok' ? identity.image : row.executablePath,
-      identity,
-    };
-  });
+  let parsed;
+  const text = (r.stdout || '').trim();
+  try { parsed = text ? JSON.parse(text) : []; } catch { throw dependencyError('端口诊断输出无法解析'); }
+  // 单元素时 ConvertTo-Json 会退化为对象而非数组
+  const rows = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? [parsed] : [];
+  return rows.map((row) => ({
+    pid: row.pid ?? null,
+    processName: row.processName ?? null,
+    executablePath: row.executablePath ?? null,
+    commandLine: row.commandLine ?? null,
+    startedAt: row.startedAt ?? null,
+    localAddress: row.localAddress,
+    localPort: row.localPort,
+    identity: row.identity ?? null,
+  }));
 }
 
 export function portConflict(port, force, ignorePid = null) {
@@ -150,11 +153,41 @@ export function interpretVerifyResult(r) {
   throw conflictError('IDENTITY_UNKNOWN', `身份核验失败（${r.code ?? r.result}），拒绝操作`, r);
 }
 
+// 短 TTL 核验缓存：ui 的 /api/apps（批量）与 /api/status（单条）在同一轮询周期内
+// 会对同一运行重复核验，Windows 上每次都是一次 pwsh 冷启动。缓存仅存活结论
+// （alive/gone/pidReused），键含完整身份（pid+creationFileTime+image），PID 复用不会
+// 命中旧值；terminate 类操作后主动失效，避免 stop→start 竞态读到旧存活结论。
+const VERIFY_CACHE_TTL_MS = 1500;
+const verifyCache = new Map(); // key -> { at, interpreted }
+
+function verifyCacheKey(run) {
+  return `${run.pid}\u0000${run.creationFileTime}\u0000${run.image}`;
+}
+
+export function cacheVerifyResult(run, interpreted) {
+  verifyCache.set(verifyCacheKey(run), { at: Date.now(), interpreted });
+  if (verifyCache.size > 128) {
+    const cutoff = Date.now() - VERIFY_CACHE_TTL_MS;
+    for (const [k, v] of verifyCache) if (v.at < cutoff) verifyCache.delete(k);
+  }
+}
+
+// 终止/停止路径调用：该 pid 相关的缓存存活结论立即作废。
+export function invalidateVerifyCache(pid) {
+  if (!Number.isInteger(pid)) return;
+  for (const k of verifyCache.keys()) if (k.startsWith(`${pid}\u0000`)) verifyCache.delete(k);
+}
+
 export function verifyRun(run) {
   if (run.pid == null || !run.creationFileTime || !run.image) {
     throw conflictError('IDENTITY_UNKNOWN', '运行记录缺少身份证据（pid/创建时间/映像），无法核验');
   }
-  return interpretVerifyResult(psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image }));
+  const key = verifyCacheKey(run);
+  const hit = verifyCache.get(key);
+  if (hit && Date.now() - hit.at < VERIFY_CACHE_TTL_MS) return hit.interpreted;
+  const interpreted = interpretVerifyResult(psProc('verify', { id: run.pid, creationFileTime: run.creationFileTime, image: run.image }));
+  cacheVerifyResult(run, interpreted);
+  return interpreted;
 }
 
 export function tcpListening(port) {
