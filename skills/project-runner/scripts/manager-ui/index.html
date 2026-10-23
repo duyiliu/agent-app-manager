@@ -94,6 +94,7 @@ select option { background:#151d27; color:var(--text) }
 .op-group { display:inline-flex; gap:6px; margin-left:10px }
 .op-btn { font-size:12px; padding:3px 10px }
 .op-btn:disabled { opacity:.4; cursor:default }
+.op-btn.armed { color:#ffd9a8; border-color:rgba(255,178,94,.5); background:rgba(255,178,94,.12) }
 #refreshBtn::before { content:"↻"; font-size:14px; line-height:1 }
 
 .topbar {
@@ -744,10 +745,16 @@ function renderDetail(d) {
     const makeOps = () => {
       const ops = el('span', 'op-group');
       const mk = (label, op, enabled, title) => {
-        const b = el('button', 'op-btn', label);
-        b.disabled = !enabled;
-        b.title = title;
-        b.addEventListener('click', (e) => { e.stopPropagation(); doLifecycle(d.alias, op); });
+        const needsConfirm = op !== 'start';
+        const armed = armedOp === `${d.alias}:${op}`;
+        const b = el('button', 'op-btn' + (armed ? ' armed' : ''), armed ? `确认${label}` : label);
+        b.disabled = !enabled || (lifecycleBusy && !armed);
+        b.title = armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (needsConfirm && !armed) armOp(d.alias, op);
+          else { disarmOp(); doLifecycle(d.alias, op); }
+        });
         ops.appendChild(b);
       };
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING', '复用已保存配置启动（同 CLI start）');
@@ -841,10 +848,18 @@ function renderDetail(d) {
   applyDetail(detailTouched ? detailOpen : needsAttention);
 }
 let lifecycleBusy = false;
+// 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
+// 第一次点击把按钮变成“确认X”4 秒内有效，再点一次才执行。
+let armedOp = null, armedTimer = null;
+function armOp(alias, op) {
+  disarmOp();
+  armedOp = `${alias}:${op}`;
+  armedTimer = setTimeout(() => { disarmOp(); if (selected) loadStatus(); }, 4000);
+  loadStatus();
+}
+function disarmOp() { armedOp = null; if (armedTimer) { clearTimeout(armedTimer); armedTimer = null; } }
 async function doLifecycle(alias, op) {
   if (lifecycleBusy || !alias) return;
-  if ((op === 'stop' || op === 'restart')
-      && !confirm(`${op === 'stop' ? '停止' : '重启'} ${alias}？\n\nstop 是有界强制终止：先按进程身份核验再强杀目标进程（不杀进程树），不是优雅关机。`)) return;
   lifecycleBusy = true;
   conn(`${op} ${alias}…`);
   try {
