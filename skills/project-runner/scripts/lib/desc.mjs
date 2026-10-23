@@ -69,6 +69,14 @@ export function loadManagedDesc(file) {
   else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需为 1-65535 的整数');
+  if (d.readyLogPattern != null) {
+    if (typeof d.readyLogPattern !== 'string' || !d.readyLogPattern) errs.push('readyLogPattern 必须是非空字符串（正则）');
+    else { try { new RegExp(d.readyLogPattern); } catch { errs.push('readyLogPattern 不是合法正则'); } }
+  }
+  if (d.readyUrl != null) {
+    if (typeof d.readyUrl !== 'string' || !/^https?:\/\//.test(d.readyUrl)) errs.push('readyUrl 必须是 http(s) URL');
+    else { try { new URL(d.readyUrl); } catch { errs.push('readyUrl 不是合法 URL'); } }
+  }
   if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
@@ -86,6 +94,8 @@ export function loadManagedDesc(file) {
     envRefs: d.envRefs ?? [],
     env: d.env ?? {},
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+    readyLogPattern: d.readyLogPattern ?? null,
+    readyUrl: d.readyUrl ?? null,
     logMaxBytes: d.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
@@ -286,6 +296,8 @@ export function upsertApp(reg, appId, desc) {
     existing.envRefs = desc.envRefs;
     existing.env = desc.env ?? {};
     existing.expectedPort = desc.expectedPort ?? null;
+    existing.readyLogPattern = desc.readyLogPattern ?? null;
+    existing.readyUrl = desc.readyUrl ?? null;
     existing.logMaxBytes = desc.logMaxBytes ?? RUN_LOG_MAX_BYTES;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
@@ -297,7 +309,8 @@ export function upsertApp(reg, appId, desc) {
     cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
     discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs, env: desc.env ?? {},
-    expectedPort: desc.expectedPort ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
+    expectedPort: desc.expectedPort ?? null, readyLogPattern: desc.readyLogPattern ?? null,
+    readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };

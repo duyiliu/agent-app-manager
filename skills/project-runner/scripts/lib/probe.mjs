@@ -31,9 +31,11 @@ function psProcOnce(action, params) {
   if (params.id != null) args.push('-Id', String(params.id));
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
   if (params.image != null) args.push('-Image', params.image);
-  if (action === 'terminate' || action === 'discover') args.push('-WaitMs', String(params.waitMs ?? (action === 'discover' ? COMMAND_DISCOVER_TIMEOUT_MS : TERMINATE_WAIT_MS)));
+  if (action === 'terminate' || action === 'terminate-tree' || action === 'grace' || action === 'discover') args.push('-WaitMs', String(params.waitMs ?? (action === 'discover' ? COMMAND_DISCOVER_TIMEOUT_MS : TERMINATE_WAIT_MS)));
   // discover 在单个 pwsh 进程内轮询等待目标出现，超时上限 = 发现窗口 + 启动余量
-  const timeout = action === 'discover' ? (params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS) + 15000 : 30000;
+  // grace 内部要轮询 waitMs 才能给出 stillAlive，pwsh 超时需覆盖
+  const timeout = action === 'discover' ? (params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS) + 15000
+    : action === 'grace' ? (params.waitMs ?? TERMINATE_WAIT_MS) + 15000 : 30000;
   const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
@@ -44,7 +46,7 @@ function psProcOnce(action, params) {
     // 短时探针可重试：proc.ps1 每次都在进程内用 Add-Type 编译 C#，偶发 Roslyn 栈溢出
     // 崩溃（0xC00000FD / “type initializer ... threw an exception”），与进程状态无关。
     // discover 单次调用内部已轮询到超时，重试会把最坏等待放大到分钟级，故不重试。
-    if (action !== 'discover') e.psTransient = true;
+    if (action !== 'discover' && action !== 'terminate' && action !== 'terminate-tree' && action !== 'grace') e.psTransient = true;
     throw e;
   }
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();

@@ -316,7 +316,47 @@ function displayEnv(env = {}) {
   ]));
 }
 
-export async function cmdStatus(ctx, ref, probeRequested = false) {
+// 就绪证据评估：desc 可选 readyLogPattern（当前批次 stdout/stderr 正则）与 readyUrl
+// （http GET <400 即就绪）。两者都未配置 → UNTESTED；任一证据命中 → READY；配置了但
+// 无命中 → NOT_READY。只读评估，不改状态。
+async function readinessCheck(home, app, cur) {
+  const evidence = [];
+  if (app.readyLogPattern && cur?.runId) {
+    const re = new RegExp(app.readyLogPattern);
+    const dir = path.join(home, 'logs', app.appId);
+    for (const stream of ['stdout', 'stderr']) {
+      let tail = '';
+      try {
+        const f = path.join(dir, `${cur.runId}.${stream}.log`);
+        const fd = fs.openSync(f, 'r');
+        try {
+          const sz = fs.fstatSync(fd).size;
+          const len = Math.min(sz, 512 * 1024);
+          const buf = Buffer.alloc(len);
+          fs.readSync(fd, buf, 0, len, Math.max(0, sz - len));
+          tail = buf.toString('utf8');
+        } finally { fs.closeSync(fd); }
+      } catch { /* 批次日志尚不存在 */ }
+      const line = tail.split('\n').find((l) => re.test(l));
+      if (line != null) evidence.push({ kind: 'logPattern', stream, matched: line.slice(0, 200) });
+    }
+  }
+  if (app.readyUrl) {
+    try {
+      const r = await fetch(app.readyUrl, { signal: AbortSignal.timeout(3000), redirect: 'manual' });
+      evidence.push(r.status < 400
+        ? { kind: 'http', url: app.readyUrl, status: r.status }
+        : { kind: 'http', url: app.readyUrl, status: r.status, failed: true });
+    } catch (e) {
+      evidence.push({ kind: 'http', url: app.readyUrl, error: String(e?.message ?? e).slice(0, 160), failed: true });
+    }
+  }
+  const configured = Boolean(app.readyLogPattern || app.readyUrl);
+  const state = !configured ? 'UNTESTED' : evidence.some((e) => !e.failed) ? 'READY' : 'NOT_READY';
+  return { state, configured, evidence };
+}
+
+export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -325,6 +365,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false) {
   const cur = rt && rt.current;
   const evidenceFile = runtimePath(ctx.home, appId);
   const portListening = probeRequested && Number.isInteger(app.expectedPort) ? await tcpListening(app.expectedPort) : null;
+  const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
+    : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
@@ -348,7 +390,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false) {
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
       evidenceFile,
     } : null,
-    readinessUntested: st.status === 'RUNNING',
+    ...(readiness ? { readiness } : {}),
+    readinessUntested: st.status === 'RUNNING' && readiness?.state !== 'READY',
     note: st.note ?? null,
     prevRuns: (rt?.prevRuns ?? []).slice(0, 5),
   };
@@ -399,21 +442,50 @@ export async function cmdStart(ctx, ref) {
   });
 }
 
-// 停止核心逻辑：返回 {result: stopped|alreadyStopped} 或抛错；调用方负责落账
-function stopCurrent(home, appId, app, rt) {
+// 停止核心逻辑：返回 {result: stopped|alreadyStopped} 或抛错；调用方负责落账。
+// opts.tree：连带终止目标后代进程（#39）；opts.graceMs：先发优雅信号等待，超时仍存活再强杀。
+function stopCurrent(home, appId, app, rt, opts = {}) {
   const cur = rt.current;
   if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供停止`);
   if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
   if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
   if (cur.phase === 'STOPPED') return { result: 'alreadyStopped', runId: cur.runId };
-  const t = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
-  if (t.result === 'terminated') {
+  const markStopped = (note, extra = {}) => {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
-    cur.exitNote = 'terminated(137) 有界强制停止；不保证优雅关机';
+    cur.exitNote = note;
     cleanupWrapper(rt); // 命令模式：目标死后尽力清理残留 cmd wrapper
     writeRuntime(home, appId, rt);
-    return { result: 'stopped', runId: cur.runId, pid: cur.pid };
+    return { result: 'stopped', runId: cur.runId, pid: cur.pid, ...extra };
+  };
+  if (opts.graceMs != null) {
+    const g = psProc('grace', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, waitMs: opts.graceMs });
+    if (g.result === 'gracefulTerminated') {
+      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`);
+    }
+    if (g.result !== 'stillAlive') {
+      // gracefulTerminated/stillAlive 之外的结果视同普通 terminate 结果走下面分支
+      if (g.result === 'exited' || g.result === 'notfound') {
+        return { ...markStopped('进程已自行退出'), result: 'alreadyStopped' };
+      }
+      if (g.result === 'mismatch') {
+        return { ...markStopped('进程退出后 PID 被复用；未触碰新进程'), result: 'alreadyStopped',
+          note: '原实例已退出，PID 已被其他进程复用，未触碰新进程' };
+      }
+      cur.phase = 'UNKNOWN';
+      cur.lastError = `grace_failed: ${JSON.stringify(g)}`;
+      writeRuntime(home, appId, rt);
+      throw conflictError('IDENTITY_UNKNOWN', `优雅停止探测失败（${g.code ?? g.result}），标记 UNKNOWN，拒绝进一步操作`, { runId: cur.runId, detail: g });
+    }
+    // stillAlive：grace 超时，继续走下面的强制终止路径
+  }
+  const action = opts.tree ? 'terminate-tree' : 'terminate';
+  const t = psProc(action, { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+  if (t.result === 'terminated') {
+    const kids = Array.isArray(t.killedPids) && t.killedPids.length ? `；连带后代 ${t.killedPids.length} 个（pid: ${t.killedPids.join(',')}）` : '';
+    const graceNote = opts.graceMs != null ? `；已先等待 grace ${opts.graceMs}ms 未退出` : '';
+    return markStopped(`terminated(137) 有界强制停止${opts.tree ? `（--tree${kids}）` : ''}${graceNote}`,
+      Array.isArray(t.killedPids) ? { killedPids: t.killedPids } : {});
   }
   if (t.result === 'exited' || t.result === 'notfound') {
     cur.phase = 'STOPPED';
@@ -500,6 +572,15 @@ export function cmdCleanupWrapper(ctx, ref) {
 
 export function cmdStop(ctx, ref) {
   if (!ref) throw usageError('stop 需要 <alias|appId>');
+  const opts = parseNamed(ctx.rest.slice(1), { '--tree': 'flag', '--grace': 'value' });
+  if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  let graceMs = null;
+  if (opts.has('--grace')) {
+    graceMs = Number.parseInt(opts.get('--grace'), 10);
+    if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 600000) {
+      throw usageError('--grace 需要 0-600000 的毫秒数');
+    }
+  }
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLock(ctx.home, appId, 'stop', () => {
@@ -507,7 +588,7 @@ export function cmdStop(ctx, ref) {
     const app = reg.apps[appId];
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
-    return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt) };
+    return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }) };
   });
 }
 

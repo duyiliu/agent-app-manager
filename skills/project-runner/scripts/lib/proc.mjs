@@ -6,7 +6,7 @@ export function retryProcessProbe(action, invoke) {
   for (let attempt = 1; ; attempt++) {
     try { return invoke(); }
     catch (error) {
-      if (!error.psTransient || action === 'terminate' || attempt >= PS_PROBE_ATTEMPTS) throw error;
+      if (!error.psTransient || action === 'terminate' || action === 'terminate-tree' || action === 'grace' || attempt >= PS_PROBE_ATTEMPTS) throw error;
     }
   }
 }

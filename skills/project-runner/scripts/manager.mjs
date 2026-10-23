@@ -201,12 +201,15 @@ function usageText() {
     '命令：',
     '  version                           显示 manager 版本号（--version/-v 同效）',
     '  list                              列出已登记应用与实时状态',
-    '  status <alias|appId> [--probe]    单应用详情；--probe 检测本机 TCP 监听',
+    '  status <alias|appId> [--probe] [--ready]   单应用详情；--probe 检测本机 TCP 监听，',
+    '       --ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
     '  doctor [--json]                    只读自检（不修复）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
-    '  stop <alias|appId>                有界强制停止（仅受管实例）',
+    '  stop <alias|appId> [--tree] [--grace <ms>]   停止受管实例：默认有界强制终止；',
+    '       --tree 连带终止全部后代进程（#39）；--grace 先发优雅信号（Linux SIGTERM /',
+    '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
     '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
@@ -267,14 +270,16 @@ async function main() {
       if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
-      const allowedFlag = { status: '--probe', restart: '--force' }[command];
-      const bad = ctx.rest.slice(1).find((a) => a !== allowedFlag);
-      if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
+      if (command !== 'stop') { // stop 的 --tree/--grace 由 cmdStop 自行解析
+        const allowedFlags = { status: ['--probe', '--ready'], restart: ['--force'] }[command] ?? [];
+        const bad = ctx.rest.slice(1).find((a) => !allowedFlags.includes(a));
+        if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
+      }
     }
     switch (command) {
       case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
       case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
-      case 'status': data = await cmdStatus(ctx, ctx.rest[0], ctx.rest.includes('--probe')); break;
+      case 'status': data = await cmdStatus(ctx, ctx.rest[0], ctx.rest.includes('--probe'), ctx.rest.includes('--ready')); break;
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
       case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;
       case 'detect': {

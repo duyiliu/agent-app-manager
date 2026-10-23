@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'discover')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -105,6 +105,21 @@ public static class ProcUtil {
     }
     finally { CloseHandle(h); }
   }
+
+  // terminate-tree：不核验身份直接终止指定 pid（仅用于已确认是受管目标后代的进程）。
+  public static string KillPid(int pid) {
+    IntPtr h = OpenProcess(TERMINATE, false, pid);
+    if (h == IntPtr.Zero) {
+      int err = Marshal.GetLastWin32Error();
+      if (err == ERROR_INVALID_PARAMETER) return "NOTFOUND";
+      return Err("openFailed", err);
+    }
+    try {
+      if (!TerminateProcess(h, 137)) return Err("terminateFailed", Marshal.GetLastWin32Error());
+      return "OK";
+    }
+    finally { CloseHandle(h); }
+  }
 }
 '@
 
@@ -160,7 +175,7 @@ if ($Action -eq 'verify-batch') {
   exit 0
 }
 
-if (($Action -in 'verify', 'terminate') -and (($Id -le 0) -or (-not $CreationFileTime) -or (-not $Image))) {
+if (($Action -in 'verify', 'terminate', 'terminate-tree', 'grace') -and (($Id -le 0) -or (-not $CreationFileTime) -or (-not $Image))) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
@@ -233,6 +248,70 @@ if ($Action -eq 'discover') {
       }
     }
     Start-Sleep -Milliseconds 400
+  }
+}
+
+# terminate-tree 的后代枚举：Win32_Process 按 ParentProcessId BFS。
+function Get-Descendants([int64]$rootPid) {
+  $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId
+  $byParent = @{}
+  foreach ($p in $rows) {
+    $pp = [int64]$p.ParentProcessId
+    if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
+    [void]$byParent[$pp].Add([int64]$p.ProcessId)
+  }
+  $found = @()
+  $queue = [System.Collections.ArrayList]@([int64]$rootPid)
+  $seen = @{}
+  while ($queue.Count -gt 0) {
+    $cur = $queue[0]; $queue.RemoveAt(0)
+    $kids = $byParent[$cur]
+    if (-not $kids) { continue }
+    foreach ($c in $kids) {
+      if ($seen.ContainsKey($c)) { continue }
+      $seen[$c] = $true
+      $found += $c
+      [void]$queue.Add($c)
+    }
+  }
+  return $found
+}
+
+if ($Action -eq 'terminate-tree') {
+  # 与 Linux terminateTree 同语义：先核验根身份，再杀快照后代，最后终止根。
+  $v = Parse-Result ([ProcUtil]::Verify($Id, [long]$CreationFileTime, $Image))
+  if ($v.result -ne 'ok') { $v | ConvertTo-Json -Compress; exit 0 }
+  $killed = @()
+  try {
+    foreach ($k in (Get-Descendants $Id)) {
+      $r = [ProcUtil]::KillPid([int]$k)
+      if ($r -eq 'OK') { $killed += $k }
+    }
+  } catch { }
+  $t = Parse-Result ([ProcUtil]::Terminate($Id, [long]$CreationFileTime, $Image, $WaitMs))
+  $t.killedPids = $killed
+  $t | ConvertTo-Json -Compress
+  exit 0
+}
+
+if ($Action -eq 'grace') {
+  # --grace：先核验身份，taskkill 不带 /F（GUI 收 WM_CLOSE；控制台程序多半拒绝，
+  # 由调用方回退强制终止）。WaitMs 内轮询 Capture 确认退出。
+  $v = Parse-Result ([ProcUtil]::Verify($Id, [long]$CreationFileTime, $Image))
+  if ($v.result -ne 'ok') { $v | ConvertTo-Json -Compress; exit 0 }
+  & taskkill /PID $Id 2>$null | Out-Null
+  $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $WaitMs))
+  while ($true) {
+    $c = Parse-Result ([ProcUtil]::Capture($Id))
+    if ($c.result -in 'exited', 'notfound') {
+      [pscustomobject]@{ result = 'gracefulTerminated' } | ConvertTo-Json -Compress
+      exit 0
+    }
+    if ((Get-Date) -ge $deadline) {
+      [pscustomobject]@{ result = 'stillAlive' } | ConvertTo-Json -Compress
+      exit 0
+    }
+    Start-Sleep -Milliseconds 200
   }
 }
 

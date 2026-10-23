@@ -122,6 +122,85 @@ export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS) {
   }
 }
 
+function childrenByParent(rows) {
+  const byParent = new Map();
+  for (const [pid, s] of rows) {
+    if (!byParent.has(s.ppid)) byParent.set(s.ppid, []);
+    byParent.get(s.ppid).push(pid);
+  }
+  return byParent;
+}
+
+function descendantsOf(rootPid, byParent) {
+  const found = [];
+  const queue = [rootPid];
+  const seen = new Set();
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const child of byParent.get(cur) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
+function waitExited(pid, expectedStart, waitMs) {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    const s = readStat(pid);
+    if (s.result === 'notfound' || s.result === 'exited') return { result: 'terminated' };
+    if (!s.ok) return s;
+    // 原实例已退出且 PID 被复用：不再触碰新进程。
+    if (s.starttime !== expectedStart) return { result: 'terminated' };
+    if (Date.now() >= deadline) return { result: 'terminateTimeout' };
+    sleepSync(50);
+  }
+}
+
+// --grace：核验同一身份后先发 SIGTERM，waitMs 内确认退出则返回 gracefulTerminated；
+// 超时仍存活返回 stillAlive，由调用方决定是否回退到 terminate 强杀。
+export function gracefulTerminate(pid, expected, waitMs) {
+  const v = verify(pid, expected);
+  if (v.result !== 'ok') return v;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (e) {
+    if (e.code === 'ESRCH') return { result: 'notfound' };
+    return { result: 'error', code: 'signalFailed', message: e.message };
+  }
+  const expectedStart = String(expected.creationFileTime).split(':')[1];
+  const w = waitExited(pid, expectedStart, waitMs);
+  if (w.result === 'terminated') return { result: 'gracefulTerminated' };
+  if (w.result === 'terminateTimeout') return { result: 'stillAlive' };
+  return w;
+}
+
+// --tree：核验同一身份后，先对快照中的全部后代发 SIGKILL，再终止目标本身。
+// 后代身份不逐一核验（仅按当时 ppid 拓扑），因此快照只是尽力而为的名单；
+// 新拉起的后代漏网是已知限制，记录 killedPids 供人工核验。
+export function terminateTree(pid, expected, waitMs = TERMINATE_WAIT_MS) {
+  const v = verify(pid, expected);
+  if (v.result !== 'ok') return v;
+  const rows = snapshotProcesses();
+  if (rows.error) return { result: 'error', code: 'procUnreadable', message: rows.error.message };
+  const kids = descendantsOf(pid, childrenByParent(rows));
+  const killedPids = [];
+  for (const k of kids) {
+    try { process.kill(k, 'SIGKILL'); killedPids.push(k); } catch { /* 已退出/无权限：尽力而为 */ }
+  }
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (e) {
+    if (e.code === 'ESRCH') return { result: 'notfound', killedPids };
+    return { result: 'error', code: 'terminateFailed', message: e.message };
+  }
+  const w = waitExited(pid, String(expected.creationFileTime).split(':')[1], waitMs);
+  return { ...w, killedPids };
+}
+
 function snapshotProcesses() {
   let names;
   try { names = fs.readdirSync(PROC); } catch (e) { return { error: e }; }
@@ -265,6 +344,8 @@ export function run(action, params = {}) {
     case 'capture': return capture(params.id);
     case 'verify': return verify(params.id, params);
     case 'terminate': return terminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
+    case 'terminate-tree': return terminateTree(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
+    case 'grace': return gracefulTerminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
     case 'discover': return discover(params.id, params.image, params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS);
     default: return { result: 'error', code: 'unsupportedAction' };
   }

@@ -210,6 +210,14 @@ try {
     assert.equal(batch.length, 1);
     assert.equal(batch[0].result, one.result, `批量与逐条不一致：${JSON.stringify(batch[0])} vs ${JSON.stringify(one)}`);
   });
+  lifecycle('status --ready → 未配置就绪证据时报 UNTESTED', () => {
+    const j = expectOk(run(['status', 'smoke', '--ready']));
+    assert.equal(j.data.status, 'RUNNING');
+    assert.equal(j.data.readiness.state, 'UNTESTED');
+    assert.equal(j.data.readiness.configured, false);
+    assert.equal(j.data.readinessUntested, true);
+  });
+
   lifecycle('重复 start → ALREADY_RUNNING（退出码 3）', () => {
     const j = expectFail(run(['start', 'smoke']), 3, 'ALREADY_RUNNING');
     assert(j.error.message.includes('已有受管实例在运行'));
@@ -354,6 +362,52 @@ try {
     assert(aliases.includes('conc-a') && aliases.includes('conc-b'), `注册表丢更新：${JSON.stringify(aliases)}`);
     expectOk(run(['stop', 'conc-a']));
     expectOk(run(['stop', 'conc-b']));
+  });
+
+  // ---------- stop --tree / --grace（#39 后代连带终止 + 优雅退出） ----------
+  const treeProj = path.join(base, 'tree-proj');
+  fs.mkdirSync(treeProj, { recursive: true });
+  const treeRoot = fs.realpathSync(treeProj);
+  fs.writeFileSync(path.join(treeRoot, 'parent.js'),
+    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},500)']);console.log('child='+c.pid);setInterval(()=>{},500);\n");
+  fs.writeFileSync(path.join(base, 'desc-tree.json'), JSON.stringify({
+    alias: 'smoke-tree', root: treeRoot, entry: 'default', mode: 'node',
+    exe: process.execPath, args: ['parent.js'], envRefs: [],
+  }));
+
+  lifecycle('stop --tree → 连带终止后代（killedPids 含子进程）', () => {
+    const s = expectOk(run(['start-new', '--desc', path.join(base, 'desc-tree.json')]));
+    const logFile = path.join(home, 'logs', s.data.appId, `${s.data.runId}.stdout.log`);
+    let childPid = null;
+    for (let i = 0; i < 30 && childPid == null; i++) {
+      try {
+        const m = /child=(\d+)/.exec(fs.readFileSync(logFile, 'utf8'));
+        if (m) childPid = Number(m[1]);
+      } catch { /* 日志尚未落盘 */ }
+      if (childPid == null) sleep(100);
+    }
+    assert(childPid, '未能从 stdout 日志读到子进程 pid');
+    const j = expectOk(run(['stop', 'smoke-tree', '--tree']));
+    assert.equal(j.data.result, 'stopped');
+    assert(j.data.killedPids?.includes(childPid), `killedPids 不含子进程 ${childPid}：${JSON.stringify(j.data)}`);
+    const cap = psProc('capture', { id: childPid });
+    assert(cap.result === 'notfound' || cap.result === 'exited', `后代进程仍存活：${JSON.stringify(cap)}`);
+  });
+
+  fs.writeFileSync(path.join(treeRoot, 'gracer.js'),
+    "process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},500);\n");
+  fs.writeFileSync(path.join(base, 'desc-grace.json'), JSON.stringify({
+    alias: 'smoke-grace', root: treeRoot, entry: 'default', mode: 'node',
+    exe: process.execPath, args: ['gracer.js'], envRefs: [],
+  }));
+
+  lifecycle('stop --grace → 优雅信号先行，仍存活则强制', () => {
+    const s = expectOk(run(['start-new', '--desc', path.join(base, 'desc-grace.json')]));
+    const j = expectOk(run(['stop', 'smoke-grace', '--grace', '3000']));
+    assert.equal(j.data.result, 'stopped');
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
+    // Linux：SIGTERM 被捕获应优雅退出；Windows 控制台进程 taskkill 无 /F 多半失败 → grace 超时后强制
+    assert(rt.current.exitNote.includes('grace'), `exitNote 未记录 grace 过程：${rt.current.exitNote}`);
   });
 
   lifecycle('文本模式人类可读输出抽查（status 含 port/状态）', () => {
