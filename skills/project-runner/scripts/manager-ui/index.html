@@ -91,6 +91,9 @@ select {
 select:hover { color:var(--text); border-color:rgba(94,234,212,.3) }
 select option { background:#151d27; color:var(--text) }
 .icon-btn { width:30px; padding:0; font-size:13px }
+.op-group { display:inline-flex; gap:6px; margin-left:10px }
+.op-btn { font-size:12px; padding:3px 10px }
+.op-btn:disabled { opacity:.4; cursor:default }
 #refreshBtn::before { content:"↻"; font-size:14px; line-height:1 }
 
 .topbar {
@@ -478,11 +481,11 @@ aside {
 <header class="topbar">
   <div class="brand"><span class="live-dot" aria-hidden="true"></span><div class="brand-text"><span class="kicker">Project Runner</span><strong>运行管理台</strong></div></div>
   <button id="filesBtn" type="button" disabled>文件</button>
-  <span class="badge ro">只读 · v1</span>
+  <span class="badge ro">本地 · v1</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner warn" id="roBanner">只读视图：这里不提供启动/停止/重启——stop 是有界强制终止，请用 manager CLI 或让 Agent 执行；未结记录的恢复指引见下方黄色提示。</div>
+<div class="banner warn" id="roBanner">启停与 manager CLI 同一实现（仅本 Skill 登记的受管应用）：stop 是有界强制终止，不杀进程树；STARTING/UNKNOWN 未结记录的恢复仍走 CLI --ack-unresolved。</div>
 <div class="banner" id="fatalBanner" hidden></div>
 <div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">
@@ -549,10 +552,10 @@ let wantedHistoryRun = null, selectedHistoryRun = null;
 let fatal = false;            // 令牌失效后停止轮询
 let degrading = false;        // 数据损坏等持久性错误
 
-async function api(path, signal) {
+async function api(path, signal, method = 'GET') {
   const u = new URL(path, location.origin);
   u.searchParams.set('token', token);
-  const r = await fetch(u, { cache: 'no-store', signal });
+  const r = await fetch(u, { cache: 'no-store', signal, method });
   const j = await r.json().catch(() => ({ ok: false, error: { code: 'BAD_JSON', message: '响应解析失败' } }));
   if (!r.ok) {
     const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
@@ -722,6 +725,22 @@ function renderDetail(d) {
   head.append(el('span', 'name', d.alias), statusPill(d.status),
     el('span', 'pill mode', d.mode ?? '?'),
     el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'));
+  if (d.managed !== false) {
+    // 受管启停按钮：与 CLI start/stop/restart 同一实现；非受管登记不提供
+    const ops = el('span', 'op-group');
+    const st = d.status;
+    const mk = (label, op, enabled, title) => {
+      const b = el('button', 'op-btn', label);
+      b.disabled = !enabled;
+      b.title = title;
+      b.addEventListener('click', () => doLifecycle(d.alias, op));
+      ops.appendChild(b);
+    };
+    mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING', '复用已保存配置启动（同 CLI start）');
+    mk('停止', 'stop', st === 'RUNNING', '有界强制终止，不杀进程树（同 CLI stop）');
+    mk('重启', 'restart', st === 'RUNNING', '确认旧实例退出后启动新实例（同 CLI restart）');
+    head.appendChild(ops);
+  }
   head.appendChild(el('span', 'spacer'));
   head.appendChild(el('span', 'appid', d.appId));
   card.appendChild(head);
@@ -801,6 +820,27 @@ function renderDetail(d) {
   bar.hidden = false;
   applyDetail(detailTouched ? detailOpen : needsAttention);
 }
+let lifecycleBusy = false;
+async function doLifecycle(alias, op) {
+  if (lifecycleBusy || !alias) return;
+  if ((op === 'stop' || op === 'restart')
+      && !confirm(`${op === 'stop' ? '停止' : '重启'} ${alias}？\n\nstop 是有界强制终止：先按进程身份核验再强杀目标进程（不杀进程树），不是优雅关机。`)) return;
+  lifecycleBusy = true;
+  conn(`${op} ${alias}…`);
+  try {
+    const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}`, undefined, 'POST');
+    const pid = r.pid ?? r.start?.pid;
+    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}`, false);
+  } catch (e) {
+    showBanner(`${op} ${alias} 失败：${e.message}`, true);
+  }
+  lifecycleBusy = false;
+  manualRefresh = true;
+  await Promise.all([loadApps(), loadStatus(), loadSources()]);
+  manualRefresh = false;
+  pollTail();
+}
+
 async function loadStatus() {
   if (fatal || (paused && !manualRefresh) || !selected) return;
   try {

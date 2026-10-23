@@ -727,6 +727,12 @@ export async function cmdUi(ctx) {
         resolveSource: (ref, src) => resolveSource(ctx.home, ref, src),
         listTree: (ref, p) => listTree(ctx.home, ref, p),
         readFile: (ref, p, offset) => readProjectFile(ctx.home, ref, p, offset),
+        // 受管启停：复用 CLI 同一实现与全部安全检查（锁、身份核验、未结记录拒绝）
+        lifecycle: (ref, op) => {
+          const fn = { start: cmdStart, stop: cmdStop, restart: cmdRestart }[op];
+          if (!fn) throw usageError(`不支持的操作：${op}（仅 start|stop|restart）`);
+          return fn({ ...ctx, rest: [ref] }, ref);
+        },
       },
     });
   } catch (e) {

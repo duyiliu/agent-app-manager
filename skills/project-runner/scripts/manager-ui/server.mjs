@@ -1,6 +1,7 @@
-// project-runner 本地只读 Web 管理台服务（design.md §2.2 / AC08）。
-// 仅 127.0.0.1 + 一次性令牌 + Host 校验 + GET；数据层全部经 api 注入复用 manager.mjs，
-// 本文件不实现任何业务逻辑，也不写运行数据。前台常驻直到 Ctrl+C，无守护、无自动重启。
+// project-runner 本地 Web 管理台服务（design.md §2.2 / AC08）。
+// 仅 127.0.0.1 + 一次性令牌 + Host 校验；GET 全部只读，启停仅 POST /api/lifecycle
+// （start|stop|restart，复用 CLI 同一实现）。数据层全部经 api 注入复用 manager.mjs，
+// 本文件不实现任何业务逻辑。前台常驻直到 Ctrl+C，无守护、无自动重启。
 
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -60,6 +61,9 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
       return;
+    }
+    if (u.pathname === '/api/lifecycle') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '') });
     }
     if (u.pathname === '/api/apps') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...api.list(), home } });
@@ -126,14 +130,14 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   function handle(req, res) {
     let u;
     try {
-      if (req.method !== 'GET') {
-        return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '管理台只读，仅支持 GET 请求' } });
-      }
       const host = String(req.headers.host ?? '');
       if (host !== `127.0.0.1:${boundPort}` && host !== `localhost:${boundPort}`) {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: 'Host 不允许访问' } });
       }
       u = new URL(req.url, `http://127.0.0.1:${boundPort}`);
+      if (req.method !== 'GET' && !(req.method === 'POST' && u.pathname === '/api/lifecycle')) {
+        return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '仅支持 GET 与 POST /api/lifecycle' } });
+      }
       if (!tokenOk(tokenHash, u.searchParams.get('token'))) {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '缺少或错误的访问令牌；请使用启动时打印的完整地址' } });
       }
@@ -163,7 +167,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   const uiUrl = `http://127.0.0.1:${boundPort}/?token=${token}`;
   process.stdout.write([
     '',
-    `[project-runner] 运行管理台（只读）: ${uiUrl}`,
+    `[project-runner] 运行管理台: ${uiUrl}`,
     `  数据目录: ${home}`,
     '  该地址包含访问令牌，请勿转发给他人；页面展示的日志可能含敏感信息。',
     '  Ctrl+C 退出（无常驻服务，退出即停止）。',
