@@ -722,6 +722,7 @@ export async function cmdUi(ctx) {
         resolveSource: (ref, src) => resolveSource(ctx.home, ref, src),
         listTree: (ref, p) => listTree(ctx.home, ref, p),
         readFile: (ref, p, offset) => readProjectFile(ctx.home, ref, p, offset),
+        doctor: () => cmdDoctor(ctx),
         // 受管启停与移除：复用 CLI 同一实现与全部安全检查（锁、身份核验、未结记录拒绝）；ack 透传 --ack-unresolved
         lifecycle: (ref, op, ack) => {
           const fn = { start: cmdStart, stop: cmdStop, restart: cmdRestart, remove: cmdRemove }[op];

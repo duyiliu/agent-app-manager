@@ -29,6 +29,30 @@
   --ui-font:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
   --mono-font:"Cascadia Code","JetBrains Mono",Consolas,"Microsoft YaHei UI",monospace;
 }
+:root[data-theme="light"] {
+  --bg:#f2f5f8;
+  --panel:#ffffff;
+  --panel-2:#f5f8fb;
+  --panel-3:#e9eef4;
+  --line-soft:rgba(30,41,59,.08);
+  --line:rgba(30,41,59,.14);
+  --line-strong:rgba(30,41,59,.24);
+  --text:#1d2937;
+  --text-dim:#46586d;
+  --text-faint:#63758c;
+  --accent:#0d9488;
+  --accent-text:#0f766e;
+  --accent-soft:rgba(13,148,136,.12);
+  --danger:#dc2626;
+  --danger-soft:rgba(220,38,38,.08);
+  --warn:#b45309;
+  --warn-soft:rgba(180,83,9,.10);
+  --ok:#15803d;
+  --shadow:0 16px 40px rgba(15,23,42,.16);
+}
+:root[data-theme="light"] body { background:var(--bg) }
+:root[data-theme="light"] #log { background:#f8fafc }
+:root[data-theme="light"] .line { color:#33475e }
 * { box-sizing:border-box }
 [hidden] { display:none!important }
 html,body { height:100% }
@@ -436,8 +460,16 @@ aside {
   padding:1px 16px 1px 13px;
   border-left:3px solid transparent;
   line-height:1.62;
+  cursor:pointer;
   color:#c3cfdd}
 .line:hover { background:rgba(148,163,184,.05) }
+.line.copied { background:var(--accent-soft) }
+.doc-overlay { position:fixed; inset:0; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; z-index:60 }
+.doc-card { width:min(760px,92vw); max-height:82vh; overflow:auto; background:var(--panel); border:1px solid var(--line-strong); border-radius:12px; box-shadow:var(--shadow) }
+.doc-head { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line) }
+.doc-head .dim { color:var(--text-faint); font-size:11px }
+.doc-head .icon-btn { margin-left:auto }
+#docBody { padding:12px 14px; margin:0; font:11.5px/1.6 var(--mono-font); white-space:pre-wrap; color:var(--text-dim) }
 .line.jr { color:#8ff0de; background:rgba(45,212,191,.045); border-left-color:rgba(45,212,191,.38) }
 .line.err { color:#ffb9b9; background:rgba(248,113,113,.075); border-left-color:var(--danger) }
 .line.warn { color:#f5d88f; border-left-color:rgba(251,191,36,.48); background:rgba(251,191,36,.035) }
@@ -491,6 +523,8 @@ aside {
 <body>
 <header class="topbar">
   <div class="brand"><span class="live-dot" aria-hidden="true"></span><div class="brand-text"><span class="kicker">Project Runner</span><strong>运行管理台</strong></div></div>
+  <button id="docBtn" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
+  <button id="themeBtn" type="button" title="切换深色/浅色主题" aria-label="切换主题">◐</button>
   <button id="filesBtn" type="button" disabled>文件</button>
   <span class="badge ro" id="verBadge">本地</span>
   <div class="home-path" id="homePath"></div>
@@ -527,6 +561,7 @@ aside {
         <button id="pauseBtn" type="button" aria-pressed="false">暂停</button>
         <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" type="button" disabled>清屏</button>
+        <button id="dlBtn" type="button" disabled title="下载当前缓存的日志行">下载</button>
         <span id="logMeta"></span>
       </div>
       <div id="log" tabindex="0" aria-label="日志内容"><div class="empty">选择左侧应用后查看日志。</div></div>
@@ -550,6 +585,12 @@ aside {
     </div>
   </div>
 </aside>
+<div id="docOverlay" class="doc-overlay" hidden>
+  <div class="doc-card" role="dialog" aria-label="只读诊断">
+    <div class="doc-head"><strong>只读诊断</strong><span class="dim">同 manager doctor：列出问题不自动修复</span><button id="docClose" class="icon-btn" type="button" title="关闭" aria-label="关闭诊断">✕</button></div>
+    <pre id="docBody"></pre>
+  </div>
+</div>
 <script>
 const $ = s => document.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -840,7 +881,17 @@ function renderDetail(d) {
   const grid = el('div', 'kv');
   kvRow(grid, '仓库', d.root);
   kvRow(grid, '入口', d.entry);
-  kvRow(grid, '预期端口', d.expectedPort != null ? d.expectedPort : null, 'dim');
+  if (d.expectedPort != null) {
+    grid.appendChild(el('div', 'k', '预期端口'));
+    const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));
+    if (st === 'RUNNING') {
+      const a = el('a', 'port-link', String(d.expectedPort));
+      a.href = `http://127.0.0.1:${d.expectedPort}/`;
+      a.target = '_blank'; a.rel = 'noopener'; a.title = '新标签页打开该应用端口';
+      pv.appendChild(a);
+    } else pv.textContent = String(d.expectedPort);
+    grid.appendChild(pv);
+  }
   kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
   kvRow(grid, 'runId', run?.runId);
   kvRow(grid, 'phase', run?.phase);
@@ -1105,6 +1156,7 @@ async function loadSources() {
     $('#clearBtn').disabled = !has;
     $('#logFilter').disabled = !has;
     $('#errorsBtn').disabled = !has;
+    $('#dlBtn').disabled = !has;
     if (!has) {
       const missingRunId = wantedHistoryRun;
       wantedHistoryRun = null;
@@ -1128,7 +1180,12 @@ async function loadSources() {
       $('#logMeta').textContent = '';
       return;
     }
-    const want = historicalSource || (logSrc && [...runSel.options].some(o => o.value === logSrc) ? logSrc : runSel.options[0].value);
+    let remembered = null;
+    try { remembered = selected ? sessionStorage.getItem('pr-ui-src:' + selected) : null; } catch {}
+    const want = historicalSource
+      || (logSrc && [...runSel.options].some(o => o.value === logSrc) ? logSrc : null)
+      || (remembered && [...runSel.options].some(o => o.value === remembered) ? remembered : null)
+      || runSel.options[0].value;
     runSel.value = want;
     const picked = (d.sources ?? []).find(s => s.src === want);
     logSrcLabel = picked ? picked.label : '';
@@ -1176,6 +1233,7 @@ async function selectHistoryRun(runId) {
 $('#runSel').addEventListener('change', e => {
   wantedHistoryRun = null;
   $('#detail').querySelectorAll('.history-pick.selected').forEach(n => n.classList.remove('selected'));
+  try { if (selected) sessionStorage.setItem('pr-ui-src:' + selected, e.target.value); } catch {}
   logSrc = e.target.value || null;
   const opt = e.target.selectedOptions[0];
   logSrcLabel = opt ? opt.textContent.replace(/^● /, '').replace(/ · [\d.]+ (KB|MB)$/, '') : '';
@@ -1194,6 +1252,34 @@ $('#errorsBtn').addEventListener('click', () => {
   $('#errorsBtn').setAttribute('aria-pressed', String(errorsOnly));
   renderLines(true);
 });
+$('#log').addEventListener('click', (e) => {
+  const row = e.target.closest('.line');
+  if (!row) return;
+  copyText(row.textContent).then((ok) => { if (ok) { row.classList.add('copied'); setTimeout(() => row.classList.remove('copied'), 800); } });
+});
+$('#dlBtn').addEventListener('click', () => {
+  const text = lines.map((l) => l.text).join('\n');
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${selected || 'app'}-${(logSrcLabel || logFallbackLabel || 'log').replace(/[^\w.-]+/g, '_')}.log`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
+try { if (localStorage.getItem('pr-ui-theme') === 'light') document.documentElement.dataset.theme = 'light'; } catch {}
+$('#themeBtn').addEventListener('click', () => {
+  const light = document.documentElement.dataset.theme === 'light';
+  if (light) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = 'light';
+  try { localStorage.setItem('pr-ui-theme', light ? 'dark' : 'light'); } catch {}
+});
+$('#docBtn').addEventListener('click', async () => {
+  $('#docOverlay').hidden = false;
+  $('#docBody').textContent = '诊断中…';
+  try { $('#docBody').textContent = JSON.stringify(await api('/api/doctor'), null, 2); }
+  catch (e) { $('#docBody').textContent = `诊断失败：${e.message}`; }
+});
+$('#docClose').addEventListener('click', () => { $('#docOverlay').hidden = true; });
+$('#docOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.hidden = true; });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
   const box = $('#log');

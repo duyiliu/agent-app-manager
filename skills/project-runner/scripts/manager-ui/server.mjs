@@ -55,6 +55,9 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     if (u.pathname === '/api/lifecycle') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null) });
     }
+    if (u.pathname === '/api/doctor') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.doctor() });
+    }
     if (u.pathname === '/api/meta') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { version: MANAGER_VERSION } });
     }
