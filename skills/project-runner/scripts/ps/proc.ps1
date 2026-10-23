@@ -4,13 +4,16 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'terminate')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'discover')]
   [string]$Action,
 
   [int]$Id = 0,
   [string]$CreationFileTime = '',
   [string]$Image = '',
-  [int]$WaitMs = 10000
+  [int]$WaitMs = 10000,
+  # verify-batch：UTF-8 JSON 数组的 base64，形如
+  # [{ "id": 123, "creationFileTime": "...", "image": "..." }, ...]
+  [string]$Json = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,7 +111,7 @@ public static class ProcUtil {
 # 每次 pwsh -File 都是新进程，直接编译加载即可
 Add-Type -TypeDefinition $typeSrc -Language CSharp
 
-function Convert-Result([string]$raw) {
+function Parse-Result([string]$raw) {
   $parts = $raw -split "`t", 3
   $obj = [ordered]@{}
   switch ($parts[0]) {
@@ -127,16 +130,110 @@ function Convert-Result([string]$raw) {
     'ERR' { $obj.result = 'error'; $obj.code = [string]$parts[1]; $obj.win32 = [int]$parts[2] }
     default { $obj.result = 'error'; $obj.code = 'unexpected'; $obj.raw = $raw }
   }
-  [pscustomobject]$obj | ConvertTo-Json -Compress
+  return [pscustomobject]$obj
 }
 
-if (($Action -ne 'capture') -and (($Id -le 0) -or (-not $CreationFileTime) -or (-not $Image))) {
+function Convert-Result([string]$raw) {
+  Parse-Result $raw | ConvertTo-Json -Compress
+}
+
+# verify-batch：一次 pwsh 调用逐项核验，避免 list 对 N 个应用 spawn N 次（#15/#51）。
+# 与 verify 走同一 ProcUtil.Verify（同句柄核验），语义完全一致。
+if ($Action -eq 'verify-batch') {
+  if (-not $Json) {
+    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $items = @()
+  try {
+    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
+    $items = @($jsonText | ConvertFrom-Json)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $out = @()
+  foreach ($it in $items) {
+    $out += (Parse-Result ([ProcUtil]::Verify([int]$it.id, [long]$it.creationFileTime, [string]$it.image)))
+  }
+  $out | ConvertTo-Json -Compress
+  exit 0
+}
+
+if (($Action -in 'verify', 'terminate') -and (($Id -le 0) -or (-not $CreationFileTime) -or (-not $Image))) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
-if (($Action -eq 'capture') -and ($Id -le 0)) {
+if (($Action -in 'capture') -and ($Id -le 0)) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
+}
+if (($Action -eq 'discover') -and (($Id -le 0) -or (-not $Image))) {
+  [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+  exit 0
+}
+
+# discover：有界轮询目标 wrapper（-Id）的后代进程，返回映像基名匹配 -Image 的候选清单。
+# 供命令模式受管启动使用——manager 拉起 cmd wrapper 后在此等待真实目标出现。
+# 首次匹配后不立即返回，再观察 settleMs 取最终清单：脚本常先后拉起多个进程，
+# 第一次轮询只捕到部分会造成"假唯一"，把歧义场景误判成可托管。
+if ($Action -eq 'discover') {
+  $deadline = (Get-Date).AddMilliseconds($WaitMs)
+  $settleMs = 1500
+  $foundAt = $null
+  while ($true) {
+    $rows = $null
+    try {
+      $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate
+    } catch {
+      [pscustomobject]@{ result = 'error'; code = 'cimFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+      exit 0
+    }
+    $byParent = @{}
+    $wrapperAlive = $false
+    foreach ($p in $rows) {
+      $pp = [int64]$p.ParentProcessId
+      if ([int64]$p.ProcessId -eq $Id) { $wrapperAlive = $true }
+      if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
+      [void]$byParent[$pp].Add($p)
+    }
+    $queue = [System.Collections.ArrayList]@([int64]$Id)
+    $seen = @{}
+    $found = @()
+    while ($queue.Count -gt 0) {
+      $cur = $queue[0]; $queue.RemoveAt(0)
+      $kids = $byParent[[int64]$cur]
+      if (-not $kids) { continue }
+      foreach ($c in $kids) {
+        $cpid = [int64]$c.ProcessId
+        if ($seen.ContainsKey($cpid)) { continue }
+        $seen[$cpid] = $true
+        [void]$queue.Add($cpid)
+        $img = [string]$c.ExecutablePath
+        if ($img -and ([IO.Path]::GetFileName($img) -ieq $Image)) {
+          $found += [pscustomobject]@{ pid = $cpid; image = $img; creationFileTime = [string]$c.CreationDate.ToFileTime() }
+        }
+      }
+    }
+    if ($found.Count -gt 0) {
+      if (-not $foundAt) { $foundAt = Get-Date }
+      if ((Get-Date) -ge $foundAt.AddMilliseconds($settleMs)) {
+        [pscustomobject]@{ result = 'found'; candidates = $found } | ConvertTo-Json -Compress
+        exit 0
+      }
+    } else {
+      $foundAt = $null # 本轮无匹配：瞬时候选已消失，不计入歧义也不开 settle
+      if (-not $wrapperAlive) {
+        [pscustomobject]@{ result = 'wrapperExited'; candidates = @() } | ConvertTo-Json -Compress
+        exit 0
+      }
+      if ((Get-Date) -ge $deadline) {
+        [pscustomobject]@{ result = 'timeout'; candidates = @() } | ConvertTo-Json -Compress
+        exit 0
+      }
+    }
+    Start-Sleep -Milliseconds 400
+  }
 }
 
 $raw = switch ($Action) {
