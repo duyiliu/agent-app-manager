@@ -23,7 +23,7 @@
 - **启动即登记**：不要求用户预先 `register`；首次由 Skill 在获得启动授权后提交经过确认的启动描述。
 - **管理范围最小化**：仅记录本 Skill 发起的启动；IDEA Run/Debug、手工 Maven/Gradle、手工 `java -jar`、Docker 启动均不纳入注册表或生命周期管理。外部进程只可用于端口冲突诊断，绝不被自动接管/停止。
 - **零项目侵入**：默认不改 `pom.xml`、`build.gradle`、`rebel.xml`、源码或项目启动脚本；构建、配置变更与初始化依 PR #5 的独立授权规则处理。
-- **简单部署**：Windows 11 + PowerShell 7，或 Linux（`/proc`，不依赖 pwsh）；Node.js 22。尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地只读管理台：按需启动、非常驻、仅绑定 127.0.0.1 且无令牌（本机可信用户，见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发；Linux 路径不调用 PowerShell。macOS 暂不支持（无 `/proc`）。
+- **简单部署**：Windows 11 + PowerShell 7，或 Linux（`/proc`，不依赖 pwsh）；Node.js 22。Linux 安全停止还需要随 Skill 分发的 Python 3.9+ pidfd helper 与内核 pidfd 支持；缺少时拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`。尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地只读管理台：按需启动、非常驻、仅绑定 127.0.0.1 且无令牌（本机可信用户，见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发；Linux 路径不调用 PowerShell。macOS 暂不支持（无 `/proc`）。
 - **保持原能力**：PR #5 现有单项目启动规程、热加载验证、`.tmp` 日志与只读日志查看能力不被替换（v2.2 起并入 `manager ui`，原单项目 Viewer 移除）。
 
 非目标：项目全盘扫描、通用进程盘点、IDEA 进程关联与接管、批量启停、自动构建、跨机器管理、Docker 编排、JVM 监控、远程管理、对外网开放或常驻的 Web 控制台、多实例托管（本地只读管理台的边界见 §2.2）。
@@ -165,7 +165,7 @@ ui [--port N] [--open]                      # 本地 Web 管理台（127.0.0.1 �
 | AC06 | 日志按运行批次可查询且有界；受管与非受管、存活与就绪、JRebel 是否验证分别展示，无虚假成功 |
 | AC07 | 不改业务项目；普通 Java 模式无需 JRebel 配置；PR #5 单项目启动、JRebel 验证、只读日志查看（v2.2 起为 `manager ui`）、原 `.tmp` 日志继续可用 |
 | AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）与项目文件（路径白名单、拒绝穿越与符号链接），启停仅 POST `/api/lifecycle`（与 CLI 同一实现）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
-| AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
+| AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；安全停止使用 pidfd 锚定进程身份，pidfd 不可用时明确拒绝；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
 
@@ -193,11 +193,21 @@ Job Object 观测旁证（2026-10-19/20 两次实测合并；不构成 L3 通过
 
 **v2.6（2026-10-20，issue #12 管理台体验增强）**：① `ui` 新增 `--open`：监听成功后用默认浏览器打开带令牌 URL；默认不开（Agent 前台拉起场景不期望弹浏览器），打开失败降级为仅打印 URL，不阻塞 ui；端口冲突时不拉浏览器。② 日志面板新增渲染层正则过滤输入框与「只看错误」开关（等价内置 errorPattern）：`lines` 数组保留全量、清空条件即恢复，增量 poll 新行按当前条件入视图，follow/滚动停止语义不变；无效正则给出标红与 meta 提示而非静默失效。③ 页面选择应用后 `history.replaceState` 回写 `?app=<别名>`，刷新保持选中。④ 未结记录（UNRESOLVED_RUN）告警中的 `start <alias> --ack-unresolved <runId>` 提供一键复制（`navigator.clipboard` 优先，选区 + `execCommand` 降级）。⑤ `document.title` 显示运行中应用数，如 `(2) Project Runner · 运行管理台`。
 
-**v2.7（2026-10-22，Linux 支持）**：在 Windows 11 + pwsh 7 之外新增 Linux 支持（纯 Node `/proc`，无 pwsh 依赖）；macOS 明确不支持并返回 `PLATFORM_UNSUPPORTED`。进程探针在 `lib/probe.mjs` 按平台分派，Windows 实现保持原位，Linux 使用 `lib/proc-linux.mjs`：
+**v2.7（2026-10-22，Linux 支持）**：在 Windows 11 + pwsh 7 之外新增 Linux 支持（`/proc`，无 pwsh 依赖）；macOS 明确不支持并返回 `PLATFORM_UNSUPPORTED`。进程探针在 `lib/probe.mjs` 按平台分派，Windows 实现保持原位，Linux 使用 `lib/proc-linux.mjs`：
 - 身份：`creationFileTime` 在 Linux 为不透明字符串 `<boot_id>:<starttime>`（starttime 取 `/proc/<pid>/stat` 第 22 字段），`image` 为 `/proc/<pid>/exe`（剥离 `" (deleted)"`，不可读时降级 `comm:<comm>`）；`Z`/`X`/`x` 视为已退出。
-- 终止：同 bootId+starttime+image 核验后 `SIGKILL`，有界等待退出；PID 复用不触碰新进程。
+- 终止：通过 pidfd 锚定进程实例，再核验同 bootId+starttime+image 后发送 `SIGKILL`，有界等待退出；PID 复用不触碰新进程。
 - 命令模式：Windows `cmd /d /s /c`，Linux `/bin/sh -c`；后代发现扫描 `/proc/*/stat` 的 ppid 树，`expectedImage` 按 exe basename（回退 comm）匹配。
 - desc：Linux 允许无扩展名真实可执行文件，要求普通文件 + 可执行位；`#!` 脚本与 `.cmd`/`.bat`/`.ps1` 拒绝（脚本是包装进程）；`where`/`.exe` 补全/WindowsApps 检查仅 Windows。
 - 端口诊断：Linux 解析 `/proc/net/tcp{,6}` 的 LISTEN inode，再扫 `/proc/*/fd` 反查 pid；权限不足时 `pid=null`，只报告监听。
+- 安全终止：Linux 使用 `scripts/linux/pidfd-terminate.py`，以 pidfd 锚定进程实例后核验 `boot_id:starttime` + exe 并发送信号；需要 Python 3.9+、`os.pidfd_open`、`signal.pidfd_send_signal` 与内核 pidfd 支持。缺少任一能力时拒绝终止，不回退到存在 PID 复用竞态的 `process.kill(pid)`。
 - 测试/CI：新增 `test/platform.mjs`；CI matrix `windows-latest` + `ubuntu-latest`，补齐 cli/runtime 冒烟。
 Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享。
+
+**v2.8（2026-10-23，命令模式可用性与探针开销修复）**：
+- **已知启动器单链折叠（discover）**：`npm run dev`/`mvn spring-boot:run` 等场景中包装器与目标同映像且构成单链，原实现直接 `DISCOVERY_AMBIGUOUS`，与 SKILL/README 宫称的命令模式覆盖面不符（detect 给出的 npm 候选实际不可用）。两侧探针（`ps/proc.ps1` 与 `lib/proc-linux.mjs`）在 settle 后别除「是其他候选祖先且命令行命中已知启动器特征（npm-cli/yarn/pnpm/maven plexus-classworlds/gradle wrapper）」的候选；恰好利 1 个候选时折叠为真实目标。目标自身派生同映像子进程等其余同映像链结构上不可区分，仍按歧义拒绝，安全边界不变。回归：`runtime-smoke` 新增真实 `npm run dev` 用例，原歧义拒绝用例继续通过。另修复上游 `terminate-tree` 在 Windows 的必败 bug（PSCustomObject 不能直接赋值新属性 killedPids，改用 Add-Member）。
+- **端口诊断单次调用**：`portOccupants` 在 Windows 原先 1 次 `port.ps1` + 每监听人 1 次 capture（N+1 次 pwsh 冷启动）。合并为 `proc.ps1 -Action port`（复用同进程已编译的 ProcUtil，identity.image 与 capture 同源，保持 #55 口径）；`ps/port.ps1` 移除。
+- **核验短缓存（1.5s TTL）**：ui 同一轮询周期内 `/api/apps`（批量）与 `/api/status`（单条）重复核验同一运行，Windows 上每次都是 pwsh 冷启动。缓存仅存活结论，键含完整身份（pid+creationFileTime+image），终止类操作后主动失效；`cmdList` 同时复用单次 runtime 读取。
+- **pidFile 契约补全**：log-writer spawn 失败时写 `pidFile=0` 并把错误原文落入 stderr 批次日志；manager 据此立即落 `SPAWN_FAILED`（STOPPED 可重试），不再等满窗口后误报 `IDENTITY_CAPTURE_FAILED`/UNKNOWN；pidFile 等待窗口 1s→5s（冷启动/杀毒扫描余量，文件出现即返回）。
+- **follow 轮转重置**：`logs --follow` 检测到 `size < pos`（log-writer 已 rename 旧文件并重建同名新文件）时重置到新文件起始继续跟随并提示；旧尾部可用 `--src run:<runId>.<stream>.1` 查看。
+- **ui 渲染窗口有界**：过滤激活时旧逻辑按「DOM 行数−缓存行数」修剪永不触发，长会话 DOM 无界增长；改为计数式上限（MAX_LINES），不再每 tick 全量 `querySelectorAll`。
+- 其他：仓库根新增 `package.json`（engines + `npm test`/`npm run check` 聚合冒烟）；`decodeCmdOutput` 在无 GBK 解码器的 Node 上回退 lossy UTF-8。
