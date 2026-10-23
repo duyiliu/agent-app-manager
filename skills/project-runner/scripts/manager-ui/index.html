@@ -268,6 +268,11 @@ aside {
 .detail-bar .db-name { font:600 12px var(--ui-font); color:var(--text) }
 .detail-bar .db-info { min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--text-faint) }
 .detail-bar .db-hint { flex:none; font-size:10px; color:var(--text-faint) }
+.detail-head { flex:none; display:flex; align-items:stretch; border-bottom:1px solid var(--line) }
+.detail-head .detail-bar { flex:1 1 auto; min-width:0; border-bottom:0 }
+.detail-ops { flex:none; display:inline-flex; align-items:center; padding:0 12px 0 4px; margin-left:0; gap:6px;
+  background:linear-gradient(180deg,#151e28 0%,#121922 100%) }
+.detail-ops[hidden] { display:none }
 .empty {
   margin:44px auto;
   max-width:430px;
@@ -498,11 +503,14 @@ aside {
     <div id="appList" role="list"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
+    <div class="detail-head">
     <button id="detailBar" class="detail-bar" type="button" hidden aria-expanded="false" title="展开/收起应用详情">
       <span class="db-toggle" aria-hidden="true">▸</span>
       <span id="detailSummary" class="db-summary"></span>
       <span class="db-hint">详情</span>
     </button>
+    <span id="detailOps" class="op-group detail-ops" hidden></span>
+    </div>
     <div id="detail"><div class="empty">正在加载注册表…<br>这里展示由本 Skill 启动并登记的应用；IDEA / 手工启动的进程不会出现。</div></div>
     <section class="log-panel" aria-label="运行日志">
       <div class="log-toolbar">
@@ -716,6 +724,8 @@ function renderDetail(d) {
   box.replaceChildren();
   if (!d) {
     bar.hidden = true;
+    $('#detailOps').hidden = true;
+    $('#detailOps').replaceChildren();
     box.hidden = false;
     box.appendChild(el('div', 'empty', selected ? '该应用已不在注册表中。' : '从左侧选择应用查看状态与日志。'));
     return;
@@ -725,21 +735,31 @@ function renderDetail(d) {
   head.append(el('span', 'name', d.alias), statusPill(d.status),
     el('span', 'pill mode', d.mode ?? '?'),
     el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'));
+  const opsSlot = $('#detailOps');
+  opsSlot.replaceChildren();
   if (d.managed !== false) {
-    // 受管启停按钮：与 CLI start/stop/restart 同一实现；非受管登记不提供
-    const ops = el('span', 'op-group');
+    // 受管启停按钮：与 CLI start/stop/restart 同一实现；非受管登记不提供。
+    // 摘要栏（折叠态也可见）与详情卡头各渲染一组。
     const st = d.status;
-    const mk = (label, op, enabled, title) => {
-      const b = el('button', 'op-btn', label);
-      b.disabled = !enabled;
-      b.title = title;
-      b.addEventListener('click', () => doLifecycle(d.alias, op));
-      ops.appendChild(b);
+    const makeOps = () => {
+      const ops = el('span', 'op-group');
+      const mk = (label, op, enabled, title) => {
+        const b = el('button', 'op-btn', label);
+        b.disabled = !enabled;
+        b.title = title;
+        b.addEventListener('click', (e) => { e.stopPropagation(); doLifecycle(d.alias, op); });
+        ops.appendChild(b);
+      };
+      mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING', '复用已保存配置启动（同 CLI start）');
+      mk('停止', 'stop', st === 'RUNNING', '有界强制终止，不杀进程树（同 CLI stop）');
+      mk('重启', 'restart', st === 'RUNNING', '确认旧实例退出后启动新实例（同 CLI restart）');
+      return ops;
     };
-    mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING', '复用已保存配置启动（同 CLI start）');
-    mk('停止', 'stop', st === 'RUNNING', '有界强制终止，不杀进程树（同 CLI stop）');
-    mk('重启', 'restart', st === 'RUNNING', '确认旧实例退出后启动新实例（同 CLI restart）');
-    head.appendChild(ops);
+    head.appendChild(makeOps());
+    opsSlot.appendChild(makeOps());
+    opsSlot.hidden = false;
+  } else {
+    opsSlot.hidden = true;
   }
   head.appendChild(el('span', 'spacer'));
   head.appendChild(el('span', 'appid', d.appId));
