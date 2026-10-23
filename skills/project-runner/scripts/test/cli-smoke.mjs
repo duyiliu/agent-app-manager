@@ -42,6 +42,19 @@ w(path.join(aokLogs, '.rkeep1.pid'), '123\n');
 w(path.join(aokLogs, '.rold1.pid'), '123\n');
 w(path.join(aokLogs, '.rold1.sink.json'), '{}\n');
 w(path.join(aokLogs, 'notes.txt'), '不是批次日志，必须保留\n');
+let externalPruneFiles = [];
+if (process.platform !== 'win32') {
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(outside);
+  const outsideDirLog = path.join(outside, 'rold1.stdout.log');
+  const outsideFileLog = path.join(outside, 'outside.log');
+  w(outsideDirLog, 'external directory log\n');
+  w(outsideFileLog, 'external symlink log\n');
+  w(path.join(home, 'runtime', 'asymlink.json'), JSON.stringify({ schemaVersion: 1, appId: 'asymlink', current: null, prevRuns: [] }));
+  fs.symlinkSync(outside, path.join(home, 'logs', 'asymlink'), 'dir');
+  fs.symlinkSync(outsideFileLog, path.join(aokLogs, 'rold3.stdout.log'), 'file');
+  externalPruneFiles = [outsideDirLog, outsideFileLog];
+}
 w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line A\ntmp line B\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 w(hintFile, 'hint line 1\nhint line 2\n');
@@ -288,6 +301,11 @@ await check('prune 默认 dry-run：列出将删内容且不删除任何文件',
   assert(pd.json.data.tmpOrphans.some((f) => f.file === oldTmp1));
   assert(pd.json.data.tmpOrphans.some((f) => f.file === oldTmp2));
   assert(pd.json.data.skipped.some((s) => s.kind === 'tmp' && s.target === recentTmp));
+  if (externalPruneFiles.length) {
+    const files = pd.json.data.logs.flatMap((a) => a.files).map((f) => f.file);
+    assert(!files.includes(path.join(aokLogs, 'rold3.stdout.log')), 'dry-run must skip symlinked log files');
+    assert(pd.json.data.skipped.some((s) => s.target === path.join(home, 'logs', 'asymlink')), 'dry-run must report symlinked log directories');
+  }
   assert(fs.existsSync(path.join(aokLogs, 'rold1.stdout.log')), 'dry-run 不得删除文件');
   assert(fs.existsSync(path.join(home, 'locks', 'azombie.lock.stale-1700000000000')));
 });
@@ -308,6 +326,11 @@ await check('prune --apply：回收超保留期日志、死锁残留与孤儿临
   assert(!fs.existsSync(path.join(home, 'locks', 'azombie.lock.stale-1700000000000')));
   assert(!fs.existsSync(oldTmp1));
   assert(!fs.existsSync(oldTmp2));
+  for (const file of externalPruneFiles) assert(fs.existsSync(file), `prune must not delete outside file ${file}`);
+  if (externalPruneFiles.length) {
+    assert(fs.lstatSync(path.join(home, 'logs', 'asymlink')).isSymbolicLink());
+    assert(fs.lstatSync(path.join(aokLogs, 'rold3.stdout.log')).isSymbolicLink());
+  }
 });
 await check('prune 不删 current/保留期日志、证据与非残留文件', () => {
   assert(fs.existsSync(path.join(aokLogs, 'rkeep1.stdout.log')));

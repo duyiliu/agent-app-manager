@@ -1062,7 +1062,7 @@ let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBu
 // 过滤在渲染层做：lines 数组始终保留全量，清空条件即恢复全视图；
 // errorsOnly 等价内置 errorPattern；自定义正则无效时给出提示而非静默失效（不过滤 + 输入框标红 + meta 提示）。
 let errorsOnly = false, filterRe = null, filterError = null;
-let logSize = 0, logFallbackLabel = '日志';
+let logSize = 0, logFallbackLabel = '日志', renderedDomCount = 0;
 
 function compileFilter() {
   const input = $('#logFilter');
@@ -1099,7 +1099,7 @@ function logHint(text, error = false) {
 function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true;
-  logSize = 0; logFallbackLabel = '日志';
+  logSize = 0; logFallbackLabel = '日志'; renderedDomCount = 0;
   updateFollow();
   renderMeta();
   if (selected) logHint('等待日志输出…'); else logHint('选择左侧应用后查看日志。');
@@ -1112,16 +1112,22 @@ function renderLines(force = false) {
   const box = $('#log');
   if (!force && renderedId && lines[0]?.id <= renderedId) {
     const frag = document.createDocumentFragment();
+    let appended = 0;
     for (const l of lines) if (l.id > renderedId) {
       if (!lineVisible(l.text)) continue; // 增量新行同样按当前过滤条件入视图
       const row = el('div', 'line ' + classify(l.text)); row.dataset.id = l.id;
-      row.appendChild(document.createTextNode(l.text || ' ')); frag.appendChild(row);
+      row.appendChild(document.createTextNode(l.text || ' ')); frag.appendChild(row); appended++;
     }
     box.appendChild(frag);
-    // Keep the DOM window bounded without replacing the remaining nodes, so
-    // selection and scroll position survive once the line cache reaches MAX_LINES.
-    const renderedLines = box.querySelectorAll('.line');
-    for (let i = 0, excess = renderedLines.length - lines.length; i < excess; i++) renderedLines[i].remove();
+    renderedDomCount += appended;
+    // DOM 窗口有界：不再全量 querySelectorAll。过滤激活时可见行数 < 缓存行数，
+    // 旧逻辑按「DOM 行数 - 缓存行数」修剪永远不会触发，长会话下 DOM 无界增长。
+    while (renderedDomCount > MAX_LINES) {
+      const first = box.firstElementChild;
+      if (!first || !first.classList.contains('line')) break; // 顶部可能是边界提示节点
+      first.remove();
+      renderedDomCount--;
+    }
     renderedId = lines.at(-1)?.id ?? renderedId;
     if (following) box.scrollTop = box.scrollHeight;
     return;
@@ -1138,6 +1144,7 @@ function renderLines(force = false) {
   }
   box.replaceChildren(frag);
   if (boundary) box.prepend(el('div', 'empty', boundary));
+  renderedDomCount = frag.childElementCount;
   renderedId = lines.at(-1)?.id ?? 0;
   if (following) box.scrollTop = box.scrollHeight;
   renderMeta();

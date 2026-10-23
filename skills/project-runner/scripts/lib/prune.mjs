@@ -16,6 +16,21 @@ const TMP_ORPHAN_RECENT_MS = 60 * 1000;
 
 const fileSizeOf = (p) => { try { return fs.statSync(p).size; } catch { return 0; } };
 
+function isSafeRegularFile(root, file) {
+  const relative = path.relative(root, file);
+  if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) return false;
+  let current = root;
+  const parts = relative.split(path.sep);
+  for (let i = 0; i < parts.length; i++) {
+    current = path.join(current, parts[i]);
+    let stat;
+    try { stat = fs.lstatSync(current); } catch { return false; }
+    if (stat.isSymbolicLink()) return false;
+    if (i < parts.length - 1 ? !stat.isDirectory() : !stat.isFile()) return false;
+  }
+  return true;
+}
+
 // 只收集 home 内的普通文件；不跟随任何符号链接，绝不触碰 home 之外的文件
 function walkHomeFiles(root) {
   const out = [];
@@ -44,14 +59,18 @@ function walkHomeFiles(root) {
 }
 
 export function planPrune(home) {
-  const plan = { logs: [], staleLocks: [], tmpOrphans: [], skipped: [] };
+  const plan = { home, logs: [], staleLocks: [], tmpOrphans: [], skipped: [] };
   const logsDir = path.join(home, 'logs');
   for (const appId of fs.existsSync(logsDir) ? fs.readdirSync(logsDir) : []) {
     const dir = path.join(logsDir, appId);
     let st;
     try {
-      st = fs.statSync(dir);
+      st = fs.lstatSync(dir);
     } catch {
+      continue;
+    }
+    if (st.isSymbolicLink()) {
+      plan.skipped.push({ kind: 'logs', target: dir, reason: '符号链接目录，跳过' });
       continue;
     }
     if (!st.isDirectory()) continue;
@@ -73,6 +92,10 @@ export function planPrune(home) {
           const m = RUN_LOG_FILE_RE.exec(name) ?? RUN_META_FILE_RE.exec(name);
           if (!m || retain.has(m[1])) continue;
           const file = path.join(dir, name);
+          if (!isSafeRegularFile(home, file)) {
+            plan.skipped.push({ kind: 'logs', target: file, reason: '不是 home 内的普通文件或路径包含符号链接，跳过' });
+            continue;
+          }
           files.push({ runId: m[1], stream: m[2], file, size: fileSizeOf(file) });
         }
         if (files.length) plan.logs.push({ appId, files });
@@ -90,6 +113,10 @@ export function planPrune(home) {
   for (const name of fs.existsSync(locksDir) ? fs.readdirSync(locksDir) : []) {
     if (!STALE_LOCK_RE.test(name)) continue;
     const file = path.join(locksDir, name);
+    if (!isSafeRegularFile(home, file)) {
+      plan.skipped.push({ kind: 'locks', target: file, reason: '不是 home 内的普通文件或路径包含符号链接，跳过' });
+      continue;
+    }
     plan.staleLocks.push({ file, size: fileSizeOf(file) });
   }
   const recentCutoff = Date.now() - TMP_ORPHAN_RECENT_MS;
@@ -115,6 +142,10 @@ export function applyPrune(plan) {
     const removed = [];
     for (const item of items) {
       try {
+        if (!isSafeRegularFile(plan.home, item.file)) {
+          plan.skipped.push({ kind, target: item.file, reason: '路径已变化或包含符号链接，跳过' });
+          continue;
+        }
         fs.unlinkSync(item.file);
         removed.push(item);
       } catch (e) {

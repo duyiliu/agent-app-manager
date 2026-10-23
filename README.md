@@ -6,7 +6,7 @@
 >
 > 跨项目能力包括首次启动自动登记、全局列表/状态、已登记应用从任意目录启动、受管进程跨 Agent 会话核验与有界强制启停、按批次查询日志；只管理本 Skill 启动并登记的应用进程，**不接管 IDEA / 手工启动的外部进程**。受管两种形态：直连真实可执行进程（`.exe`/`.com`，Linux 为无扩展名的真实 ELF），或命令模式（`command`+`expectedImage`——manager 拉起脚本命令后在后代中发现唯一真实目标托管，覆盖 `npm run dev`、`mvn spring-boot:run` 等脚本/复合命令）。真实 Agent 会话退出后的跨会话存活终验状态以 [design.md](docs/design.md) 的状态行为准。
 >
-> **平台支持**：Windows 11 + PowerShell 7（受管身份核验/终止/端口诊断走 `ps/*.ps1`）与 **Linux（`/proc`，纯 Node，无 pwsh 依赖）**。macOS 暂不支持（无 `/proc`），命令会以 `PLATFORM_UNSUPPORTED` 明确拒绝。Windows 与 Linux 的受管目标都必须是可核验身份的真实进程；shell 脚本（`#!`）与 `.cmd`/`.bat`/`.ps1` 包装不能作为 `exe`，请用命令模式或解析到真实解释器。
+> **平台支持**：Windows 11 + PowerShell 7（受管身份核验/终止/端口诊断走 `ps/*.ps1`）与 **Linux（`/proc`，无 pwsh 依赖）**。Linux 安全停止使用随 Skill 提供的 pidfd helper，需要 Python 3.9+ 和内核 pidfd 支持；缺少时会明确拒绝终止。macOS 暂不支持（无 `/proc`），命令会以 `PLATFORM_UNSUPPORTED` 明确拒绝。Windows 与 Linux 的受管目标都必须是可核验身份的真实进程；shell 脚本（`#!`）与 `.cmd`/`.bat`/`.ps1` 包装不能作为 `exe`，请用命令模式或解析到真实解释器。
 
 ## 安装
 
@@ -44,13 +44,15 @@ skills/project-runner/
     │   ├── index.html           # manager ui 只读管理台页面
     │   └── server.mjs           # ui 本地服务（仅 127.0.0.1，无令牌）
     ├── ps/
-    │   ├── proc.ps1             # Windows 受管进程身份核验与终止适配
-    │   └── port.ps1             # Windows 端口占用诊断
+    │   └── proc.ps1             # Windows 受管进程身份核验、终止与端口诊断适配
+    ├── linux/
+    │   └── pidfd-terminate.py   # Linux pidfd 安全终止 helper（Python 3.9+）
     └── test/
         ├── platform.mjs         # 跨平台测试辅助（探针探测/可执行文件查找/进程清理）
         ├── ui-smoke.mjs         # manager ui 冒烟测试（隔离 --home，不碰真实数据）
         ├── manager-smoke.mjs    # CLI 生命周期/未结记录/ack 冒烟
         ├── cli-smoke.mjs        # remove / prune / logs 统一日志源
+        ├── ui-src-follow.mjs    # ui 日志源切换与跟随回归
         ├── runtime-smoke.mjs    # 受管生命周期冒烟（真实 node/python 直连 + 命令模式 + 拒绝路径）
         └── log-rotation.mjs     # 日志大小上限与轮转
 ```
@@ -71,14 +73,11 @@ skills/project-runner/
 
 Skill 负责理解目标项目，确定性脚本只负责需要可靠重复执行的操作。不要为了支持更多语言预先引入通用适配框架、Daemon、数据库或 MCP。跨项目能力的验收要求见 [design.md](docs/design.md)。
 
-改动 `manager.mjs` / `manager-ui` / `lib` 后运行全部冒烟测试：
+改动 `manager.mjs` / `manager-ui` / `lib` 后运行全部冒烟测试（与 CI 同一组）：
 
 ```bash
-node skills/project-runner/scripts/test/log-rotation.mjs
-node skills/project-runner/scripts/test/ui-smoke.mjs
-node skills/project-runner/scripts/test/manager-smoke.mjs
-node skills/project-runner/scripts/test/cli-smoke.mjs
-node skills/project-runner/scripts/test/runtime-smoke.mjs
+npm test          # log-rotation → ui → manager → cli → ui-src-follow → runtime-smoke
+npm run check     # 全部 .mjs 语法检查
 ```
 
 CI 在 `windows-latest` 与 `ubuntu-latest` 上跑同一组测试：Windows 使用 pwsh 7 的真实探针；Linux 使用 `/proc`，缺 pwsh 时自动跳过仅 Windows 的断言。macOS 未纳入支持范围。
