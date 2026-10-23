@@ -1,13 +1,23 @@
-// Linux process probes backed by /proc: identity (boot_id + starttime), liveness
-// verification, same-identity termination, descendant discovery and port diagnosis.
-// No pwsh or external binaries; results use the same shape as ps/proc.ps1.
+// Linux process probes backed by /proc. Termination delegates to a pidfd helper
+// so verification and signaling stay anchored to the same process instance.
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { TERMINATE_WAIT_MS, COMMAND_DISCOVER_TIMEOUT_MS, EXIT, ManagerError } from './constants.mjs';
 
 const PROC = '/proc';
+const PIDFD_TERMINATE = fileURLToPath(new URL('../linux/pidfd-terminate.py', import.meta.url));
 const DISCOVER_SETTLE_MS = 1500;
 const DISCOVER_POLL_MS = 400;
+// 已知包管理器/构建器启动器的命令行特征：同映像单链折叠时只别除命中特征的祖先
+// （npm-cli/yarn/pnpm/maven/gradle wrapper）；其余同映像链仍按歧义拒绝。
+const LAUNCHER_CMD_RE = /npm-cli\.js|yarn\.js|pnpm(\.cjs|\.js)?|[\\/]\.pnpm[\\/]|plexus-classworlds|org\.gradle\.wrapper|gradle-launcher|GradleMain/i;
+
+function readCmdline(pid) {
+  try { return fs.readFileSync(`${PROC}/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim(); }
+  catch { return ''; }
+}
 
 let bootIdCache = null;
 export function bootId() {
@@ -101,25 +111,38 @@ export function verify(pid, expected) {
 }
 
 export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS) {
-  const v = verify(pid, expected);
-  if (v.result !== 'ok') return v;
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch (e) {
-    if (e.code === 'ESRCH') return { result: 'notfound' };
-    return { result: 'error', code: 'terminateFailed', message: e.message };
+  if (!Number.isInteger(pid) || pid <= 0 || !expected?.creationFileTime || !expected?.image) {
+    return { result: 'error', code: 'badArgs' };
   }
-  const expectedStart = String(expected.creationFileTime).split(':')[1];
-  const deadline = Date.now() + Math.max(0, waitMs);
-  for (;;) {
-    const s = readStat(pid);
-    if (s.result === 'notfound' || s.result === 'exited') return { result: 'terminated' };
-    if (!s.ok) return s;
-    // 原实例已退出且 PID 被复用：不再触碰新进程。
-    if (s.starttime !== expectedStart) return { result: 'terminated' };
-    if (Date.now() >= deadline) return { result: 'terminateTimeout' };
-    sleepSync(50);
+  let lastError = null;
+  for (const python of ['python3', 'python']) {
+    const r = spawnSync(python, [PIDFD_TERMINATE, String(pid), String(expected.creationFileTime), String(expected.image), String(waitMs)],
+      { encoding: 'utf8', timeout: Math.max(0, waitMs) + 5000, windowsHide: true, maxBuffer: 64 * 1024 });
+    if (r.error?.code === 'ENOENT') continue;
+    if (r.error) {
+      lastError = r.error.message;
+      break;
+    }
+    if (r.status !== 0) {
+      lastError = (r.stderr || `helper exited with code ${r.status}`).trim();
+      break;
+    }
+    try {
+      const result = JSON.parse((r.stdout || '').trim());
+      if (result.code === 'pidfdUnsupported') {
+        lastError = result.message;
+        continue;
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof ManagerError) throw error;
+      lastError = `无法解析 pidfd 终止结果：${(r.stdout || '').trim()}`;
+      break;
+    }
   }
+  throw new ManagerError('PIDFD_UNAVAILABLE',
+    `安全终止 Linux 受管进程需要 Python 3.9+、pidfd_open 与 pidfd_send_signal；${lastError ?? '未找到 python3/python'}`,
+    EXIT.DEPENDENCY);
 }
 
 function childrenByParent(rows) {
@@ -228,7 +251,7 @@ export function discover(rootPid, expectedImage, waitMs = COMMAND_DISCOVER_TIMEO
       if (!byParent.has(s.ppid)) byParent.set(s.ppid, []);
       byParent.get(s.ppid).push(pid);
     }
-    const found = [];
+    let found = [];
     const queue = [rootPid];
     const seen = new Set();
     while (queue.length) {
@@ -241,9 +264,26 @@ export function discover(rootPid, expectedImage, waitMs = COMMAND_DISCOVER_TIMEO
         const image = readImage(child, s.comm);
         const base = image.startsWith('comm:') ? image.slice(5) : path.basename(image);
         if (base === expectedImage || s.comm === expectedImage) {
-          found.push({ pid: child, image, comm: s.comm, creationFileTime: `${bootId()}:${s.starttime}` });
+          found.push({ pid: child, image, comm: s.comm, cmd: readCmdline(child), creationFileTime: `${bootId()}:${s.starttime}` });
         }
       }
+    }
+    // 已知启动器单链折叠（与 ps/proc.ps1 同规则）：只别除「是其他候选祖先且命令行命中已知
+    // 启动器特征」的候选；npm/mvn 与目标同映像单链时折叠到真实目标，其余仍歧义拒绝。
+    if (found.length > 1) {
+      const parentOf = new Map();
+      for (const [pid, s] of rows) parentOf.set(pid, s.ppid);
+      const ancestors = new Set();
+      for (const f of found) {
+        let cur = parentOf.get(f.pid);
+        while (Number.isInteger(cur) && cur > 0) {
+          ancestors.add(cur);
+          if (!parentOf.has(cur)) break;
+          cur = parentOf.get(cur);
+        }
+      }
+      const leaves = found.filter((f) => !(ancestors.has(f.pid) && LAUNCHER_CMD_RE.test(f.cmd ?? '')));
+      if (leaves.length === 1) found = leaves;
     }
     if (found.length) {
       if (!foundAt) foundAt = Date.now();

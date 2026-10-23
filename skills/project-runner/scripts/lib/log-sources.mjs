@@ -217,6 +217,14 @@ export function followLogs(rt, runId, file, initialLines) {
     } catch {
       return; // 文件暂时不可读，下一轮再试
     }
+    if (size < pos) {
+      // 日志已轮转：log-writer 把旧文件 rename 成 .1 并从 0 重建同名新文件，
+      // 旧 pos 指向的偏移在新文件中已不存在。重置到新文件起始继续跟随；
+      // 旧文件尾部内容可用 logs --src run:<runId>.<stream>.1 查看。
+      process.stderr.write(`\n[日志已轮转，从新文件起始继续跟随；轮转前尾部可用 --src run:${runId}.*.1 查看]\n`);
+      pos = 0;
+      decoder = new TextDecoder('utf-8', { fatal: true }); // 新文件可能重新以 UTF-8 开始
+    }
     if (size > pos) {
       const fd = fs.openSync(file, 'r');
       try {
@@ -224,7 +232,10 @@ export function followLogs(rt, runId, file, initialLines) {
         const buf = Buffer.alloc(len);
         fs.readSync(fd, buf, 0, len, pos);
         try { process.stdout.write(decoder.decode(buf, { stream: true })); }
-        catch { decoder = 'gbk'; decoder = new TextDecoder('gbk'); process.stdout.write(decoder.decode(buf)); }
+        catch {
+          try { decoder = new TextDecoder('gbk'); } catch { decoder = new TextDecoder('utf-8'); }
+          process.stdout.write(decoder.decode(buf));
+        }
       } finally {
         fs.closeSync(fd);
       }

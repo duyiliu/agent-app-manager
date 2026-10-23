@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'port')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -187,6 +187,57 @@ if (($Action -eq 'discover') -and (($Id -le 0) -or (-not $Image))) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
+if (($Action -eq 'port') -and (($Id -lt 1) -or ($Id -gt 65535))) {
+  [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+  exit 0
+}
+
+# port：端口占用诊断（与原 ps/port.ps1 同语义），但身份采集复用本进程已编译的
+# ProcUtil——N 个监听人也只需 1 次 pwsh 调用；identity.image 与 capture 同源
+# （QueryFullProcessImageName 解析后路径），保持 #55 的 image 统一口径。
+if ($Action -eq 'port') {
+  $rows = @()
+  try {
+    $rows = @(Get-NetTCPConnection -State Listen -LocalPort $Id -ErrorAction SilentlyContinue)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $out = @()
+  foreach ($conn in $rows) {
+    $ownerPid = [int]$conn.OwningProcess
+    $identity = $null
+    $processName = $null
+    $executablePath = $null
+    if ($ownerPid -gt 0) {
+      # 直接解析 ProcUtil.Capture 的原始输出（Parse-Result 仅在 -Action capture 时保留身份字段）
+      $raw = [ProcUtil]::Capture($ownerPid)
+      $parts = $raw -split "`t", 3
+      switch ($parts[0]) {
+        'OK' {
+          $identity = [pscustomobject]@{ result = 'ok'; creationFileTime = [string]$parts[1]; image = [string]$parts[2] }
+          $executablePath = [string]$parts[2]
+          $processName = [IO.Path]::GetFileName($executablePath)
+        }
+        'EXITED' { $identity = [pscustomobject]@{ result = 'exited' } }
+        'NOTFOUND' { $identity = [pscustomobject]@{ result = 'notfound' } }
+        default { $identity = [pscustomobject]@{ result = 'error'; code = [string]$parts[1]; win32 = [int]$parts[2] } }
+      }
+    }
+    $out += [pscustomobject]@{
+      pid = $ownerPid
+      processName = $processName
+      executablePath = $executablePath
+      commandLine = $null
+      startedAt = $null
+      localAddress = [string]$conn.LocalAddress
+      localPort = [int]$conn.LocalPort
+      identity = $identity
+    }
+  }
+  if (@($out).Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress -Depth 4 }
+  exit 0
+}
 
 # discover：有界轮询目标 wrapper（-Id）的后代进程，返回映像基名匹配 -Image 的候选清单。
 # 供命令模式受管启动使用——manager 拉起 cmd wrapper 后在此等待真实目标出现。
@@ -199,7 +250,7 @@ if ($Action -eq 'discover') {
   while ($true) {
     $rows = $null
     try {
-      $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate
+      $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate, CommandLine
     } catch {
       [pscustomobject]@{ result = 'error'; code = 'cimFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
       exit 0
@@ -226,9 +277,31 @@ if ($Action -eq 'discover') {
         [void]$queue.Add($cpid)
         $img = [string]$c.ExecutablePath
         if ($img -and ([IO.Path]::GetFileName($img) -ieq $Image)) {
-          $found += [pscustomobject]@{ pid = $cpid; image = $img; creationFileTime = [string]$c.CreationDate.ToFileTime() }
+          $found += [pscustomobject]@{ pid = $cpid; image = $img; creationFileTime = [string]$c.CreationDate.ToFileTime(); cmd = [string]$c.CommandLine }
         }
       }
+    }
+    # 已知启动器单链折叠：npm run dev / mvn bootRun 等场景中，包管理器/构建器与目标同映像
+    # 且构成单链 wrapper→npm→app。只别除「是其他候选祖先且命令行能证明是已知启动器」的
+    # 候选（npm-cli/yarn/pnpm/maven/gradle wrapper）；其余同映像链（目标自身派生同映像
+    # 子进程）结构上不可区分，仍按歧义拒绝，安全边界不变。
+    if ($found.Count -gt 1) {
+      $parentOf = @{}
+      foreach ($p in $rows) { $parentOf[[int64]$p.ProcessId] = [int64]$p.ParentProcessId }
+      $ancestorSet = @{}
+      foreach ($f in $found) {
+        $cur2 = $parentOf[[int64]$f.pid]
+        while ($cur2 -gt 0) {
+          $ancestorSet[$cur2] = $true
+          if (-not $parentOf.ContainsKey($cur2)) { break }
+          $cur2 = $parentOf[$cur2]
+        }
+      }
+      $launcherRe = 'npm-cli\.js|yarn\.js|pnpm(\.cjs|\.js)?|[\\/]\.pnpm[\\/]|plexus-classworlds|org\.gradle\.wrapper|gradle-launcher|GradleMain'
+      $leaves = @($found | Where-Object {
+        -not ($ancestorSet.ContainsKey([int64]$_.pid) -and ([string]$_.cmd) -match $launcherRe)
+      })
+      if ($leaves.Count -eq 1) { $found = $leaves }
     }
     if ($found.Count -gt 0) {
       if (-not $foundAt) { $foundAt = Get-Date }
@@ -289,7 +362,8 @@ if ($Action -eq 'terminate-tree') {
     }
   } catch { }
   $t = Parse-Result ([ProcUtil]::Terminate($Id, [long]$CreationFileTime, $Image, $WaitMs))
-  $t.killedPids = $killed
+  # PSCustomObject 不能直接赋值新属性（会抛“找不到属性 killedPids”导致 terminate-tree 必败）
+  $t | Add-Member -NotePropertyName killedPids -NotePropertyValue @($killed) -Force
   $t | ConvertTo-Json -Compress
   exit 0
 }

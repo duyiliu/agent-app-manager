@@ -30,12 +30,16 @@ function shellArgs(command) {
   return process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
 }
 
-// log-writer 在目标 spawn 成功后写 pidFile；等待窗口与直连/命令模式共用。
+// log-writer 在目标 spawn 成功后写 pidFile（spawn 失败写 '0'）；等待窗口与直连/命令模式
+// 共用。上限 5s：冷启动/杀毒扫描时 1s 不够；文件出现即返回，正常路径无额外等待。
 function readPidFile(file) {
-  for (let i = 0; i < 100 && !fs.existsSync(file); i++) {
+  for (let i = 0; i < 500 && !fs.existsSync(file); i++) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
-  try { return Number(fs.readFileSync(file, 'utf8')) || null; } catch { return null; }
+  try {
+    const n = Number(fs.readFileSync(file, 'utf8'));
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  } catch { return null; }
 }
 
 // 目标进程终止后尽力清理仍存活的 cmd wrapper（多数会随子进程退出自然消亡）。
@@ -90,7 +94,8 @@ export async function launchManaged(home, appId, app, opts = {}) {
       file: isCommand ? resolveShell(app.cwd) : app.exe,
       args: isCommand ? shellArgs(app.command) : app.args,
       cwd: app.cwd, outPath, errPath,
-      runtimeFile: runtimePath(home, appId), runId, limit: app.logMaxBytes ?? RUN_LOG_MAX_BYTES, pidFile,
+      home, appId, runtimeFile: runtimePath(home, appId), runId,
+      limit: app.logMaxBytes ?? RUN_LOG_MAX_BYTES, pidFile,
     }));
     // The detached logger owns both output descriptors and launches the application
     // with pipes, allowing safe stdout rotation without touching a live app fd.
@@ -149,7 +154,15 @@ export async function launchManaged(home, appId, app, opts = {}) {
     // pidFile 由 log-writer 在目标 spawn 成功后写入；拿不到真实目标 pid 时绝不
     // 把 logger 自身的 pid 顶替为目标（否则 stop 会杀错进程、真实目标变孤儿）。
     const targetPid = readPidFile(pidFile);
-    rt.current.pid = targetPid;
+    rt.current.pid = targetPid > 0 ? targetPid : null;
+    if (targetPid === 0) {
+      // log-writer 的 spawn 失败约定：pidFile=0 表示目标从未拉起（exe 失效/EACCES 等）。
+      // 无存活进程，落 STOPPED 可直接重试；错误原文已由 log-writer 写入 stderr 日志。
+      rt.current.phase = 'STOPPED';
+      rt.current.endedAt = new Date().toISOString();
+      rt.current.exitNote = 'target spawn failed（pidFile=0）；详见 stderr 批次日志';
+      failUnresolved('SPAWN_FAILED', `目标进程拉起失败（runId=${runId}）；错误原因见 stderr 日志尾部，未产生进程，可直接修正后重试`, { targetPid: 0, loggerPid: child.pid });
+    }
     try {
       cap = targetPid == null
         ? { result: 'error', code: 'target_pid_unavailable', message: `pidFile ${pidFile} 未出现或内容无效` }

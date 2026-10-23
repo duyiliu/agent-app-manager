@@ -20,6 +20,24 @@ function decodeLogBuffer(buf) {
   }
 }
 
+function decodeTailWindow(buf, offset) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for (let leading = 0; leading <= 3 && leading <= offset; leading++) {
+    if (leading && (buf[leading - 1] & 0xc0) !== 0x80) break;
+    try {
+      const text = decoder.decode(buf.subarray(leading));
+      const target = offset - leading;
+      for (let extra = 0; extra <= 3 && target - extra >= 0; extra++) {
+        try {
+          const prefix = decoder.decode(buf.subarray(leading, leading + target - extra));
+          return text.slice(prefix.length);
+        } catch { /* move the cutoff before a possible partial code point */ }
+      }
+    } catch { /* skip leading continuation bytes from a split UTF-8 code point */ }
+  }
+  return decodeLogBuffer(buf.subarray(offset));
+}
+
 function splitLogLines(text) {
   const all = text.split(/\r?\n/);
   if (all.length && all[all.length - 1] === '') all.pop();
@@ -36,9 +54,10 @@ export function readTailLines(file, n, maxBytes = MAX_LOG_BYTES) {
     let window = Math.min(INITIAL_TAIL_WINDOW, Math.max(size, 1));
     for (;;) {
       start = Math.max(0, size - window);
-      const buf = Buffer.alloc(size - start);
-      fs.readSync(fd, buf, 0, buf.length, start);
-      all = splitLogLines(decodeLogBuffer(buf));
+      const readStart = start > 0 ? Math.max(0, start - 3) : start;
+      const buf = Buffer.alloc(size - readStart);
+      fs.readSync(fd, buf, 0, buf.length, readStart);
+      all = splitLogLines(decodeTailWindow(buf, start - readStart));
       if (all.length >= want || start === 0 || window >= maxBytes) break;
       window = Math.min(Math.max(window * 4, window + 1), maxBytes, size);
     }

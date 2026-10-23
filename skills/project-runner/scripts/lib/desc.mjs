@@ -25,7 +25,10 @@ export const IMAGE_NAME_RE = process.platform === 'win32'
 export const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024; // 单次运行日志的写入上限（超过即轮转）
 
 export function computeAppId(root, entry) {
-  return 'a' + crypto.createHash('sha256').update(`${root.toLowerCase()}\u0000${entry.toLowerCase()}`).digest('hex').slice(0, 15);
+  const key = process.platform === 'win32'
+    ? `${root.toLowerCase()}\u0000${entry.toLowerCase()}`
+    : `${root}\u0000${entry}`;
+  return 'a' + crypto.createHash('sha256').update(key).digest('hex').slice(0, 15);
 }
 
 export function newRunId() {
@@ -184,11 +187,14 @@ function posixExeRejection(resolved) {
   return null;
 }
 
-// where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：UTF-8 解码失败回退 GBK，
-// 避免非 ASCII 用户名路径乱码后把真实候选误判为不可用。
+// where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：UTF-8 解码失败回退 GBK；
+// 精简 ICU 的 Node 可能不带 GBK 解码器，再回退 lossy UTF-8，绝不让解码器缺失阻断解析。
 function decodeCmdOutput(buf) {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-  catch { return new TextDecoder('gbk').decode(buf); }
+  catch {
+    try { return new TextDecoder('gbk').decode(buf); }
+    catch { return new TextDecoder('utf-8').decode(buf); }
+  }
 }
 
 export function resolveExe(exe, cwd) {

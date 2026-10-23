@@ -7,14 +7,21 @@ import { spawnSync } from 'node:child_process';
 export const isWindows = process.platform === 'win32';
 export const isLinux = process.platform === 'linux';
 
-// Windows 需要 pwsh 7（proc.ps1）；Linux 只需要可读的 /proc。
+// Windows 需要 pwsh 7；Linux 需要 /proc 与可用的 Python pidfd API。
 export function hasProcessProbe() {
   if (isWindows) {
     const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     return !r.error && r.status === 0;
   }
   if (isLinux) {
-    try { fs.accessSync('/proc/self/stat', fs.constants.R_OK); return true; } catch { return false; }
+    try { fs.accessSync('/proc/self/stat', fs.constants.R_OK); } catch { return false; }
+    for (const python of ['python3', 'python']) {
+      const r = spawnSync(python, ['-c', 'import os,signal; fd=os.pidfd_open(os.getpid()); signal.pidfd_send_signal(fd, 0); os.close(fd)'],
+        { encoding: 'utf8', timeout: 10000 });
+      if (!r.error && r.status === 0) return true;
+      if (r.error?.code !== 'ENOENT') return false;
+    }
+    return false;
   }
   return false;
 }
