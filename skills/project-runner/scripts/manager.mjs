@@ -87,9 +87,7 @@ function emitErr(ctx, command, e) {
       if (typeof stderrTail === 'string' && stderrTail) text += `\nstderr 尾部:\n${stderrTail}`;
     }
     process.stderr.write(`${text}\n`, () => process.exit(e.exitCode ?? 1));
-    return;
   }
-  process.exit(e.exitCode ?? 1);
 }
 
 function renderHuman(command, data) {

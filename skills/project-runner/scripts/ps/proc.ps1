@@ -209,6 +209,7 @@ if ($Action -eq 'port') {
     $identity = $null
     $processName = $null
     $executablePath = $null
+    $startedAt = $null
     if ($ownerPid -gt 0) {
       # 直接解析 ProcUtil.Capture 的原始输出（Parse-Result 仅在 -Action capture 时保留身份字段）
       $raw = [ProcUtil]::Capture($ownerPid)
@@ -218,6 +219,8 @@ if ($Action -eq 'port') {
           $identity = [pscustomobject]@{ result = 'ok'; creationFileTime = [string]$parts[1]; image = [string]$parts[2] }
           $executablePath = [string]$parts[2]
           $processName = [IO.Path]::GetFileName($executablePath)
+          # FILETIME（UTC）转 ISO，与旧 ps/port.ps1 的 Win32_Process.CreationDate 展示对齐
+          $startedAt = [DateTime]::FromFileTimeUtc([long]$parts[1]).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
         }
         'EXITED' { $identity = [pscustomobject]@{ result = 'exited' } }
         'NOTFOUND' { $identity = [pscustomobject]@{ result = 'notfound' } }
@@ -229,7 +232,7 @@ if ($Action -eq 'port') {
       processName = $processName
       executablePath = $executablePath
       commandLine = $null
-      startedAt = $null
+      startedAt = $startedAt
       localAddress = [string]$conn.LocalAddress
       localPort = [int]$conn.LocalPort
       identity = $identity

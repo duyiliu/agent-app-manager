@@ -115,8 +115,6 @@ export async function launchManaged(home, appId, app, opts = {}) {
     rt.current.phase = 'UNKNOWN';
     rt.current.lastError = `spawn_failed: ${e.message}`;
     failUnresolved('SPAWN_FAILED', `进程启动失败；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: e.message });
-  } finally {
-    // Logger owns log descriptors; the manager never opens active log files.
   }
 
   // spawn 的异步 error（ENOENT/EACCES 等）要等 'spawn'/'error' 事件落定后再继续：

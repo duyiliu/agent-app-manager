@@ -1095,6 +1095,7 @@ function renderMeta() {
 function logHint(text, error = false) {
   const box = $('#log');
   box.replaceChildren(el('div', 'empty' + (error ? ' error' : ''), text));
+  renderedDomCount = 0; // 内容已被提示节点替换，行计数同步清零，避免后续修剪误判
 }
 function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
@@ -1122,10 +1123,11 @@ function renderLines(force = false) {
     renderedDomCount += appended;
     // DOM 窗口有界：不再全量 querySelectorAll。过滤激活时可见行数 < 缓存行数，
     // 旧逻辑按「DOM 行数 - 缓存行数」修剪永远不会触发，长会话下 DOM 无界增长。
+    // 顶部可能有边界提示节点，用 querySelector 定位最靠前的 .line，不图断在提示节点上。
     while (renderedDomCount > MAX_LINES) {
-      const first = box.firstElementChild;
-      if (!first || !first.classList.contains('line')) break; // 顶部可能是边界提示节点
-      first.remove();
+      const victim = box.querySelector('.line');
+      if (!victim) break;
+      victim.remove();
       renderedDomCount--;
     }
     renderedId = lines.at(-1)?.id ?? renderedId;
