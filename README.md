@@ -55,6 +55,10 @@ skills/project-runner/
         └── log-rotation.mjs     # 日志大小上限与轮转
 ```
 
+## 本地测试项目
+
+仓库内置 [Spring Boot 测试项目](examples/spring-boot-demo/README.md)，使用 Java 17，不依赖数据库、Nacos 或 Redis，默认只监听 `127.0.0.1:18273`。可用于验证受管启动、全局管理台日志、健康检查及 JRebel 热加载；构建、登记与接口检查步骤见该项目说明。
+
 ## 来源与兼容性
 
 从 [duyiliu/agent-skills](https://github.com/duyiliu/agent-skills) 的 `skills/engineering/jrebel-start/` 和 `work/任务/JRebel跨项目统一运行管理/design.md` 迁移，基础能力来自 [PR #5](https://github.com/duyiliu/agent-skills/pull/5)，设计来自 [PR #6](https://github.com/duyiliu/agent-skills/pull/6)。

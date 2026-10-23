@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<application xmlns="http://www.zeroturnaround.com">
+    <classpath>
+        <dir name="@project.basedir@/src/main/resources"/>
+        <dir name="@project.build.outputDirectory@"/>
+    </classpath>
+</application>
