@@ -172,6 +172,11 @@ aside {
 .panel-title strong { font-size:12.5px; font-weight:600; color:var(--text) }
 #appList { flex:1; overflow:auto; padding:8px }
 
+.app-search { padding:0 10px 8px; }
+.app-search input { width:100%; box-sizing:border-box; background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:6px; padding:5px 8px; font-size:12px; outline:none }
+.app-search input:focus { border-color:var(--acc) }
+.port-link { color:var(--acc); text-decoration:none }
+.port-link:hover { text-decoration:underline }
 .app-card {
   display:block;
   width:100%;
@@ -501,6 +506,7 @@ aside {
       <span class="badge" id="appCount">0</span>
       <button id="refreshBtn" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
     </div>
+    <div class="app-search"><input id="appSearch" type="search" placeholder="过滤应用（别名/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
     <div id="appList" role="list"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
@@ -586,6 +592,14 @@ function notifyExit(runId, status, note) {
   const banner = $('#exitBanner');
   banner.hidden = false;
   banner.textContent = `批次 ${runId} 状态变化：${status}${note ? ` · ${note}` : ''}`;
+  // 浏览器通知：首次触发时申请权限，授权后 RUNNING→STOPPED/UNKNOWN 也推系统通知（标签页切走时仍可见）
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(`project-runner · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
+    } else if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  } catch { /* 通知不可用时仅保留页面横幅 */ }
 }
 function handlePollError(e) {
   conn(e.message, true);
@@ -603,7 +617,12 @@ function handlePollError(e) {
 function statusPill(status) { return el('span', 'pill st-' + (status ?? 'UNKNOWN'), status ?? 'UNKNOWN'); }
 function renderApps() {
   const list = $('#appList');
-  $('#appCount').textContent = String(appsCache.length);
+  const q = ($('#appSearch').value || '').trim().toLowerCase();
+  const rank = { RUNNING: 0, STARTING: 1, UNKNOWN: 2, STOPPED: 3 };
+  const filtered = appsCache
+    .filter(a => !q || [a.alias, a.displayName, a.mode, a.root, a.status, a.expectedPort].some(v => String(v ?? '').toLowerCase().includes(q)))
+    .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
+  $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
   const previousScroll = list.scrollTop;
   const existing = new Map([...list.querySelectorAll('.app-card')].map(card => [card.dataset.appId, card]));
   if (!appsCache.length) {
@@ -611,8 +630,9 @@ function renderApps() {
     return;
   }
   list.querySelector('.empty')?.remove();
+  if (!filtered.length) { list.appendChild(el('div', 'empty', '无匹配应用')); return; }
   const ordered = [];
-  for (const a of appsCache) {
+  for (const a of filtered) {
     const card = existing.get(a.appId) ?? el('button', 'app-card');
     existing.delete(a.appId);
     card.className = 'app-card' + (a.alias === selected ? ' selected' : '');
@@ -627,7 +647,16 @@ function renderApps() {
     const meta = el('div', 'app-meta');
     meta.append(el('span', null, a.mode ?? '?'));
     if (a.pid != null) meta.appendChild(el('span', null, 'pid ' + a.pid));
-    if (a.expectedPort != null) meta.appendChild(el('span', null, ':' + a.expectedPort));
+    if (a.expectedPort != null) {
+      if (a.status === 'RUNNING') {
+        const link = el('a', 'port-link', ':' + a.expectedPort);
+        link.href = `http://127.0.0.1:${a.expectedPort}/`;
+        link.target = '_blank'; link.rel = 'noopener';
+        link.title = '新标签页打开该应用端口';
+        link.addEventListener('click', (e) => e.stopPropagation());
+        meta.appendChild(link);
+      } else meta.appendChild(el('span', null, ':' + a.expectedPort));
+    }
     if (a.error) meta.appendChild(el('span', 'v bad', a.error));
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
@@ -742,22 +771,26 @@ function renderDetail(d) {
     const st = d.status;
     const makeOps = () => {
       const ops = el('span', 'op-group');
-      const mk = (label, op, enabled, title) => {
-        const needsConfirm = op !== 'start';
-        const armed = armedOp === `${d.alias}:${op}`;
+      const mk = (label, op, enabled, title, extra = '') => {
+        const needsConfirm = op !== 'start' || extra;
+        const armed = armedOp === `${d.alias}:${op}:${extra}`;
         const b = el('button', 'op-btn' + (armed ? ' armed' : ''), armed ? `确认${label}` : label);
         b.disabled = !enabled || (lifecycleBusy && !armed);
         b.title = armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
         b.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (needsConfirm && !armed) armOp(d.alias, op);
-          else { disarmOp(); doLifecycle(d.alias, op); }
+          if (needsConfirm && !armed) armOp(d.alias, op, extra);
+          else { disarmOp(); doLifecycle(d.alias, op, extra); }
         });
         ops.appendChild(b);
       };
-      mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING', '复用已保存配置启动（同 CLI start）');
+      const cur = d.run;
+      const unresolved = cur && cur.managed !== false && !['RUNNING', 'STOPPED'].includes(cur.phase);
+      mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
       mk('停止', 'stop', st === 'RUNNING', '有界强制终止，不杀进程树（同 CLI stop）');
       mk('重启', 'restart', st === 'RUNNING', '确认旧实例退出后启动新实例（同 CLI restart）');
+      if (unresolved) mk('ack 并启动', 'start', true, `放弃未结记录 ${cur.runId} 并重新启动（同 start --ack-unresolved）`, `&ack=${encodeURIComponent(cur.runId)}`);
+      mk('移除', 'remove', st === 'STOPPED', '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）');
       return ops;
     };
     head.appendChild(makeOps());
@@ -849,19 +882,19 @@ let lifecycleBusy = false;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
 // 第一次点击把按钮变成“确认X”4 秒内有效，再点一次才执行。
 let armedOp = null, armedTimer = null;
-function armOp(alias, op) {
+function armOp(alias, op, extra = '') {
   disarmOp();
-  armedOp = `${alias}:${op}`;
+  armedOp = `${alias}:${op}:${extra}`;
   armedTimer = setTimeout(() => { disarmOp(); if (selected) loadStatus(); }, 4000);
   loadStatus();
 }
 function disarmOp() { armedOp = null; if (armedTimer) { clearTimeout(armedTimer); armedTimer = null; } }
-async function doLifecycle(alias, op) {
+async function doLifecycle(alias, op, extra = '') {
   if (lifecycleBusy || !alias) return;
   lifecycleBusy = true;
   conn(`${op} ${alias}…`);
   try {
-    const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}`, undefined, 'POST');
+    const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}${extra}`, undefined, 'POST');
     const pid = r.pid ?? r.start?.pid;
     showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}`, false);
   } catch (e) {
@@ -1103,6 +1136,7 @@ async function manualReload() {
   } finally { manualRefresh = false; }
 }
 $('#refreshBtn').addEventListener('click', manualReload);
+$('#appSearch').addEventListener('input', renderApps);
 $('#pauseBtn').addEventListener('click', () => {
   paused = !paused;
   $('#pauseBtn').textContent = paused ? '恢复刷新' : '暂停';
