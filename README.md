@@ -39,9 +39,12 @@ skills/project-runner/
     ├── manager.mjs              # 跨项目运行管理 P0（CLI 入口）
     ├── log-writer.mjs           # detached 日志转发/轮转
     ├── lib/                     # 领域模块：probe/locks/runtime/launch/desc/commands/...
+    │   ├── commands/            # 命令实现按域拆分（lifecycle/registration/diagnostics/logs/maintenance/ui）
     │   └── proc-linux.mjs       # Linux /proc 身份核验、终止、后代发现、端口诊断
     ├── manager-ui/
-    │   ├── index.html           # manager ui 只读管理台页面
+    │   ├── index.html           # manager ui 只读管理台页面（结构）
+    │   ├── app.js               # 管理台轮询/api/渲染/交互
+    │   ├── app.css              # 管理台主题与布局样式
     │   └── server.mjs           # ui 本地服务（仅 127.0.0.1，无令牌）
     ├── ps/
     │   └── proc.ps1             # Windows 受管进程身份核验、终止与端口诊断适配

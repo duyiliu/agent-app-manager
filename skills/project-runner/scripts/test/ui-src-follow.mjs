@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// manager ui 日志源"跟随当前批次"测试：真实 ui server + node:vm 沙箱执行页面内嵌脚本（轻量 DOM 桩）。
+// manager ui 日志源"跟随当前批次"测试：真实 ui server + node:vm 沙箱执行页面外置脚本（轻量 DOM 桩）。
 // 覆盖：重启产生新批次后自动切到新当前源（保留 stdout/stderr 流偏好）；
 //       刻意选择的历史批次/.tmp 源不被抢切；旧会话无标志位的 run: 记忆按跟随处理。
 // 用法：node scripts/test/ui-src-follow.mjs [index.html 路径]（无外部依赖，Node 22+）
@@ -167,7 +167,10 @@ const check = async (name, fn) => {
 };
 
 const html = fs.readFileSync(PAGE, 'utf8');
-const scriptSrc = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
+const scriptTag = /<script\s+src="([^"]+)"><\/script>/.exec(html);
+assert(scriptTag, '页面缺少外置脚本引用');
+const scriptFile = path.resolve(path.dirname(PAGE), scriptTag[1].replace(/^\//, ''));
+const scriptSrc = fs.readFileSync(scriptFile, 'utf8');
 const ctx = vm.createContext({
   document: documentStub,
   sessionStorage: sessionStorageStub,
@@ -182,7 +185,7 @@ const ctx = vm.createContext({
   setInterval, setTimeout, clearInterval, clearTimeout,
   console, alert: () => {},
 });
-new vm.Script(scriptSrc, { filename: 'index.html<script>' }).runInContext(ctx);
+new vm.Script(scriptSrc, { filename: 'app.js' }).runInContext(ctx);
 const run = (expr) => vm.runInContext(expr, ctx);
 const poll = async (expr, pred, ms = 8000) => {
   const t = Date.now();

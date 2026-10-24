@@ -9,7 +9,7 @@
 // - stdout 只输出管理结果，不混入被启动应用的日志（--follow 是用户显式要求的例外）。
 //
 // 本文件为 CLI 入口：参数解析、数据目录解析、输出渲染与命令分发。
-// 命令实现见 lib/commands.mjs；领域逻辑见 lib/{errors,probe,locks,desc,runtime,launch,log-sources,prune,detect}.mjs。
+// 命令实现见 lib/commands.mjs（按域拆分在 lib/commands/）；领域逻辑见 lib/{errors,probe,locks,desc,runtime,launch,log-sources,prune,detect}.mjs。
 
 import fs from 'node:fs';
 import path from 'node:path';

@@ -79,7 +79,7 @@ const get = (p, { method = 'GET', host } = {}) => new Promise((res, rej) => {
   const r = http.request(url, { method, headers }, (rs) => {
     let b = '';
     rs.on('data', (d) => { b += d; });
-    rs.on('end', () => res({ status: rs.statusCode, body: b, json: (() => { try { return JSON.parse(b); } catch { return null; } })() }));
+    rs.on('end', () => res({ status: rs.statusCode, body: b, contentType: rs.headers['content-type'], json: (() => { try { return JSON.parse(b); } catch { return null; } })() }));
   });
   r.on('error', rej);
   r.end();
@@ -114,10 +114,27 @@ try {
       assert(page.body.includes(marker), `页面缺少 ${marker}`);
     }
   });
-  await check('管理台页面内嵌脚本语法有效', () => {
-    const m = /<script>([\s\S]*?)<\/script>/.exec(page.body);
-    assert(m, '页面缺少内嵌脚本');
-    new vm.Script(m[1]); // 只编译不执行
+  await check('管理台页面引用外置脚本/样式且无内联脚本', () => {
+    assert(page.body.includes('<script src="/app.js"></script>'), '页面缺少 app.js 引用');
+    assert(page.body.includes('<link rel="stylesheet" href="/app.css">'), '页面缺少 app.css 引用');
+    assert(!/<script>[\s\S]*?<\/script>/.test(page.body), '页面仍含内联脚本');
+    assert(!/<style>[\s\S]*?<\/style>/.test(page.body), '页面仍含内联样式');
+  });
+  const appJs = await get('/app.js');
+  await check('外置 app.js 可访问且语法有效', () => {
+    assert.equal(appJs.status, 200);
+    assert.match(appJs.contentType, /^text\/javascript/);
+    new vm.Script(appJs.body); // 只编译不执行
+  });
+  const appCss = await get('/app.css');
+  await check('外置 app.css 可访问且为样式资源', () => {
+    assert.equal(appCss.status, 200);
+    assert.match(appCss.contentType, /^text\/css/);
+    assert(appCss.body.includes(':root {'));
+  });
+  await check('静态资源白名单外的文件不可访问（404）', async () => {
+    assert.equal((await get('/server.mjs')).status, 404);
+    assert.equal((await get('/../server.mjs')).status, 404);
   });
 
   await check('Host 不匹配返回 403', async () => assert.equal((await get('/api/apps', { host: 'evil.example' })).status, 403));

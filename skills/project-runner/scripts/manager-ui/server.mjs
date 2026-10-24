@@ -12,6 +12,11 @@ import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.m
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
+// 页面外置静态资源：固定文件名白名单，按路径精确匹配，不把 manager-ui 目录暴露为通用静态根。
+const STATIC_FILES = new Map([
+  ['/app.js', { file: path.join(SCRIPT_DIR, 'app.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/app.css', { file: path.join(SCRIPT_DIR, 'app.css'), type: 'text/css; charset=utf-8' }],
+]);
 const TAIL_CHUNK = 256 * 1024;
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
@@ -50,6 +55,17 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       const html = fs.readFileSync(INDEX_FILE);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
+      return;
+    }
+    const asset = STATIC_FILES.get(u.pathname);
+    if (asset) {
+      const body = fs.readFileSync(asset.file);
+      res.writeHead(200, {
+        'Content-Type': asset.type,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(body);
       return;
     }
     if (u.pathname === '/api/lifecycle') {
