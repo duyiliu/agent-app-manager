@@ -616,7 +616,7 @@ export function cmdCleanupWrapper(ctx, ref) {
       throw conflictError('IDENTITY_UNKNOWN', `wrapper(pid=${cur.wrapperPid}) 身份与记录不一致（创建时间或映像已变，可能已 exec 成目标），拒绝清理；未触碰任何进程`, { runId: cur.runId, wrapperPid: cur.wrapperPid, recordedImage: cur.wrapperImage, capture: now });
     }
     let t;
-    try { t = psProc('terminate', { id: cur.wrapperPid, creationFileTime: now.creationFileTime, image: now.image }); }
+    try { t = psProc('terminate', { id: cur.wrapperPid, creationFileTime: now.creationFileTime, image: now.image, freeze: true }); }
     catch (e) { t = { result: 'error', message: e.message }; }
     if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound' || t.result === 'mismatch') {
       cur.wrapperCleaned = true;

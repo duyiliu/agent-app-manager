@@ -126,7 +126,7 @@ ui [--port N] [--open]                      # 本地 Web 管理台（127.0.0.1 �
 
 首次启动需要 Skill 调用的**内部登记与启动入口**：传递结构化启动描述并以原子流程“保存启动意图 → 启动 → 完成登记”；可以实现为内部子命令/参数文件，**不对用户暴露额外的手动注册 CRUD**。不可要求用户手写 `registry.json`。当一次普通项目脚本启动不能托管时，用同一内部入口记录尝试及日志线索。
 
-STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核验。命令模式启动失败且记录含完整 wrapper 身份时，可先用 `cleanup-wrapper <alias|appId>` 只清理已记录身份的 wrapper；该命令按 `pid`+创建时间+映像核验后终止（创建时间或映像任一不符即拒绝；Linux `/bin/sh` 已 exec 成目标时不会清理该 PID），不改变 UNKNOWN 证据，也不清理目标候选或后代。**目标候选与后代必须按进程证据人工核验处置，禁止把 UNKNOWN 直接当 STOPPED 重试**；恢复旧账仍走 `start`/`remove --ack-unresolved <runId>`。
+STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核验。命令模式启动失败且记录含完整 wrapper 身份时，可先用 `cleanup-wrapper <alias|appId>` 只清理已记录身份的 wrapper；该命令按 `pid`+创建时间+映像核验后终止（创建时间或映像任一不符即拒绝；Linux 发信号前先 `SIGSTOP` 冻结 wrapper 再复核，已 exec 成目标时恢复并拒绝），不改变 UNKNOWN 证据，也不清理目标候选或后代。**目标候选与后代必须按进程证据人工核验处置，禁止把 UNKNOWN 直接当 STOPPED 重试**；恢复旧账仍走 `start`/`remove --ack-unresolved <runId>`。
 
 `list/status` 读取注册表，实时核验受管 JVM 身份；区分 RUNNING、STOPPED、STARTING、UNKNOWN，以及独立的 `managed` 状态。未注册项目不在列表；历史 Unmanaged 记录不得凭端口扫描宣称 STOPPED 或 RUNNING。输出项目别名、来源、状态、PID/端口（有证据才填写）、托管能力、日志位置。
 

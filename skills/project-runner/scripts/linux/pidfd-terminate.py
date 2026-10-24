@@ -4,6 +4,7 @@ import os
 import select
 import signal
 import sys
+import time
 
 
 def emit(result, **extra):
@@ -31,6 +32,37 @@ def identity(pid):
         return {"result": "error", "code": "identityFailed", "message": str(error)}
 
 
+def process_state(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
+            raw = stat_file.read()
+        fields = raw[raw.rfind(")") + 2:].split()
+        return fields[0]
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "?"
+
+
+def wait_stopped(pid, timeout_ms):
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        state = process_state(pid)
+        if state is None or state in ("Z", "X", "x"):
+            return "exited"
+        if state in ("T", "t"):
+            return "stopped"
+        time.sleep(0.002)
+    return "timeout"
+
+
+def resume(pidfd):
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def main():
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         emit("error", code="pidfdUnsupported", message="Python 3.9+ and Linux pidfd support are required")
@@ -46,6 +78,10 @@ def main():
     except AttributeError:
         emit("error", code="badArgs", message=f"unknown signal {sys.argv[5]}")
         return
+    # 可选第 7 参 freeze=1：先 SIGSTOP 冻结整个进程，再复核身份并发送信号。
+    # Linux 的 /bin/sh wrapper 可能在核验后 exec 成目标；冻结后进程无法 exec，
+    # 若身份已变则 SIGCONT 恢复并返回 mismatch，绝不向已 exec 的目标发终止信号。
+    freeze = len(sys.argv) > 6 and sys.argv[6] == "1"
     try:
         pidfd = os.pidfd_open(pid, 0)
     except ProcessLookupError:
@@ -66,6 +102,39 @@ def main():
         if current["image"] != expected_image:
             emit("mismatch", field="image")
             return
+        if freeze:
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+            except ProcessLookupError:
+                emit("exited")
+                return
+            except OSError as error:
+                emit("error", code="freezeFailed", message=str(error))
+                return
+            frozen = wait_stopped(pid, 2000)
+            if frozen == "exited":
+                emit("exited")
+                return
+            if frozen != "stopped":
+                resume(pidfd)
+                emit("error", code="freezeTimeout", message="进程未在 2000ms 内停止，未发送终止信号")
+                return
+            # 冻结后进程无法 exec：此刻复核身份是稳定的。
+            current = identity(pid)
+            if current["result"] != "ok":
+                if current["result"] != "exited":
+                    resume(pidfd)
+                emit(current["result"], **{k: v for k, v in current.items() if k != "result"})
+                return
+            field = None
+            if current["creationFileTime"] != expected_creation:
+                field = "creationTime"
+            elif current["image"] != expected_image:
+                field = "image"
+            if field:
+                resume(pidfd)
+                emit("mismatch", field=field)
+                return
         try:
             signal.pidfd_send_signal(pidfd, sig)
         except ProcessLookupError:
