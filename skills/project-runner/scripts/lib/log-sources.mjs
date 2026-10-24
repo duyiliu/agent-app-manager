@@ -63,6 +63,19 @@ function appRootOf(home, ref) {
   }
 }
 
+// envFile 是机密注入源：即使位于项目 root 内，也不允许通过 ui 文件浏览回显其内容。
+function configuredEnvFile(app, root) {
+  if (typeof app?.envFile !== 'string' || !app.envFile) return null;
+  const abs = path.isAbsolute(app.envFile) ? app.envFile : path.resolve(app.cwd ?? root, app.envFile);
+  try { return fs.realpathSync.native(abs); } catch { return path.resolve(abs); }
+}
+
+function isConfiguredEnvFile(app, root, file) {
+  const envFile = configuredEnvFile(app, root);
+  if (!envFile) return false;
+  try { return fs.realpathSync.native(file) === envFile; } catch { return path.resolve(file) === envFile; }
+}
+
 // 非受管日志线索定位符：hint:<路径 hash>。listSources 与 tail 之间 current.logHints 可能变化，
 // 下标会错位读错文件；hash 定位与内容无关、与顺序无关，错位时明确报错而不是静默读错。
 const hintLocator = (hint) => `hint:${crypto.createHash('sha256').update(hint).digest('hex').slice(0, 12)}`;
@@ -152,6 +165,7 @@ export function listTree(home, ref, rel = '') {
   const entries = [];
   for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
     if (uiBlocked(item.name) || item.isSymbolicLink() || (!item.isDirectory() && !item.isFile())) continue;
+    if (!item.isDirectory() && isConfiguredEnvFile(app, root, path.join(dir, item.name))) continue;
     entries.push({ name: item.name, path: path.posix.join(rel, item.name), directory: item.isDirectory() });
   }
   entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
@@ -159,8 +173,9 @@ export function listTree(home, ref, rel = '') {
 }
 
 export function readProjectFile(home, ref, rel = '', offset = 0) {
-  const { root } = appRootOf(home, ref);
+  const { app, root } = appRootOf(home, ref);
   const file = uiResolveFile(root, rel);
+  if (isConfiguredEnvFile(app, root, file)) throw uiFail(403, 'envFile 不允许通过管理台浏览');
   const stat = fs.statSync(file);
   if (!stat.isFile()) throw uiFail(400, '不是普通文件');
   offset = Number(offset);

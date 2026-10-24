@@ -946,6 +946,8 @@ function renderDetail(d) {
   kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
   kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
   kvRow(grid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
+  const envRows = Object.entries(d.env ?? {});
+  kvRow(grid, '环境变量', envRows.length ? envRows.map(([k, v]) => `${k}=${v}`).join('\n') : null, 'dim');
   kvRow(grid, 'stdout', run?.logPaths?.stdout);
   kvRow(grid, 'stderr', run?.logPaths?.stderr);
   kvRow(grid, '日志线索', run?.logHints?.length ? run.logHints.join('\n') : null, 'dim');
