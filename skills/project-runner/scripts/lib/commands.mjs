@@ -12,7 +12,7 @@ import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
 import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
-import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
+import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId, exitSummary } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
 import { readTailLines, MAX_LOG_LINES } from './logs.mjs';
@@ -306,12 +306,16 @@ export function cmdList(ctx) {
     } catch (e) {
       return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
     }
+    const current = rt?.current ?? null;
+    const runExit = current?.exit ?? null;
     return {
       alias: app.alias, appId: app.appId, mode: app.mode,
-      status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
-      pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
-      expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
-      log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
+      status: st.status, managed: st.managed ?? (current?.managed ?? null),
+      pid: st.status === 'RUNNING' ? (st.pid ?? current?.pid) : null,
+      expectedPort: app.expectedPort, lastRunId: current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
+      exit: runExit, exitSummary: exitSummary(current),
+      exitNote: st.note ?? current?.exitNote ?? null,
+      log: current?.logPaths?.stdout ?? null, root: app.root,
     };
   });
   if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
@@ -393,6 +397,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
+  const runExit = cur?.exit ?? null;
+  const runExitSummary = exitSummary(cur);
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
@@ -400,6 +406,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
+    exit: runExit,
+    exitSummary: runExitSummary,
     portNote: probeRequested ? '端口监听仅为 TCP 证据；监听 ≠ 业务就绪' : '使用 --probe 执行本机 TCP 监听探测',
     ...(probeRequested ? { portListening } : {}),
     ...(jrebelEvidence ? { jrebelEvidence } : {}),
@@ -415,6 +423,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       logRotated: cur.logRotated ?? false, logRotatedStreams: cur.logRotatedStreams ?? [],
       logRotateFailedStreams: cur.logRotateFailedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
+      exit: runExit, exitSummary: runExitSummary,
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),

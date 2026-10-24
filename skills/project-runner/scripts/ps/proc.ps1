@@ -278,15 +278,21 @@ if ($Action -eq 'discover') {
     }
     $byParent = @{}
     $wrapperAlive = $false
+    $rootRow = $null
     foreach ($p in $rows) {
       $pp = [int64]$p.ParentProcessId
-      if ([int64]$p.ProcessId -eq $Id) { $wrapperAlive = $true }
+      if ([int64]$p.ProcessId -eq $Id) { $wrapperAlive = $true; $rootRow = $p }
       if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
       [void]$byParent[$pp].Add($p)
     }
     $queue = [System.Collections.ArrayList]@([int64]$Id)
     $seen = @{}
     $found = @()
+    # 锚点自身也参与映像匹配：Linux /bin/sh 可能 exec 成真实目标（pid 不变），
+    # 此时目标不是自己的后代，仅按后代枚举会错过。
+    if ($rootRow -and $rootRow.ExecutablePath -and ([IO.Path]::GetFileName([string]$rootRow.ExecutablePath) -ieq $Image)) {
+      $found += [pscustomobject]@{ pid = [int64]$rootRow.ProcessId; image = [string]$rootRow.ExecutablePath; creationFileTime = [string]$rootRow.CreationDate.ToFileTime(); cmd = '' }
+    }
     while ($queue.Count -gt 0) {
       $cur = $queue[0]; $queue.RemoveAt(0)
       $kids = $byParent[[int64]$cur]

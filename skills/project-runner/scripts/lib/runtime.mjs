@@ -38,7 +38,8 @@ export function archiveCurrent(rt, opts = {}) {
     const entry = {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, kind: cur.kind ?? 'direct',
       startedAt: cur.startedAt, endedAt: cur.endedAt ?? null,
-      lastError: cur.lastError ?? null, archivedAt: new Date().toISOString(),
+      lastError: cur.lastError ?? null, exit: cur.exit ?? null,
+      archivedAt: new Date().toISOString(),
     };
     if (opts.reason) {
       // 显式 ack 放弃的未结记录：保留完整身份与日志证据，注明归档原因
@@ -74,6 +75,7 @@ export function runEvidence(home, appId, cur) {
     intentAt: cur.intentAt ?? null,
     startedAt: cur.startedAt ?? null,
     lastError: cur.lastError ?? null,
+    exit: cur.exit ?? null,
     runtimeFile: runtimePath(home, appId),
     logPaths: cur.logPaths ?? null,
   };
@@ -150,6 +152,27 @@ export function parseAckRunId(value) {
 
 // ---------- 状态计算（只读 + 就地标记；落账由 statusWithFacts 在锁内完成） ----------
 
+// 目标进程退出证据的可读摘要。旧 runtime 记录没有 exit 字段时返回 null，
+// 状态计算保持原有“进程已退出”等文案，保证向后兼容。
+export function exitSummary(cur) {
+  const ev = cur?.exit;
+  if (!ev || typeof ev !== 'object') return null;
+  if (ev.signal) return `被信号终止（signal=${ev.signal}）`;
+  if (Number.isInteger(ev.code)) {
+    return ev.code === 0 ? '正常退出（code=0）' : `异常退出（code=${ev.code}）`;
+  }
+  return '退出码/信号不可用';
+}
+
+function stoppedNote(cur, fallback = null) {
+  const summary = exitSummary(cur);
+  const note = cur.exitNote ?? fallback;
+  if (!summary) return note;
+  if (!note || note === summary || note.startsWith(summary)) return summary;
+  // stop/grace 等已有过程证据时保留原文，但把具体 code/signal 放在最前面。
+  return `${summary}；${note}`;
+}
+
 // 状态计算（只读 + 就地标记）。
 // prefetched：批量核验预取结果（与逐条 verifyRun 同语义），避免 list 对 N 个应用 spawn N 次
 export function computeStatus(home, appId, rt, prefetched = null) {
@@ -170,18 +193,19 @@ export function computeStatus(home, appId, rt, prefetched = null) {
     };
   }
   if (cur.phase === 'STOPPED') {
-    return { status: 'STOPPED', managed: true, runId: cur.runId, note: cur.exitNote ?? null };
+    return { status: 'STOPPED', managed: true, runId: cur.runId, note: stoppedNote(cur), exit: cur.exit ?? null };
   }
   if (cur.phase === 'UNKNOWN') {
     return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: cur.lastError ?? '状态未知' };
   }
   if (cur.phase === 'RUNNING') {
     const v = prefetched ? interpretVerifyResult(prefetched) : verifyRun(cur);
-    if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid };
+    if (v.alive) return { status: 'RUNNING', managed: true, runId: cur.runId, pid: cur.pid, exit: cur.exit ?? null };
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
-    cur.exitNote = v.reason === 'pidReused' ? '进程退出后 PID 被复用（未触碰新进程）' : '进程已退出';
-    return { status: 'STOPPED', managed: true, runId: cur.runId, pid: cur.pid, note: cur.exitNote, writeback: true };
+    cur.exitNote = stoppedNote(cur,
+      v.reason === 'pidReused' ? '进程退出后 PID 被复用（未触碰新进程）' : '进程已退出');
+    return { status: 'STOPPED', managed: true, runId: cur.runId, pid: cur.pid, note: cur.exitNote, exit: cur.exit ?? null, writeback: true };
   }
   return { status: 'UNKNOWN', managed: true, runId: cur.runId, note: `未知 phase=${cur.phase}` };
 }
@@ -195,7 +219,9 @@ function settleStoppedWriteback(home, appId, marked) {
       if (rt2 && rt2.current && rt2.current.runId === marked.runId && rt2.current.phase === 'RUNNING') {
         rt2.current.phase = 'STOPPED';
         rt2.current.endedAt = marked.endedAt;
-        rt2.current.exitNote = marked.exitNote;
+        // logger 可能已在本次核验与锁之间写入 exit：按最新记录重新生成说明，
+        // 不把已有的 code/signal 覆盖成笼统的“进程已退出”。
+        rt2.current.exitNote = stoppedNote(rt2.current, marked.exitNote);
         writeRuntime(home, appId, rt2);
       }
     });

@@ -205,9 +205,14 @@ export async function launchManaged(home, appId, app, opts = {}) {
   }
 
   const waitMs = app.discoverTimeoutMs ?? COMMAND_DISCOVER_TIMEOUT_MS;
+  // 从已验证的真实 wrapper 往下发现（如 pidFile 未给出时回退 logger pid）：
+  // logger 可能因写退出证据而短暂存活，不能把“logger 还活着”误当成“wrapper 还活着”，
+  // 否则命令即死场景会从 wrapperExited 退化成 DISCOVERY_TIMEOUT。
+  const discoverAnchor = Number.isInteger(rt.current.wrapperPid) && rt.current.wrapperPid > 0
+    ? rt.current.wrapperPid : child.pid;
   let d;
   try {
-    d = psProc('discover', { id: child.pid, image: app.expectedImage, waitMs });
+    d = psProc('discover', { id: discoverAnchor, image: app.expectedImage, waitMs });
   } catch (e) {
     d = { result: 'error', code: 'discover_failed', message: e.message };
   }

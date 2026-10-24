@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { readRuntimeStrict, atomicWriteJson } from './lib/store.mjs';
-import { withLock } from './lib/locks.mjs';
+import { withLogEvidenceLock } from './lib/locks.mjs';
 
 const [configPath] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -22,6 +22,12 @@ const rotateFailedStreams = new Set();
 const recordedFailedStreams = new Set();
 let rotationRetryTimer = null;
 let rotationRetryAttempts = 0;
+// 目标进程退出证据：runId 匹配当前记录时写入 current.exit（spawn 失败走 pidFile=0/lastError，不写 exit）。
+// 与轮转状态共用应用锁并按 runId 二次确认，避免并发 start/stop 时记到错误的 run。
+let exitInfo = null;
+let exitRecorded = false;
+let exitRetryTimer = null;
+let exitRetryAttempts = 0;
 
 function scheduleRotationRetry() {
   if (rotationRetryTimer || rotationRetryAttempts >= 40) return;
@@ -37,7 +43,7 @@ function persistRotationState() {
   if ([...rotatedStreams].every((stream) => recordedStreams.has(stream))
     && [...rotateFailedStreams].every((stream) => recordedFailedStreams.has(stream))) return;
   try {
-    withLock(home, appId, 'log-rotation', () => {
+    withLogEvidenceLock(home, appId, 'log-rotation', () => {
       const rt = readRuntimeStrict(home, appId);
       if (rt?.current?.runId !== runId) {
         for (const stream of rotatedStreams) recordedStreams.add(stream);
@@ -66,6 +72,37 @@ function markRotated(stream) {
 function markRotateFailed(stream) {
   rotateFailedStreams.add(stream);
   persistRotationState();
+}
+
+function scheduleExitRetry() {
+  if (exitRetryTimer || exitRetryAttempts >= 40) return;
+  const delay = Math.min(100 * (2 ** Math.min(exitRetryAttempts, 4)), 2000);
+  exitRetryAttempts++;
+  exitRetryTimer = setTimeout(() => {
+    exitRetryTimer = null;
+    persistExitState();
+  }, delay);
+}
+
+function persistExitState() {
+  if (!exitInfo || exitRecorded) return;
+  try {
+    withLogEvidenceLock(home, appId, 'log-exit', () => {
+      const rt = readRuntimeStrict(home, appId);
+      // 仅当前 run 仍是本 logger 对应的批次时才写入；旧 run 已归档/新 run 已启动时丢弃，
+      // 绝不让迟到的 close 事件覆盖新记录。
+      if (rt?.current?.runId !== runId) {
+        exitRecorded = true;
+        return;
+      }
+      rt.current.exit = exitInfo;
+      atomicWriteJson(runtimeFile, rt);
+      exitRecorded = true;
+    });
+  } catch {
+    // 停止/启动持锁期间短暂 LOCK_BUSY：有界重试，拿到锁后按 runId 复核。
+    scheduleExitRetry();
+  }
 }
 
 const target = spawn(file, args, { cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -136,6 +173,14 @@ forward(target.stderr, false);
 // 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出；'exit' 事件无此保证。
 target.on('close', (code, signal) => {
   persistRotationState();
+  if (!spawnFailed) {
+    exitInfo = {
+      code: Number.isInteger(code) ? code : null,
+      signal: signal ?? null,
+      at: new Date().toISOString(),
+    };
+    persistExitState();
+  }
   try { fs.closeSync(outFd); } catch {}
   try { fs.closeSync(errFd); } catch {}
   if (!spawnFailed) process.exitCode = code ?? (signal ? 1 : 0);
