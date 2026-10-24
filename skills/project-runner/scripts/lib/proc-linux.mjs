@@ -239,7 +239,8 @@ export function discover(rootPid, expectedImage, waitMs = COMMAND_DISCOVER_TIMEO
   for (;;) {
     const rows = snapshotProcesses();
     if (rows.error) return { result: 'error', code: 'procUnreadable', message: rows.error.message };
-    const found = [];
+    // 后续叶子折叠会整体替换（found = leaves），必须可重绑
+    let found = [];
     // 锚点自身也参与映像匹配（与 ps/proc.ps1 同语义）：/bin/sh -c 可能 exec 成
     // 真实目标而 pid 不变，此时目标不是自己的后代，仅按后代枚举会错过。
     const root = rows.get(rootPid);
