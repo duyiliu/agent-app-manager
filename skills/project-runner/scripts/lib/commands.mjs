@@ -545,11 +545,10 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   if (opts.graceMs != null) {
     const g = psProc('grace', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, waitMs: opts.graceMs });
     if (g.result === 'gracefulTerminated') {
-      // 有信号语义的平台（Linux pidfd SIGTERM）可直接留下目标退出证据；Windows
-      // taskkill 无 /F 不产生 POSIX signal，不臆造 signal。
-      const graceExit = process.platform === 'linux'
-        ? { code: null, signal: 'SIGTERM', source: 'manager-stop' } : null;
-      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`, {}, true, graceExit);
+      // 只证明“发出 SIGTERM 后目标在窗口内退出”，不能据此断言目标被信号终止：
+      // 目标可能捕获 SIGTERM 后以 code=0 正常退出。真实退出结果由 log-writer（直连）
+      // 或 exit-watcher（command 模式目标）在观察到实际退出事件后写入。
+      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`, {}, true);
     }
     if (g.result !== 'stillAlive') {
       // gracefulTerminated/stillAlive 之外的结果视同普通 terminate 结果走下面分支

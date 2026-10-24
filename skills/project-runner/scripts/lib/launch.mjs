@@ -14,6 +14,7 @@ import { conflictError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LOG_WRITER = path.join(SCRIPTS_DIR, 'log-writer.mjs');
+const EXIT_WATCHER = path.join(SCRIPTS_DIR, 'exit-watcher.mjs');
 
 // 命令模式的顶层 wrapper：Windows 是 cmd.exe，Linux 是 /bin/sh；两者都必须是
 // 可校验的真实可执行文件（sh 不允许被 shebang 脚本冒充）。
@@ -50,6 +51,29 @@ export function cleanupWrapper(rt) {
   try {
     psProc('terminate', { id: cur.wrapperPid, creationFileTime: cur.wrapperCreationFileTime, image: cur.wrapperImage });
   } catch { /* best-effort */ }
+}
+
+// command 模式：log-writer 只能看到 shell wrapper，真实目标由 discover 找到。
+// 目标与 wrapper 不同 pid 时启动 detached watcher，用目标自身身份等待其真实退出，
+// 避免把 wrapper 的普通退出当成目标 code/signal。
+function startTargetExitWatcher(home, appId, runId, cur) {
+  if (!Number.isInteger(cur.pid) || cur.pid <= 0 || !cur.creationFileTime) return;
+  if (Number.isInteger(cur.wrapperPid) && cur.pid === cur.wrapperPid) return;
+  const logDir = cur.logPaths ? path.dirname(cur.logPaths.stdout) : SCRIPTS_DIR;
+  const readyFile = path.join(logDir, `.${runId}.exit-watch.ready`);
+  try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
+  try {
+    const watcher = spawn(process.execPath, [
+      EXIT_WATCHER, home, appId, runId, String(cur.pid), String(cur.creationFileTime), readyFile,
+    ], { cwd: logDir, detached: true, windowsHide: true, stdio: 'ignore' });
+    watcher.unref();
+    // 等 helper 真正持有目标句柄/pidfd 后再返回启动成功；否则测试或用户可能
+    // 立即终止目标，而 pwsh 冷启动尚未完成，真实退出证据就会漏采。
+    for (let i = 0; i < 100 && !fs.existsSync(readyFile); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  } catch { /* 证据采集失败不阻断启动 */ }
+  try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
 }
 
 export async function launchManaged(home, appId, app, opts = {}) {
@@ -231,6 +255,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.image = t.image;
       captureLoggerCreationFileTime(rt.current);
       writeRuntime(home, appId, rt);
+      startTargetExitWatcher(home, appId, runId, rt.current);
       return rt.current;
     }
     rt.current.phase = 'UNKNOWN';

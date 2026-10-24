@@ -304,11 +304,13 @@ try {
       const rt = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
       wrapperExit = rt.current.wrapperExit ?? null;
       targetExit = rt.current.exit ?? null;
-      if (wrapperExit) break;
+      if (wrapperExit && targetExit) break;
       await wait(100);
     }
     assert.equal(wrapperExit?.code, 0, `wrapper 普通退出证据缺失：${JSON.stringify(wrapperExit)}`);
-    assert(!targetExit, `wrapper 的普通退出被误记为 target.exit：${JSON.stringify(targetExit)}`);
+    assert(targetExit, 'exit-watcher 未记录受管目标的真实退出');
+    assert(!(targetExit.code === 0 && targetExit.signal == null), `目标被 SIGKILL 后仍记为 wrapper 的正常退出：${JSON.stringify(targetExit)}`);
+    if (process.platform === 'linux') assert.equal(targetExit.signal, 'SIGKILL');
     // stop 自己终止目标时，受管目标必须有独立于 wrapper 的退出证据。
     assert.equal(cli('stop', 'cmddetach').code, 0);
     const started = cli('start', 'cmddetach');

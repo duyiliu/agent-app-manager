@@ -455,6 +455,18 @@ try {
     const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
     // Linux：SIGTERM 被捕获应优雅退出；Windows 控制台进程 taskkill 无 /F 多半失败 → grace 超时后强制
     assert(rt.current.exitNote.includes('grace'), `exitNote 未记录 grace 过程：${rt.current.exitNote}`);
+    if (!isWindows) {
+      // 发出 SIGTERM ≠ 目标被信号终止：gracer.js 捕获 SIGTERM 后 process.exit(0)，
+      // 退出证据必须来自实际 exit 事件（code=0/signal=null），不能写成 SIGTERM。
+      let exit = null;
+      for (let i = 0; i < 40; i++) {
+        exit = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8')).current.exit ?? null;
+        if (exit) break;
+        sleep(100);
+      }
+      assert.equal(exit?.code, 0, `grace 后目标退出码应为 0：${JSON.stringify(exit)}`);
+      assert.equal(exit?.signal, null, `捕获 SIGTERM 后正常退出不应记 signal：${JSON.stringify(exit)}`);
+    }
   });
 
   lifecycle('文本模式人类可读输出抽查（status 含 port/状态）', () => {
