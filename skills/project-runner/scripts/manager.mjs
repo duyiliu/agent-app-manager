@@ -144,7 +144,7 @@ function renderHuman(command, data) {
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'stop':
-      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.note ? `；${data.note}` : ''}`;
+      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.treeKilled?.length ? `；后代已终止 ${data.treeKilled.length} 个` : ''}${data.note ? `；${data.note}` : ''}`;
     case 'remove':
       return [
         `已移除登记 ${data.alias} (${data.appId})`,
@@ -210,7 +210,7 @@ function usageText() {
     '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止；restart 的 --tree/--grace',
     '       作用于停旧实例这一步',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
-    '  restart <alias|appId> [--force] [--tree] [--grace <ms>]   确认退出后重启（仅受管实例；',
+    '  restart <alias|appId> [--force] [--tree] [--grace <ms>]   确认退出后重启（仅受管实例；--tree/--grace 作用于停旧实例这一步）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',

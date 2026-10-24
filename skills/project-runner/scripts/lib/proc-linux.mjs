@@ -177,6 +177,18 @@ function descendantsOf(rootPid, byParent) {
   return found;
 }
 
+// 枚举目标进程当时仍在的后代（PPID 树，含多级）：stop --tree 在终止目标前留证（#39）。
+// 只向下遍历，不向上爬、不认领外部进程。返回 [{pid,image,comm}]。
+export function descendants(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  const rows = snapshotProcesses();
+  if (rows.error) return [];
+  return descendantsOf(pid, childrenByParent(rows)).map((child) => {
+    const s = rows.get(child);
+    return { pid: child, image: readImage(child, s.comm), comm: s.comm };
+  });
+}
+
 // --grace：与 terminate 同一 pidfd 同锚定核验语义，只把信号换成 SIGTERM；
 // waitMs 内确认退出 → gracefulTerminated，超时仍存活 → stillAlive，由调用方回退强杀。
 export function gracefulTerminate(pid, expected, waitMs) {
@@ -365,6 +377,7 @@ export function verifyBatch(items) {
 export function run(action, params = {}) {
   switch (action) {
     case 'verify-batch': return verifyBatch(params.items);
+    case 'descendants': return descendants(params.id);
     case 'capture': return capture(params.id);
     case 'verify': return verify(params.id, params);
     case 'terminate': return terminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);

@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'port')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'descendants', 'port')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -195,7 +195,7 @@ if (($Action -in 'verify', 'terminate', 'terminate-tree', 'grace') -and (($Id -l
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
-if (($Action -in 'capture') -and ($Id -le 0)) {
+if (($Action -in 'capture', 'descendants') -and ($Id -le 0)) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
@@ -369,6 +369,43 @@ function Get-Descendants([int64]$rootPid) {
     }
   }
   return $found
+}
+
+# descendants：枚举目标 pid 当时仍在的后代（PPID 树，含多级），供 stop --tree 在终止
+# 目标前留证（#39）。只向下遍历，不向上爬、不认领外部进程。
+if ($Action -eq 'descendants') {
+  $rows = @()
+  try {
+    $rows = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath -ErrorAction SilentlyContinue)
+  } catch {
+    '[]'
+    exit 0
+  }
+  $byParent = @{}
+  $imageById = @{}
+  foreach ($p in $rows) {
+    $procId = [int64]$p.ProcessId
+    $pp = [int64]$p.ParentProcessId
+    if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
+    [void]$byParent[$pp].Add($procId)
+    $imageById[$procId] = [string]$p.ExecutablePath
+  }
+  $out = @()
+  $queue = [System.Collections.ArrayList]@([int64]$Id)
+  $seen = @{}
+  while ($queue.Count -gt 0) {
+    $cur = $queue[0]; $queue.RemoveAt(0)
+    $kids = $byParent[$cur]
+    if (-not $kids) { continue }
+    foreach ($c in $kids) {
+      if ($seen.ContainsKey($c)) { continue }
+      $seen[$c] = $true
+      [void]$queue.Add($c)
+      $out += [pscustomobject]@{ pid = [int]$c; image = [string]$imageById[$c] }
+    }
+  }
+  if (@($out).Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress }
+  exit 0
 }
 
 if ($Action -eq 'terminate-tree') {

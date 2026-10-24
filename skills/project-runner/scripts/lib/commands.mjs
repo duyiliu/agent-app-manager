@@ -9,7 +9,7 @@ import { SCHEMA_VERSION } from './constants.mjs';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
-import { psProc, verifyRun, verifyRuns, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
+import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
@@ -457,6 +457,38 @@ export async function cmdStart(ctx, ref) {
   });
 }
 
+// --tree 快照：目标身份核验通过后按 PPID 向下枚举当时仍在的后代（含多级），
+// 各自用 capture 采集 pid+创建时间+映像。只向下、不向上，不认领外部进程。
+function snapshotTree(cur) {
+  const rows = listDescendants(cur.pid);
+  const snapshot = [];
+  for (const row of rows) {
+    const pid = Number.isInteger(row) ? row : row?.pid;
+    if (!Number.isInteger(pid) || pid <= 0 || pid === cur.pid) continue;
+    try {
+      const id = psProc('capture', { id: pid });
+      if (id.result === 'ok') snapshot.push({ pid, creationFileTime: id.creationFileTime, image: id.image });
+    } catch { /* 后代可能已自行退出；跳过不报错 */ }
+  }
+  return snapshot;
+}
+
+// 目标已确认退出后，按快照逐个同句柄核验+终止；已退出或 PID 已复用的后代会返回
+// exited/notfound/mismatch。已退出/不存在不报错并记入 treeKilled 证据（快照中的后代已不在），
+// mismatch 表示 PID 已复用为其他进程，绝不触碰也不记入。逆 BFS 顺序先杀深层后代，减少中间层退出后的 reparent。
+function terminateTreeSnapshot(snapshot) {
+  const killed = [];
+  for (let i = snapshot.length - 1; i >= 0; i--) {
+    const item = snapshot[i];
+    let t;
+    try {
+      t = psProc('terminate', { id: item.pid, creationFileTime: item.creationFileTime, image: item.image });
+    } catch { continue; }
+    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound') killed.push({ pid: item.pid, image: item.image });
+  }
+  return killed;
+}
+
 // 停止核心逻辑：返回 {result: stopped|alreadyStopped} 或抛错；调用方负责落账。
 // opts.tree：连带终止目标后代进程（#39）；opts.graceMs：先发优雅信号等待，超时仍存活再强杀。
 function stopCurrent(home, appId, app, rt, opts = {}) {
@@ -465,19 +497,32 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
   if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
   if (cur.phase === 'STOPPED') return { result: 'alreadyStopped', runId: cur.runId };
-  const markStopped = (note, extra = {}) => {
+  // --tree 必须在终止目标前快照后代（Linux 目标退出后会 reparent）。先核验目标身份再枚举，
+  // 避免 PID 复用后把无关进程的后代当成目标后代；目标后续核验失败时不会触碰快照。
+  let treeSnapshot = null;
+  if (opts.tree) {
+    treeSnapshot = [];
+    const v = psProc('verify', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+    if (v.result === 'ok') treeSnapshot = snapshotTree(cur);
+  }
+  const markStopped = (note, extra = {}, killTree = false) => {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = note;
     invalidateVerifyCache(cur.pid); // 终止后立即作废缓存存活结论，避免 stop→start 竞态读到旧值
-    cleanupWrapper(rt); // 命令模式：目标死后尽力清理残留 cmd wrapper
+    cleanupWrapper(rt); // 命令模式：先清理残留 wrapper，再处理目标后代
+    const treeKilled = opts.tree ? (killTree && treeSnapshot ? terminateTreeSnapshot(treeSnapshot) : []) : null;
     writeRuntime(home, appId, rt);
-    return { result: 'stopped', runId: cur.runId, pid: cur.pid, ...extra };
+    return {
+      result: 'stopped', runId: cur.runId, pid: cur.pid,
+      ...(opts.tree ? { treeKilled, killedPids: treeKilled.map((k) => k.pid) } : {}),
+      ...extra,
+    };
   };
   if (opts.graceMs != null) {
     const g = psProc('grace', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, waitMs: opts.graceMs });
     if (g.result === 'gracefulTerminated') {
-      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`);
+      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`, {}, true);
     }
     if (g.result !== 'stillAlive') {
       // gracefulTerminated/stillAlive 之外的结果视同普通 terminate 结果走下面分支
@@ -495,32 +540,18 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
     }
     // stillAlive：grace 超时，继续走下面的强制终止路径
   }
-  const action = opts.tree ? 'terminate-tree' : 'terminate';
-  const t = psProc(action, { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+  const t = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
   if (t.result === 'terminated') {
-    const kids = Array.isArray(t.killedPids) && t.killedPids.length ? `；连带后代 ${t.killedPids.length} 个（pid: ${t.killedPids.join(',')}）` : '';
     const graceNote = opts.graceMs != null ? `；已先等待 grace ${opts.graceMs}ms 未退出` : '';
-    return markStopped(`terminated(137) 有界强制停止${opts.tree ? `（--tree${kids}）` : ''}${graceNote}`,
-      Array.isArray(t.killedPids) ? { killedPids: t.killedPids } : {});
+    return markStopped(`terminated(137) 有界强制停止${opts.tree ? '（--tree）' : ''}${graceNote}`, {}, true);
   }
   if (t.result === 'exited' || t.result === 'notfound') {
-    cur.phase = 'STOPPED';
-    cur.endedAt = new Date().toISOString();
-    cur.exitNote = '进程已自行退出';
-    invalidateVerifyCache(cur.pid);
-    cleanupWrapper(rt);
-    writeRuntime(home, appId, rt);
-    return { result: 'alreadyStopped', runId: cur.runId };
+    return { ...markStopped('进程已自行退出'), result: 'alreadyStopped' };
   }
   if (t.result === 'mismatch') {
     // 记录的实例已退出，该 PID 现属其他进程：不触碰，落账退出
-    cur.phase = 'STOPPED';
-    cur.endedAt = new Date().toISOString();
-    cur.exitNote = '进程退出后 PID 被复用；未触碰新进程';
-    invalidateVerifyCache(cur.pid);
-    cleanupWrapper(rt);
-    writeRuntime(home, appId, rt);
-    return { result: 'alreadyStopped', runId: cur.runId, note: '原实例已退出，PID 已被其他进程复用，未触碰新进程' };
+    return { ...markStopped('进程退出后 PID 被复用；未触碰新进程'), result: 'alreadyStopped',
+      note: '原实例已退出，PID 已被其他进程复用，未触碰新进程' };
   }
   if (t.result === 'terminateTimeout') {
     cur.phase = 'UNKNOWN';
