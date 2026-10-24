@@ -269,16 +269,22 @@ async function main() {
       if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
-      if (command !== 'stop' && command !== 'restart') { // stop/restart 的 --tree/--grace 由各自 cmd 自行解析（值参无法进白名单）
-        const allowedFlags = { status: ['--probe', '--ready'] }[command] ?? [];
-        const bad = ctx.rest.slice(1).find((a) => !allowedFlags.includes(a));
-        if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
+      if (command !== 'stop' && command !== 'restart' && command !== 'status') {
+        // stop/restart/status 的选项由各自分支内 parseNamed 统一解析——
+        // 手工白名单与 cmd 参数解析是两份口径，会漂移（#82-D）；其余 ref 命令无选项。
+        const extra = ctx.rest.slice(1)[0];
+        if (extra !== undefined) throw usageError(`无法识别的参数：${extra}`);
       }
     }
     switch (command) {
       case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
       case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
-      case 'status': data = await cmdStatus(ctx, ctx.rest[0], ctx.rest.includes('--probe'), ctx.rest.includes('--ready')); break;
+      case 'status': {
+        const opts = parseNamed(ctx.rest.slice(1), { '--probe': 'flag', '--ready': 'flag' });
+        if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+        data = await cmdStatus(ctx, ctx.rest[0], opts.has('--probe'), opts.has('--ready'));
+        break;
+      }
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
       case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;
       case 'detect': {

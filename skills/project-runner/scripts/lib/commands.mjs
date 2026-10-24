@@ -342,10 +342,18 @@ function displayEnv(env = {}) {
 // 就绪证据评估：desc 可选 readyLogPattern（当前批次 stdout/stderr 正则）与 readyUrl
 // （http GET <400 即就绪）。两者都未配置 → UNTESTED；任一证据命中 → READY；配置了但
 // 无命中 → NOT_READY。只读评估，不改状态。
+// readyLogPattern 编译缓存：status --ready 每次调用都编译同一正则（#82-B3）。
+const readyReCache = new Map();
+const readyRe = (pattern) => {
+  let r = readyReCache.get(pattern);
+  if (!r) { r = new RegExp(pattern); readyReCache.set(pattern, r); }
+  return r;
+};
+
 async function readinessCheck(home, app, cur) {
   const evidence = [];
   if (app.readyLogPattern && cur?.runId) {
-    const re = new RegExp(app.readyLogPattern);
+    const re = readyRe(app.readyLogPattern);
     const dir = path.join(home, 'logs', app.appId);
     for (const stream of ['stdout', 'stderr']) {
       let line = null;
