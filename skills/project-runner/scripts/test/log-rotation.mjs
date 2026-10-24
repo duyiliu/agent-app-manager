@@ -11,7 +11,7 @@ import { readTailLines } from '../lib/logs.mjs';
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'log-writer.mjs');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-log-rotation-'));
 
-function runLogger(name, limit, script, fileOverride) {
+function runLogger(name, limit, script, fileOverride, prepare) {
   const dir = path.join(temp, name);
   fs.mkdirSync(dir);
   const home = path.join(dir, 'home');
@@ -22,6 +22,7 @@ function runLogger(name, limit, script, fileOverride) {
   const errPath = path.join(dir, 'run.stderr.log');
   const runtimeFile = path.join(home, 'runtime', `${appId}.json`);
   const pidFile = path.join(dir, 'target.pid');
+  if (typeof prepare === 'function') prepare({ dir, outPath, errPath, runtimeFile, pidFile });
   fs.writeFileSync(runtimeFile, JSON.stringify({ schemaVersion: 1, appId, current: { runId: 'run', phase: 'RUNNING' } }));
   const configPath = path.join(dir, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify({
@@ -68,6 +69,21 @@ try {
   assert.equal(normal.code, 0);
   assert(!fs.existsSync(`${normal.outPath}.1`), 'output below limit should not create a rotated file');
   assert.equal(fs.readFileSync(normal.outPath, 'utf8'), 'small output\n');
+
+  // rename 失败回归：用目录占住 .1 使轮转 rename 失败；此时绝不能回落到
+  // open('w') 截断当前批次日志，且 runtime 需标记轮转失败。
+  const rotateFailed = await runLogger('rotate-failed', 1024,
+    "process.stdout.write('x'.repeat(1200)); setTimeout(() => { process.stdout.write('continued-after-failed-rotation\\n'); process.exit(0); }, 100);",
+    undefined,
+    ({ outPath }) => fs.mkdirSync(`${outPath}.1`));
+  assert.equal(rotateFailed.code, 0, '轮转失败不应影响 logger 与目标进程退出');
+  assert(fs.statSync(`${rotateFailed.outPath}.1`).isDirectory(), '占位目录应阻止 rename');
+  const rotateFailedContent = fs.readFileSync(rotateFailed.outPath, 'utf8');
+  assert(rotateFailedContent.startsWith('x'), 'rename 失败后当前日志内容不得被截断');
+  assert(rotateFailedContent.includes('continued-after-failed-rotation'), 'rename 失败后新日志仍应续写');
+  const rotateFailedRuntime = JSON.parse(fs.readFileSync(rotateFailed.runtimeFile, 'utf8'));
+  assert.deepEqual(rotateFailedRuntime.current.logRotateFailedStreams, ['stdout'], 'runtime 应标记 stdout 轮转失败');
+  assert(!rotateFailedRuntime.current.logRotated, 'rename 失败不应标记为已轮转');
   // pidFile=0 契约：目标 spawn 失败时快速落 SPAWN_FAILED 所需的错误信号
   const spawnFailed = await runLogger('spawn-failed', 1024, "process.stdout.write('never')", 'Z:/definitely/missing/target.exe');
   assert.equal(spawnFailed.code, 1, 'spawn 失败时 logger 应以非零码退出');
