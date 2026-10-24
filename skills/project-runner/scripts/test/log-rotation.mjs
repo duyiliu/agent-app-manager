@@ -49,7 +49,8 @@ function runLogger(name, limit, script, fileOverride, prepare) {
 }
 
 try {
-  const rotated = await runLogger('rotated', 1024, "process.stdout.write('x'.repeat(1500)); setTimeout(() => { process.stdout.write('continued-after-rotation\\n'); process.exit(0); }, 100);");
+  const rotated = await runLogger('rotated', 1024,
+    "process.stdout.write('x'.repeat(1500)); setTimeout(() => { process.stdout.write('continued-after-rotation\\n', () => process.exit(0)); }, 100);");
   assert.equal(rotated.code, 0, 'logger and target should exit successfully');
   assert(fs.existsSync(`${rotated.outPath}.1`), 'oversized output should create the rotated file');
   assert(fs.statSync(`${rotated.outPath}.1`).size <= 1024, 'rotated output should be bounded');
@@ -58,7 +59,7 @@ try {
   assert.deepEqual(JSON.parse(fs.readFileSync(rotated.runtimeFile, 'utf8')).current.logRotatedStreams, ['stdout']);
 
   const errRotated = await runLogger('err-rotated', 1024,
-    "process.stderr.write('e'.repeat(1500)); setTimeout(() => { process.stderr.write('stderr-after-rotation\\n'); process.exit(0); }, 100);");
+    "process.stderr.write('e'.repeat(1500)); setTimeout(() => { process.stderr.write('stderr-after-rotation\\n', () => process.exit(0)); }, 100);");
   assert.equal(errRotated.code, 0, 'logger and target should exit successfully');
   assert(fs.existsSync(`${errRotated.errPath}.1`), 'oversized stderr should create the rotated file');
   assert(fs.statSync(`${errRotated.errPath}.1`).size <= 1024, 'rotated stderr should be bounded');
@@ -76,7 +77,7 @@ try {
   const blockedPrefix = 'a'.repeat(1024);
   const blockedMarker = 'trigger-failed-rotation\n';
   const rotateFailed = await runLogger('rotate-failed', 1024,
-    `process.stdout.write(${JSON.stringify(blockedPrefix)}); setTimeout(() => { process.stdout.write(${JSON.stringify(blockedMarker)}); process.exit(0); }, 100);`,
+    `process.stdout.write(${JSON.stringify(blockedPrefix)}, () => setTimeout(() => { process.stdout.write(${JSON.stringify(blockedMarker)}, () => process.exit(0)); }, 100));`,
     undefined,
     ({ outPath }) => fs.mkdirSync(`${outPath}.1`));
   assert.equal(rotateFailed.code, 0, '轮转失败不应影响 logger 与目标进程退出');
