@@ -6,7 +6,7 @@
 
 ```bash
 node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json] <命令>
-# list | status <别名|appId> [--probe] [--ready] | start <别名|appId> [--ack-unresolved <runId>] | stop <别名|appId> [--tree] [--grace <ms>] | restart <别名|appId>
+# list | status <别名|appId> [--probe] [--ready] | start <别名|appId> [--ack-unresolved <runId>] | stop <别名|appId> [--tree] [--grace <ms>] | restart <别名|appId> [--tree]
 # remove <别名|appId> [--ack-unresolved <runId>]　移除登记（须无存活受管实例；只删注册表条目，运行记录与日志证据保留）
 # prune [--dry-run] [--apply]　回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run，--apply 才删除）
 # logs <别名|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow] [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]
@@ -22,7 +22,7 @@ Agent 使用规程：
    - `args`（仅直连，字符串数组：Java 为 `-cp`/`-jar`+主类/参数含 JRebel agent 参数；Python/Node 为脚本/模块与参数）、`envRefs`（仅环境变量**名称**数组，值不落注册表；声明依赖宿主提供的变量）与 `env`（可选对象：合法变量名到字符串字面值，明文持久化到 registry 并在启动时覆盖当前环境同名值；**禁止存放机密**，机密走系统环境变量 + `envRefs`；human/JSON 状态回显值会截断）、`expectedPort`、可选就绪证据 `readyLogPattern`（当前批次 stdout/stderr 正则）与 `readyUrl`（http(s) GET 返回 <400 即就绪）。manager 按“持久化意图 → 启动 → 同句柄身份采集/后代发现 → 登记”原子执行；`start-new` 成功仅代表进程存活（`readinessUntested=true`），就绪与热加载仍按第 5 节用真实证据判定；配了就绪证据后可用 `status <ref> --ready` 让 manager 给出 READY/NOT_READY/UNTESTED 评估。
 2. **非受管启动**：连命令模式都无法安全定位唯一目标进程（多服务编排触发 `DISCOVERY_AMBIGUOUS`、远端拉起、容器等）时，不伪造托管：向用户说明能力限制后按原授权执行脚本，再用 `record-unmanaged` 记录尝试与日志线索（`--log-hints` 传脚本输出的日志路径，只关联不迁移；非 Java 项目脚本日志按第 4 节放到 `.tmp/runner-local-*`）。用户明确要求“可自动托管”而当前方式做不到时，先报 `UNSUPPORTED_LAUNCH`，不偷偷降级。
 3. **再次启动/跨目录**：已登记应用直接 `start <别名>` 复用保存的配置；返回 `CONFIG_INVALID` 说明路径或产物失效，只重新分析**该目标项目**，不全盘扫描。
-4. **停止/重启**：仅受管实例可用。默认语义是**有界强制终止**（Windows 同句柄核验后 `TerminateProcess`；Linux 由 Python 3.9+ pidfd helper 锚定进程实例后核验 `boot_id:starttime` 与 exe 并发送 `SIGKILL`，pidfd 不可用时明确拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`；退出码 137 语义）。可选修饰：`stop --tree` 连带终止目标当时快照中的全部后代进程（命令模式 npm/vite 等防子进程孤儿占端口，#39；后代名单按 ppid 拓扑尽力而为，返回 `killedPids`）；`stop --grace <ms>` 先发优雅信号（Linux `SIGTERM`、Windows `taskkill` 不带 `/F`），`<ms>` 内退出即落账优雅退出，仍存活再回退强制终止。两者仍可组合（先优雅、超时后连带树强杀）。执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
+4. **停止/重启**：仅受管实例可用。默认语义是**有界强制终止**（Windows 同句柄核验后 `TerminateProcess`；Linux 由 Python 3.9+ pidfd helper 锚定进程实例后核验 `boot_id:starttime` 与 exe 并发送 `SIGKILL`，pidfd 不可用时明确拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`；退出码 137 语义）。可选修饰：`stop --tree`/`restart --tree` 连带终止目标当时快照中的全部后代进程（命令模式 npm/vite 等防子进程孤儿占端口，#39；先核验目标身份，按 ppid 向下枚举当时仍在的子孙（含多级）并各自采集 pid+创建时间+映像，先终止目标并清理 wrapper，再对仍存活的后代逐个同法核验+终止，返回 `treeKilled:[{pid,image}]`；仅限目标后代，不向上爬、不碰外部进程；后代已自行退出则跳过）；`stop --grace <ms>` 先发优雅信号（Linux `SIGTERM`、Windows `taskkill` 不带 `/F`），`<ms>` 内退出即落账优雅退出，仍存活再回退强制终止。两者仍可组合（先优雅、超时后连带树强杀）。执行前向用户说明；`restart` 先确认旧实例退出才起新实例。UNKNOWN/身份不明/外部进程一律拒绝并保留证据，不自动重试。
 4.1 **未结记录与恢复（AC04，不得删账后再起）**：`current` 存在且 `phase` 为 `STARTING`（启动中断/pid 未采集）、`UNKNOWN`（如 `identity_capture_failed`，进程实际可能存活），或任何无法识别的 `phase`（记录被外部改坏等）时，`start`/`start-new` **默认拒绝**，退出码 3、错误码 `UNRESOLVED_RUN`，**不产生任何新进程**（runtime/registry 文件也不被改写）；错误信息给出 `runId`、证据文件（`--home` 下 `runtime/<appId>.json`）与日志路径，以及恢复指引。此时 `status` 仍展示未结记录全量证据（pid/创建时间/映像/日志/`lastError`），文本模式还会列出 `prevRuns` 及 `archiveReason`；`logs --run <旧runId>` 仍可查；**不要删除 runtime 记录或日志来绕过**。
 4.2 **显式人工核验后的恢复**：先由用户/AI 用 `status`、`logs --run <runId>` 及系统进程工具核验旧进程；确认已退出后执行 `start <别名> --ack-unresolved <runId>` 或 `start-new --desc <file> --ack-unresolved <runId>`。仅当 `runId` 与未结记录一致时生效，否则 `ACK_MISMATCH`；manager 会二次核验：
    - 未结记录有完整身份证据（pid + 创建时间 + 映像）且进程**仍存活** → 仍然拒绝（`UNRESOLVED_RUN`），禁止第二份实例；

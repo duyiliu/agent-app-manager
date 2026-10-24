@@ -35,6 +35,13 @@ fs.writeFileSync(path.join(projAmb, 'srv.js'),
 // 自身再 spawn 一个 node 子进程 → wrapper 后代中稳定出现 2 个 node.exe，用于歧义拒绝
 fs.writeFileSync(path.join(projAmb, 'two.js'),
   'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1e3)"],{stdio:"ignore"});\nsetInterval(() => {}, 1000);\n', 'utf8');
+// #39 --tree 验收：命令模式目标 node 在发现 settle 之后 spawn 第二个 node 后代。
+// 默认 stop 应留后代存活；stop --tree 应两代都退出。延迟 spawn 避免被 discover 当成候选。
+fs.writeFileSync(path.join(projCmd, 'tree-parent.js'),
+  'const{spawn}=require("node:child_process");\n'
+  + 'console.log("tree-parent-ready");\n'
+  + 'setTimeout(()=>{const c=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"});c.unref();console.log("tree-child="+c.pid);},4000);\n'
+  + 'setInterval(()=>{},1000);\n', 'utf8');
 fs.writeFileSync(path.join(projPy, 'srv.py'),
   'import time\nprint("py-ready", flush=True)\nwhile True:\n    time.sleep(1)\n', 'utf8');
 // npm run dev 回归：npm 自身也是 node，与真实目标同映像且构成单链 wrapper→npm→srv；
@@ -65,6 +72,16 @@ const logHas = async (file, needle) => {
     await wait(500);
   }
   return false;
+};
+const waitChildPid = async (file) => {
+  for (let i = 0; i < 40; i++) {
+    try {
+      const m = /tree-child=(\d+)/.exec(fs.readFileSync(file, 'utf8'));
+      if (m) return Number(m[1]);
+    } catch { /* 日志尚未落盘 */ }
+    await wait(500);
+  }
+  return null;
 };
 
 let failed = 0;
@@ -302,6 +319,55 @@ try {
     assert.equal(stopR.code, 0, stopR.text);
     assert.equal(cli('status', 'npmdev').json.data.status, 'STOPPED');
   });
+  // ---------- stop --tree：命令模式 node 目标 + node 后代（#39） ----------
+  await check('默认 stop 不触碰目标后代（存活留证）', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdtree', root: projCmd, entry: 'tree', mode: 'node',
+      command: 'node tree-parent.js', expectedImage: NODE_IMAGE,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
+    const childPid = await waitChildPid(rt.current.logPaths.stdout);
+    assert(childPid, '未从 stdout 日志读到 tree-child pid');
+    strayPids.push(childPid);
+    const childId = psProc('capture', { id: childPid });
+    assert.equal(childId.result, 'ok', `后代未存活：${JSON.stringify(childId)}`);
+    const stop = cli('stop', 'cmdtree');
+    assert.equal(stop.code, 0, stop.text);
+    assert.equal(stop.json.data.result, 'stopped');
+    assert.ok(!stop.json.data.treeKilled?.length, '不带 --tree 不应返回 treeKilled 证据');
+    const cap = psProc('capture', { id: childPid });
+    assert.equal(cap.result, 'ok', `不带 --tree 时后代被误杀：${JSON.stringify(cap)}`);
+    assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
+    // 清理这一轮的后代，避免影响下一场景；按采集到的身份同句柄终止。
+    const cleaned = psProc('terminate', { id: childPid, creationFileTime: childId.creationFileTime, image: childId.image });
+    assert(['terminated', 'notfound', 'exited'].includes(cleaned.result), `后代清理失败：${JSON.stringify(cleaned)}`);
+  });
+  await check('stop --tree 连带终止目标与后代两代并留证', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const rr = cli('restart', 'cmdtree');
+    assert.equal(rr.code, 0, rr.text);
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${rr.json.data.appId}.json`), 'utf8'));
+    const childPid = await waitChildPid(rt.current.logPaths.stdout);
+    assert(childPid, '重启后未从 stdout 日志读到 tree-child pid');
+    strayPids.push(childPid);
+    const childId = psProc('capture', { id: childPid });
+    assert.equal(childId.result, 'ok', `重启后后代未存活：${JSON.stringify(childId)}`);
+    const targetPid = rr.json.data.start.pid;
+    const stop = cli('stop', 'cmdtree', '--tree');
+    assert.equal(stop.code, 0, stop.text);
+    const killed = stop.json.data.treeKilled ?? [];
+    const entry = killed.find((k) => k.pid === childPid);
+    assert(entry, `treeKilled 未包含后代 ${childPid}：${JSON.stringify(stop.json.data)}`);
+    assert(entry.image, 'treeKilled 缺少后代映像证据');
+    for (const [label, pid] of [['目标', targetPid], ['后代', childPid]]) {
+      const cap = psProc('capture', { id: pid });
+      assert(cap.result === 'notfound' || cap.result === 'exited', `${label} ${pid} 仍存活：${JSON.stringify(cap)}`);
+    }
+    assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
+  });
   // 回归：port 诊断单次调用给出占用者完整身份（与 capture 同源 image）
   await check('port 诊断：受管监听进程的 pid/身份与 status 一致', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
@@ -411,7 +477,7 @@ try {
   });
 } finally {
   // 兜底：按当时仍在的后代 PID 清理，不只依赖 wrapper PID（wrapper 可能先死，#46）
-  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdamb', 'cmdtmo', 'cmdfail']) {
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail']) {
     try { cli('stop', a, '--tree'); } catch { /* 忽略 */ }
   }
   const cleanupFailures = [];

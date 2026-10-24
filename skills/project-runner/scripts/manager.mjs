@@ -144,7 +144,7 @@ function renderHuman(command, data) {
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'stop':
-      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.note ? `；${data.note}` : ''}`;
+      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.treeKilled?.length ? `；后代已终止 ${data.treeKilled.length} 个` : ''}${data.note ? `；${data.note}` : ''}`;
     case 'remove':
       return [
         `已移除登记 ${data.alias} (${data.appId})`,
@@ -209,7 +209,7 @@ function usageText() {
     '       --tree 连带终止全部后代进程（#39）；--grace 先发优雅信号（Linux SIGTERM /',
     '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
-    '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
+    '  restart <alias|appId> [--force] [--tree]   确认退出后重启（仅受管实例；--tree 同 stop 连带终止后代）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
@@ -269,7 +269,7 @@ async function main() {
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
       if (command !== 'stop') { // stop 的 --tree/--grace 由 cmdStop 自行解析
-        const allowedFlags = { status: ['--probe', '--ready'], restart: ['--force'] }[command] ?? [];
+        const allowedFlags = { status: ['--probe', '--ready'], restart: ['--force', '--tree'] }[command] ?? [];
         const bad = ctx.rest.slice(1).find((a) => !allowedFlags.includes(a));
         if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
       }

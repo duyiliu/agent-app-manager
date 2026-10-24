@@ -22,6 +22,17 @@ const proj = fs.realpathSync(path.join(base, 'proj'));
 
 // 同步休眠（主线程，用于轮询进程退出落账）
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const waitLogPid = (file, re) => {
+  let pid = null;
+  for (let i = 0; i < 50 && pid == null; i++) {
+    try {
+      const m = re.exec(fs.readFileSync(file, 'utf8'));
+      if (m) pid = Number(m[1]);
+    } catch { /* 日志尚未落盘 */ }
+    if (pid == null) sleep(100);
+  }
+  return pid;
+};
 
 const run = (args, { json = true } = {}) => {
   const r = spawnSync(process.execPath, [MANAGER, '--home', home, ...(json ? ['--json'] : []), ...args], {
@@ -369,29 +380,65 @@ try {
   fs.mkdirSync(treeProj, { recursive: true });
   const treeRoot = fs.realpathSync(treeProj);
   fs.writeFileSync(path.join(treeRoot, 'parent.js'),
-    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},500)']);console.log('child='+c.pid);setInterval(()=>{},500);\n");
+    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},500)'],{detached:true,stdio:'ignore'});c.unref();console.log('child='+c.pid);setInterval(()=>{},500);\n");
   fs.writeFileSync(path.join(base, 'desc-tree.json'), JSON.stringify({
     alias: 'smoke-tree', root: treeRoot, entry: 'default', mode: 'node',
     exe: process.execPath, args: ['parent.js'], envRefs: [],
   }));
 
-  lifecycle('stop --tree → 连带终止后代（killedPids 含子进程）', () => {
+  lifecycle('stop --tree → 连带终止后代（treeKilled 含子进程身份）', () => {
     const s = expectOk(run(['start-new', '--desc', path.join(base, 'desc-tree.json')]));
     const logFile = path.join(home, 'logs', s.data.appId, `${s.data.runId}.stdout.log`);
-    let childPid = null;
-    for (let i = 0; i < 30 && childPid == null; i++) {
-      try {
-        const m = /child=(\d+)/.exec(fs.readFileSync(logFile, 'utf8'));
-        if (m) childPid = Number(m[1]);
-      } catch { /* 日志尚未落盘 */ }
-      if (childPid == null) sleep(100);
-    }
+    const childPid = waitLogPid(logFile, /child=(\d+)/);
     assert(childPid, '未能从 stdout 日志读到子进程 pid');
     const j = expectOk(run(['stop', 'smoke-tree', '--tree']));
     assert.equal(j.data.result, 'stopped');
-    assert(j.data.killedPids?.includes(childPid), `killedPids 不含子进程 ${childPid}：${JSON.stringify(j.data)}`);
+    const killed = j.data.treeKilled ?? [];
+    const entry = killed.find((k) => k.pid === childPid);
+    assert(entry, `treeKilled 不含子进程 ${childPid}：${JSON.stringify(j.data)}`);
+    assert(entry.image, 'treeKilled 缺少后代映像证据');
     const cap = psProc('capture', { id: childPid });
     assert(cap.result === 'notfound' || cap.result === 'exited', `后代进程仍存活：${JSON.stringify(cap)}`);
+  });
+
+  fs.writeFileSync(path.join(treeRoot, 'gone.js'),
+    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),200)'],{detached:true,stdio:'ignore'});c.unref();console.log('gone='+c.pid);setInterval(()=>{},500);\n");
+  fs.writeFileSync(path.join(base, 'desc-gone.json'), JSON.stringify({
+    alias: 'smoke-gone', root: treeRoot, entry: 'default', mode: 'node',
+    exe: process.execPath, args: ['gone.js'], envRefs: [],
+  }));
+
+  lifecycle('stop --tree 后代已自行退出：跳过且不报错', () => {
+    const s = expectOk(run(['start-new', '--desc', path.join(base, 'desc-gone.json')]));
+    const logFile = path.join(home, 'logs', s.data.appId, `${s.data.runId}.stdout.log`);
+    const childPid = waitLogPid(logFile, /gone=(\d+)/);
+    assert(childPid, '未能从 stdout 日志读到已退出子进程 pid');
+    let cap = null;
+    for (let i = 0; i < 50; i++) {
+      cap = psProc('capture', { id: childPid });
+      if (cap.result === 'notfound' || cap.result === 'exited') break;
+      sleep(100);
+    }
+    assert(cap.result === 'notfound' || cap.result === 'exited', `子进程尚未退出：${JSON.stringify(cap)}`);
+    const j = expectOk(run(['stop', 'smoke-gone', '--tree']));
+    assert.equal(j.data.result, 'stopped');
+    assert.ok(Array.isArray(j.data.treeKilled), 'treeKilled 应为数组');
+    assert(!j.data.treeKilled.some((k) => k.pid === childPid), `已退出的后代不应被记为终止：${JSON.stringify(j.data)}`);
+  });
+
+  lifecycle('restart --tree → 停旧实例时连带终止后代并起新实例', () => {
+    const s = expectOk(run(['start-new', '--desc', path.join(base, 'desc-tree.json')]));
+    const logFile = path.join(home, 'logs', s.data.appId, `${s.data.runId}.stdout.log`);
+    const childPid = waitLogPid(logFile, /child=(\d+)/);
+    assert(childPid, '未能从 stdout 日志读到重启前子进程 pid');
+    const j = expectOk(run(['restart', 'smoke-tree', '--tree']));
+    assert.equal(j.data.stop.result, 'stopped');
+    const entry = (j.data.stop.treeKilled ?? []).find((k) => k.pid === childPid);
+    assert(entry, `restart --tree 的 treeKilled 不含子进程 ${childPid}：${JSON.stringify(j.data)}`);
+    const cap = psProc('capture', { id: childPid });
+    assert(cap.result === 'notfound' || cap.result === 'exited', `重启前子进程仍存活：${JSON.stringify(cap)}`);
+    assert.equal(j.data.start.status, 'RUNNING');
+    expectOk(run(['stop', 'smoke-tree', '--tree'])); // 新实例也可能已派生后代，一并清理
   });
 
   fs.writeFileSync(path.join(treeRoot, 'gracer.js'),

@@ -100,7 +100,8 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 - 仅对 `managed=true`、本 Skill 留存的受管进程执行停止/重启；不能用 `runId`、端口或主类去认领外部进程。
 - 停止前验证目标 PID、OS 创建时间、唯一 `runId` 与可执行文件身份；Windows 上要确保**身份核验与终止针对同一进程句柄**，避免“先查 PID 再按 PID 杀”的复用竞态。环境做不到可靠操作则拒绝。
-- P0 默认**有界强制停止**，执行前说明，不盲目终止整棵进程树。v2.5 起提供两个显式可选项：`stop --tree` 连带终止受管目标当时的后代进程（针对命令模式遗留子进程占端口，#39）；`stop --grace <ms>` 先发优雅信号（Linux `SIGTERM`、Windows `taskkill` 无 `/F`），窗口内未退出再回退强制终止——优雅关机仍不保证，只是尽力而为。
+- P0 默认**有界强制停止**，执行前说明，不盲目终止整棵进程树。v2.5 起提供两个显式可选项：`stop --tree`/`restart --tree` 连带终止受管目标当时的后代进程（针对命令模式遗留子进程占端口，#39）；`stop --grace <ms>` 先发优雅信号（Linux `SIGTERM`、Windows `taskkill` 无 `/F`），窗口内未退出再回退强制终止——优雅关机仍不保证，只是尽力而为。
+- **树终止的有界性声明**：`--tree` 仅限**受管目标进程的后代**，不向上爬、不碰外部进程，也不引入任何外部认领。终止前先核验目标身份，通过后按 PPID 向下枚举当时仍在的子孙（含多级）并各自采集 `pid`+创建时间+映像；随后先终止目标、清理命令模式 wrapper，再对仍存活的后代逐个按快照身份同句柄核验后终止，返回 `treeKilled: [{pid,image}]` 留证。后代已自行退出或 PID 已复用时跳过不报错；目标身份核验不通过时不会触碰快照。未传 `--tree` 时默认不触碰后代（保守默认）。
 - `restart` 必须先确认旧进程已退出，才启动新实例；重复停止可返回 alreadyStopped。UNKNOWN、身份无法验证或外部进程一律拒绝停止/重启。
 - 用户明确要求单个目标的启动/重启可按已授权流程执行；不提供 `all`、通配符或自动批量重启。
 
@@ -115,7 +116,7 @@ port <N> [--json]                        # 只读端口占用诊断（外部进�
 doctor [--json]                          # 只读自检（不修复）
 start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
 stop <alias|appId> [--tree] [--grace <ms>] [--json]  # 仅 Managed；--tree 连带后代（#39），--grace 优雅信号先行
-restart <alias|appId> [--force] [--json] # 仅 Managed
+restart <alias|appId> [--force] [--tree] [--json] # 仅 Managed；--tree 同 stop
 remove <alias|appId> [--ack-unresolved <runId>] [--json]   # 移除登记：仅无存活受管实例；只删注册表条目，运行记录与日志证据保留
 prune [--dry-run] [--apply] [--json]     # 回收三类残留：超保留期批次日志（对齐 PREV_RUNS_KEEP=20）、locks/*.stale-*、.tmp-* 孤儿临时文件；默认 dry-run
 logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--src <run:…|hint:<hash>|tmp:…>] [--list-sources] [--follow] [--json]
