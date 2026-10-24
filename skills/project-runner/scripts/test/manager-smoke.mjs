@@ -525,6 +525,15 @@ try {
       assert.equal(old.data.run.exit, null);
       assert.match(old.data.note, /进程已退出/);
       assert.equal(expectOk(run(['list'])).data.apps.find((a) => a.alias === 'smoke').exit, null);
+
+      // watcher 无法取得真实退出状态时必须显式透出不可用原因，不能静默伪装成已采集。
+      legacy.current.exitWatchError = { reason: 'target reaped before status', at: '2026-01-01T00:00:02.000Z' };
+      fs.writeFileSync(file, JSON.stringify(legacy, null, 2));
+      const watchErr = expectOk(run(['status', 'smoke']));
+      assert.match(watchErr.data.note, /退出码\/信号不可用（target reaped before status）/);
+      assert.equal(watchErr.data.run.exitWatchError.reason, 'target reaped before status');
+      const watchErrRow = expectOk(run(['list'])).data.apps.find((a) => a.alias === 'smoke');
+      assert.equal(watchErrRow.exitWatchError.reason, 'target reaped before status');
     } finally {
       fs.writeFileSync(file, saved);
     }

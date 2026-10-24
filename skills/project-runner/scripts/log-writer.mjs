@@ -89,7 +89,11 @@ function scheduleExitRetry() {
 // 退出结果写成目标 exit；否则单独写 wrapperExit，避免把 wrapper 的退出码/信号冒充目标。
 function isCommandWrapper(run) {
   if (run?.kind !== 'command') return false;
-  return !(Number.isInteger(run.pid) && Number.isInteger(run.wrapperPid) && run.pid === run.wrapperPid);
+  // 目标尚未发现（pid 缺失）时 wrapper 的退出绝不能当成目标退出；只有记录中
+  // 有真实目标 pid、且目标与 wrapper 是同一进程（如 shell exec）时才算目标。
+  if (!Number.isInteger(run.pid) || run.pid <= 0) return true;
+  if (!Number.isInteger(run.wrapperPid) || run.wrapperPid <= 0) return true;
+  return run.pid !== run.wrapperPid;
 }
 
 function applyExitEvidence(run) {

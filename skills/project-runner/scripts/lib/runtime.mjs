@@ -170,7 +170,13 @@ export function exitSummary(cur) {
 function stoppedNote(cur, fallback = null) {
   const summary = exitSummary(cur);
   const note = cur.exitNote ?? fallback;
-  if (!summary) return note;
+  const watchError = cur.exitWatchError?.reason
+    ? `退出码/信号不可用（${cur.exitWatchError.reason}）` : null;
+  if (!summary) {
+    if (!watchError) return note;
+    if (!note) return watchError;
+    return note.includes('退出码/信号不可用') ? note : `${note}；${watchError}`;
+  }
   if (!note || note === summary || note.startsWith(summary)) return summary;
   // stop/grace 等已有过程证据时保留原文，但把具体 code/signal 放在最前面。
   return `${summary}；${note}`;

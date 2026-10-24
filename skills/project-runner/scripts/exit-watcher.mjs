@@ -63,39 +63,55 @@ async function waitForTargetExit() {
   return { result: 'error', code: 'PLATFORM_UNSUPPORTED' };
 }
 
-function applyExit(rt, exitEvidence) {
-  let run = null;
-  if (rt?.current?.runId === runId) run = rt.current;
-  else run = (rt?.prevRuns ?? []).find((p) => p.runId === runId) ?? null;
-  if (!run) return false;
-  run.exit = exitEvidence;
-  return true;
+function matchingRun(rt) {
+  if (rt?.current?.runId === runId) return rt.current;
+  return (rt?.prevRuns ?? []).find((p) => p.runId === runId) ?? null;
+}
+
+async function persistRun(mutate) {
+  const file = runtimePath(home, appId);
+  // 目标可能恰好在 start 归档/新 run 启动时退出：按 runId 写入 current 或已归档条目，
+  // 绝不覆盖新 run；锁忙时有界重试。
+  for (let attempt = 0; attempt < 80; attempt++) {
+    let written = false;
+    try {
+      withLogEvidenceLock(home, appId, 'exit-watch', () => {
+        const rt = readRuntimeStrict(home, appId);
+        const run = matchingRun(rt);
+        if (!run || !mutate(run)) return;
+        atomicWriteJson(file, rt);
+        written = true;
+      });
+    } catch { /* 锁忙/记录暂不可读：下一轮按最新磁盘状态重试 */ }
+    if (written) return true;
+    await sleep(100);
+  }
+  return false;
 }
 
 const result = await waitForTargetExit();
-if (result?.result !== 'exited' || !(Number.isInteger(result.code) || result.signal)) {
-  process.exit(0);
-}
-const exitEvidence = {
-  code: Number.isInteger(result.code) ? result.code : null,
-  signal: result.signal ?? null,
-  at: new Date().toISOString(),
-  source: 'target-watch',
-};
-const file = runtimePath(home, appId);
-// 目标可能恰好在 start 归档/新 run 启动时退出：按 runId 写入 current 或已归档条目，
-// 绝不覆盖新 run；锁忙时有界重试。
-for (let attempt = 0; attempt < 80; attempt++) {
-  let written = false;
-  try {
-    withLogEvidenceLock(home, appId, 'exit-watch', () => {
-      const rt = readRuntimeStrict(home, appId);
-      if (!rt || !applyExit(rt, exitEvidence)) return;
-      atomicWriteJson(file, rt);
-      written = true;
-    });
-  } catch { /* 锁忙/记录暂不可读：下一轮按最新磁盘状态重试 */ }
-  if (written) process.exit(0);
-  await sleep(100);
+if (result?.result === 'exited' && (Number.isInteger(result.code) || result.signal)) {
+  const exitEvidence = {
+    code: Number.isInteger(result.code) ? result.code : null,
+    signal: result.signal ?? null,
+    at: new Date().toISOString(),
+    source: 'target-watch',
+  };
+  await persistRun((run) => {
+    run.exit = exitEvidence;
+    delete run.exitWatchError;
+    return true;
+  });
+} else {
+  // watcher 已就绪但目标退出状态不可读（例如 Linux 父进程抢先回收）：不伪造
+  // code/signal，也不清空既有证据，只留下明确的不可用原因供 status/list/UI 展示。
+  const reason = result?.result === 'unavailable'
+    ? (result.reason ?? 'target exit status unavailable')
+    : `target exit watch failed: ${result?.code ?? result?.result ?? 'unknown'}`;
+  await persistRun((run) => {
+    if (run.exit) return false;
+    run.exitWatchError = { reason, at: new Date().toISOString(), source: 'target-watch' };
+    return true;
+  });
 }
 process.exit(0);

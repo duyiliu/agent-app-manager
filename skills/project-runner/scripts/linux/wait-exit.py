@@ -77,6 +77,15 @@ def main():
     except OSError as e:
         emit({"result": "error", "code": getattr(e, "errno", "pidfdOpenFailed")})
 
+    # pidfd 打开后必须再核验一次身份：首次 /proc 检查与 pidfd_open 之间目标可能
+    # 已退出且 PID 被复用。pidfd 若绑定到新进程，这里 starttime 不一致会拒绝；
+    # 若绑定到旧进程，后续等待/退出码都属于正确实例。
+    after_open = read_stat(pid)
+    if not after_open:
+        emit({"result": "notfound"})
+    if after_open["starttime"] != parts[1] or boot_id() != parts[0]:
+        emit({"result": "mismatch", "field": "creationTime"})
+
     if len(sys.argv) >= 4 and sys.argv[3]:
         try:
             with open(sys.argv[3], "w", encoding="utf-8") as f:
@@ -116,7 +125,9 @@ def main():
         elif current is None:
             break
         time.sleep(0.001)
-    emit({"result": "exited", "code": None, "signal": None})
+    # 父进程可能已在 pidfd 事件后立即回收目标（waitid 对非子进程返回 ECHILD）；
+    # 此时不能伪造 code/signal，明确报告不可用，由 watcher 留下可诊断证据。
+    emit({"result": "unavailable", "reason": "target reaped before exit status was readable"})
 
 
 if __name__ == "__main__":

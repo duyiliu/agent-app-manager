@@ -177,6 +177,28 @@ try {
   assert.equal(relabelCur.wrapperExit.code, 0, 'wrapper 退出应单独留证');
   assert(!Object.prototype.hasOwnProperty.call(relabelCur, 'exit'), 'wrapper 退出不得冒充目标退出');
 
+  // 未发现目标（pid 仍为空）时 wrapper 退出更不能写目标 exit。
+  const undiscoveredRuntime = path.join(temp, 'command-undiscovered', 'home', 'runtime', 'arotation.json');
+  const undiscovered = await runLogger('command-undiscovered', 1024, 'setTimeout(() => process.exit(4), 400);', undefined,
+    { schemaVersion: 1, appId: 'arotation', current: { runId: 'run', phase: 'STARTING', kind: 'command', pid: null } },
+    (logger, { pidFile, runtimeFile }) => {
+      const timer = setInterval(() => {
+        try {
+          const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+          if (!Number.isInteger(pid) || pid <= 0) return;
+          const rt = JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
+          rt.current = { ...rt.current, wrapperPid: pid };
+          fs.writeFileSync(runtimeFile, JSON.stringify(rt, null, 2));
+          clearInterval(timer);
+        } catch { /* 尚未就绪 */ }
+      }, 20);
+      logger.once('exit', () => clearInterval(timer));
+    });
+  assert.equal(undiscovered.code, 4);
+  const undiscoveredCur = JSON.parse(fs.readFileSync(undiscoveredRuntime, 'utf8')).current;
+  assert.equal(undiscoveredCur.wrapperExit.code, 4, '未发现目标时 wrapper 结果应留存在 wrapperExit');
+  assert(!Object.prototype.hasOwnProperty.call(undiscoveredCur, 'exit'), '未发现目标时不得生成目标 exit');
+
   // Linux shell exec 目标（pid 相同）时，直接子进程就是受管目标，仍需写目标 exit。
   const execRuntime = path.join(temp, 'command-exec-target', 'home', 'runtime', 'arotation.json');
   const execTarget = await runLogger('command-exec-target', 1024, 'setTimeout(() => process.exit(0), 500);', undefined,

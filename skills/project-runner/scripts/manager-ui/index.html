@@ -962,6 +962,7 @@ function renderDetail(d) {
     kvRow(grid, 'wrapper 退出（非目标）', wrapperExitText, 'dim');
   }
   kvRow(grid, '退出说明', run?.exitNote, run?.exitNote ? 'dim' : undefined);
+  kvRow(grid, '退出证据', run?.exitWatchError?.reason ? `不可用：${run.exitWatchError.reason}` : null, 'bad');
   kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
   kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
   kvRow(grid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');

@@ -314,6 +314,7 @@ export function cmdList(ctx) {
       pid: st.status === 'RUNNING' ? (st.pid ?? current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
       exit: runExit, exitSummary: exitSummary(current),
+      exitWatchError: current?.exitWatchError ?? null,
       exitNote: st.note ?? current?.exitNote ?? null,
       log: current?.logPaths?.stdout ?? null, root: app.root,
     };
@@ -424,6 +425,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       logRotateFailedStreams: cur.logRotateFailedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
       exit: runExit, exitSummary: runExitSummary, wrapperExit: cur.wrapperExit ?? null,
+      exitWatchError: cur.exitWatchError ?? null,
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),
