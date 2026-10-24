@@ -70,17 +70,19 @@ try {
   assert(!fs.existsSync(`${normal.outPath}.1`), 'output below limit should not create a rotated file');
   assert.equal(fs.readFileSync(normal.outPath, 'utf8'), 'small output\n');
 
-  // rename 失败回归：用目录占住 .1 使轮转 rename 失败；此时绝不能回落到
-  // open('w') 截断当前批次日志，且 runtime 需标记轮转失败。
+  // rename 失败回归：用目录占住 .1 使轮转 rename 失败。先恰好写入 1024 字节
+  // （等于 limit，不触发轮转），再写入标记触发轮转；此时绝不能回落到
+  // open('w') 截断已有内容，且 runtime 需标记轮转失败。
+  const blockedPrefix = 'a'.repeat(1024);
+  const blockedMarker = 'trigger-failed-rotation\n';
   const rotateFailed = await runLogger('rotate-failed', 1024,
-    "process.stdout.write('x'.repeat(1200)); setTimeout(() => { process.stdout.write('continued-after-failed-rotation\\n'); process.exit(0); }, 100);",
+    `process.stdout.write(${JSON.stringify(blockedPrefix)}); setTimeout(() => { process.stdout.write(${JSON.stringify(blockedMarker)}); process.exit(0); }, 100);`,
     undefined,
     ({ outPath }) => fs.mkdirSync(`${outPath}.1`));
   assert.equal(rotateFailed.code, 0, '轮转失败不应影响 logger 与目标进程退出');
   assert(fs.statSync(`${rotateFailed.outPath}.1`).isDirectory(), '占位目录应阻止 rename');
   const rotateFailedContent = fs.readFileSync(rotateFailed.outPath, 'utf8');
-  assert(rotateFailedContent.startsWith('x'), 'rename 失败后当前日志内容不得被截断');
-  assert(rotateFailedContent.includes('continued-after-failed-rotation'), 'rename 失败后新日志仍应续写');
+  assert.equal(rotateFailedContent, blockedPrefix + blockedMarker, 'rename 失败后必须完整保留失败前的 1024 字节并续写标记');
   const rotateFailedRuntime = JSON.parse(fs.readFileSync(rotateFailed.runtimeFile, 'utf8'));
   assert.deepEqual(rotateFailedRuntime.current.logRotateFailedStreams, ['stdout'], 'runtime 应标记 stdout 轮转失败');
   assert(!rotateFailedRuntime.current.logRotated, 'rename 失败不应标记为已轮转');
