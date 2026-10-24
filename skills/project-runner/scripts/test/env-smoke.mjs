@@ -89,6 +89,7 @@ try {
     '  plain: process.env.PR_SMOKE_ENVFILE_PLAIN,',
     '  password: process.env.PR_SMOKE_LITERAL_PASSWORD,',
     '  hostRef: process.env.PR_SMOKE_HOST_REF,',
+    '  proto: Object.prototype.hasOwnProperty.call(process.env, "__proto__") ? process.env["__proto__"] : "missing",',
     '}));',
     'setInterval(() => {}, 500);',
   ].join('\n'));
@@ -100,13 +101,16 @@ try {
     `export PR_SMOKE_ENVFILE_TOKEN="${fileToken}" # 行尾注释`,
     `PR_SMOKE_ENVFILE_PLAIN='${filePlain}' # 行尾注释`,
   ].join('\n'));
+  const directEnv = { PR_SMOKE_LITERAL_PASSWORD: 'literal-password-value-not-echoed', PR_SMOKE_PLAIN_LITERAL: 'plain-literal-ok' };
+  // 对象字面量里的 __proto__ 会改原型；测试必须显式建自有属性，才能覆盖合并逻辑。
+  Object.defineProperty(directEnv, '__proto__', { value: 'proto-app-value', enumerable: true, writable: true, configurable: true });
   const descFile = path.join(base, 'desc-envfile.json');
   fs.writeFileSync(descFile, JSON.stringify({
     alias: 'env-smoke-envfile', root, entry: 'envfile', mode: 'node',
     exe: process.execPath, args: [probeScript, probeOut],
-    envRefs: ['PR_SMOKE_ENVFILE_TOKEN', 'PR_SMOKE_ENVFILE_PLAIN', 'PR_SMOKE_HOST_REF'],
+    envRefs: ['PR_SMOKE_ENVFILE_TOKEN', 'PR_SMOKE_ENVFILE_PLAIN', 'PR_SMOKE_HOST_REF', '__proto__'],
     envFile,
-    env: { PR_SMOKE_LITERAL_PASSWORD: 'literal-password-value-not-echoed', PR_SMOKE_PLAIN_LITERAL: 'plain-literal-ok' },
+    env: directEnv,
   }, null, 2));
   const hostRef = 'host-ref-value';
   let appId = null;
@@ -125,6 +129,7 @@ try {
     assert.equal(got.plain, filePlain, 'envFile 普通变量未注入目标进程');
     assert.equal(got.password, 'literal-password-value-not-echoed', 'desc.env 覆盖行为异常');
     assert.equal(got.hostRef, hostRef, '宿主 envRefs 未注入目标进程');
+    assert.equal(got.proto, 'proto-app-value', 'desc.env 的 __proto__ 变量丢失或未注入');
   });
 
   skipWithoutProbe('envFile 值不写入 registry/runtime', () => {
@@ -211,17 +216,18 @@ try {
       'fs.writeFileSync(process.argv[2], JSON.stringify({',
       '  token: process.env.PR_SMOKE_CMD_TOKEN,',
       '  plain: process.env.PR_SMOKE_CMD_PLAIN,',
+      '  proto: Object.prototype.hasOwnProperty.call(process.env, "__proto__") ? process.env["__proto__"] : "missing",',
       '}));',
       'setInterval(() => {}, 500);',
     ].join('\n'));
-    fs.writeFileSync(cmdEnvFile, `PR_SMOKE_CMD_TOKEN=${cmdToken}\n`);
+    fs.writeFileSync(cmdEnvFile, `PR_SMOKE_CMD_TOKEN=${cmdToken}\n__proto__=proto-file-value\n`);
     const cmdDesc = path.join(base, 'desc-cmd-envfile.json');
     fs.writeFileSync(cmdDesc, JSON.stringify({
       alias: 'env-smoke-cmd', root, entry: 'cmd', mode: 'node',
       command: `node ${cmdScript} ${cmdOut}`,
       expectedImage: path.basename(process.execPath),
       discoverTimeoutMs: 5000,
-      envRefs: ['PR_SMOKE_CMD_TOKEN'],
+      envRefs: ['PR_SMOKE_CMD_TOKEN', '__proto__'],
       envFile: cmdEnvFile,
       env: { PR_SMOKE_CMD_PLAIN: 'cmd-plain-ok' },
     }, null, 2));
@@ -233,6 +239,7 @@ try {
     const got = JSON.parse(fs.readFileSync(cmdOut, 'utf8'));
     assert.equal(got.token, cmdToken, '命令模式未注入 envFile 值');
     assert.equal(got.plain, 'cmd-plain-ok', '命令模式未注入 env 字面值');
+    assert.equal(got.proto, 'proto-file-value', 'envFile 的 __proto__ 变量丢失或未注入');
     const rtRaw = fs.readFileSync(path.join(cmdHome, 'runtime', `${r.json.data.appId}.json`), 'utf8');
     assert(!rtRaw.includes(cmdToken), '命令模式 runtime 泄漏 envFile 值');
   });

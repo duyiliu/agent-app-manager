@@ -70,9 +70,22 @@ function configuredEnvFile(app, root) {
   try { return fs.realpathSync.native(abs); } catch { return path.resolve(abs); }
 }
 
+// 硬链接的 realpath 不同但 inode 相同；必须按文件身份比较，否则别名路径会绕过
+// envFile 浏览拦截。ino=0 的文件系统回退到规范化路径比较。
+function fileIdentity(file) {
+  try {
+    const st = fs.statSync(file, { bigint: true });
+    if (st.ino === 0n) return null;
+    return `${st.dev}:${st.ino}`;
+  } catch { return null; }
+}
+
 function isConfiguredEnvFile(app, root, file) {
   const envFile = configuredEnvFile(app, root);
   if (!envFile) return false;
+  const envIdentity = fileIdentity(envFile);
+  const fileIdentityNow = fileIdentity(file);
+  if (envIdentity && fileIdentityNow) return envIdentity === fileIdentityNow;
   try { return fs.realpathSync.native(file) === envFile; } catch { return path.resolve(file) === envFile; }
 }
 

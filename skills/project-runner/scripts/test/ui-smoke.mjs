@@ -35,6 +35,8 @@ w(path.join(proj, '.ssh', 'id_ecdsa'), 'PRIVATE KEY\n');
 w(path.join(proj, '.npmrc'), '//registry.npmjs.org/:_authToken=secret\n');
 w(hintFile, 'hint 1\n');
 const root = fs.realpathSync(proj);
+// envFile 的硬链接别名与配置路径 realpath 不同、inode 相同：同样不允许浏览。
+fs.linkSync(path.join(proj, 'app.env'), path.join(proj, 'app.env.alias'));
 
 w(path.join(home, 'registry.json'), JSON.stringify({
   schemaVersion: 1,
@@ -209,6 +211,7 @@ try {
     assert(tree.entries.some((e) => e.name === 'pom.xml'));
     assert(!tree.entries.some((e) => e.name === '.env'));
     assert(!tree.entries.some((e) => e.name === 'app.env'), '配置的 envFile 不应出现在文件树');
+    assert(!tree.entries.some((e) => e.name === 'app.env.alias'), 'envFile 的硬链接别名不应出现在文件树');
     assert(!tree.entries.some((e) => e.name === '.ssh'));
     assert(!tree.entries.some((e) => e.name === '.npmrc'));
   });
@@ -216,6 +219,7 @@ try {
   await check('文件预览内容', () => assert(file.text.includes('<project/>')));
   await check('.env 拒绝（403）', async () => assert.equal((await get('/api/file?app=his&path=.env')).status, 403));
   await check('配置的 envFile 拒绝浏览（403）', async () => assert.equal((await get('/api/file?app=his&path=app.env')).status, 403));
+  await check('envFile 硬链接别名同样拒绝浏览（403）', async () => assert.equal((await get('/api/file?app=his&path=app.env.alias')).status, 403));
   await check('.ssh/id_ecdsa 与 .npmrc 拒绝（403）', async () => {
     assert.equal((await get('/api/file?app=his&path=' + encodeURIComponent('.ssh/id_ecdsa'))).status, 403);
     assert.equal((await get('/api/file?app=his&path=' + encodeURIComponent('.npmrc'))).status, 403);

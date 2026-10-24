@@ -79,6 +79,12 @@ function unquote(raw, file, lineNo) {
   return stripInlineComment(value).trimEnd();
 }
 
+// __proto__ 是合法环境变量名，但普通对象赋值会触发原型 setter 而丢失该键；
+// 统一用 defineProperty 建立自有数据属性，envFile 与 env 合并都走这条路径。
+function setEnvValue(target, name, value) {
+  Object.defineProperty(target, name, { value, enumerable: true, writable: true, configurable: true });
+}
+
 // 解析 .env 文本：KEY=VALUE，支持空行、# 注释、export 前缀、单/双引号与常见转义。
 // 错误信息只包含文件与行号，绝不回显值。
 export function parseEnvFile(text, file = '<envFile>') {
@@ -96,7 +102,7 @@ export function parseEnvFile(text, file = '<envFile>') {
     if (!ENV_NAME_RE.test(name)) {
       throw conflictError('ENV_FILE_INVALID', `envFile 第 ${i + 1} 行的变量名不合法（文件：${file}）`, { file, line: i + 1 });
     }
-    vars[name] = unquote(line.slice(eq + 1), file, i + 1);
+    setEnvValue(vars, name, unquote(line.slice(eq + 1), file, i + 1));
   }
   return vars;
 }
@@ -119,8 +125,13 @@ export function readEnvFile(file, cwd) {
 const ENV_CASE_INSENSITIVE = process.platform === 'win32';
 
 function mergeEnvLayers(...layers) {
-  if (!ENV_CASE_INSENSITIVE) return Object.assign({}, ...layers);
   const merged = {};
+  if (!ENV_CASE_INSENSITIVE) {
+    for (const layer of layers) {
+      for (const [name, value] of Object.entries(layer ?? {})) setEnvValue(merged, name, value);
+    }
+    return merged;
+  }
   const keysByLower = new Map();
   for (const layer of layers) {
     for (const [name, value] of Object.entries(layer ?? {})) {
@@ -128,7 +139,7 @@ function mergeEnvLayers(...layers) {
       const previous = keysByLower.get(lower);
       if (previous !== undefined) delete merged[previous];
       keysByLower.set(lower, name);
-      merged[name] = value;
+      setEnvValue(merged, name, value);
     }
   }
   return merged;
