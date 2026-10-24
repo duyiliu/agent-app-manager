@@ -78,6 +78,24 @@ try {
     assert(!fs.existsSync(logsDir) || fs.readdirSync(logsDir).length === 0, '不应创建运行日志');
   });
 
+  const badFileDesc = path.join(base, 'desc-bad-envfile.json');
+  fs.writeFileSync(badFileDesc, JSON.stringify({
+    alias: 'env-smoke-bad-envfile', root, entry: 'bad-envfile', mode: 'node',
+    exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'],
+    envFile: path.join(base, 'does-not-exist.env'),
+  }));
+  check('envFile 不可读：启动前 ENV_FILE_UNREADABLE，不写注册表/运行记录/日志', () => {
+    const r = runAt(missingHome, ['start-new', '--desc', badFileDesc]);
+    assert.equal(r.code, 3, r.stdout + r.stderr);
+    assert.equal(r.json?.error?.code, 'ENV_FILE_UNREADABLE');
+    assert(r.json.error.message.includes('does-not-exist.env'), '错误未给出 envFile 路径');
+    assert.equal(fs.existsSync(path.join(missingHome, 'registry.json')), false, '不应写入注册表');
+    const runtimeDir = path.join(missingHome, 'runtime');
+    assert(!fs.existsSync(runtimeDir) || fs.readdirSync(runtimeDir).length === 0, '不应写运行记录');
+    const logsDir = path.join(missingHome, 'logs');
+    assert(!fs.existsSync(logsDir) || fs.readdirSync(logsDir).length === 0, '不应创建运行日志');
+  });
+
   // 2) envFile 注入 + 敏感名脱敏 + envFile 值不落 registry/runtime/status。
   const home = path.join(base, 'home');
   const probeOut = path.join(base, 'probe.json');
@@ -101,7 +119,7 @@ try {
     `export PR_SMOKE_ENVFILE_TOKEN="${fileToken}" # 行尾注释`,
     `PR_SMOKE_ENVFILE_PLAIN='${filePlain}' # 行尾注释`,
   ].join('\n'));
-  const directEnv = { PR_SMOKE_LITERAL_PASSWORD: 'literal-password-value-not-echoed', PR_SMOKE_PLAIN_LITERAL: 'plain-literal-ok' };
+  const directEnv = { PR_SMOKE_LITERAL_PASSWORD: 'literal-password-value-not-echoed', PR_SMOKE_PLAIN_LITERAL: 'plain-literal-ok', PR_SMOKE_LONG_TEXT: 'x'.repeat(130) };
   // 对象字面量里的 __proto__ 会改原型；测试必须显式建自有属性，才能覆盖合并逻辑。
   Object.defineProperty(directEnv, '__proto__', { value: 'proto-app-value', enumerable: true, writable: true, configurable: true });
   const descFile = path.join(base, 'desc-envfile.json');
@@ -148,6 +166,7 @@ try {
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.equal(r.json.data.env.PR_SMOKE_LITERAL_PASSWORD, '***');
     assert.equal(r.json.data.env.PR_SMOKE_PLAIN_LITERAL, 'plain-literal-ok');
+    assert.equal(r.json.data.env.PR_SMOKE_LONG_TEXT, `${'x'.repeat(120)}… (截断)`, '非敏感 env 的既有截断行为改变');
     assert(r.json.data.run.envResolved.includes('PR_SMOKE_ENVFILE_TOKEN'), 'envRefs 应只回显名称');
     const text = JSON.stringify(r.json.data);
     assert(!text.includes('literal-password-value-not-echoed'), 'status 回显了敏感 env 值');
@@ -198,6 +217,60 @@ try {
       assert.equal(fs.readFileSync(rtFile, 'utf8'), rtBefore, 'envFile 预检失败改写了运行记录');
       assert.equal(fs.readFileSync(regFile, 'utf8'), regBefore, 'envFile 预检失败改写了注册表');
       assertStillRunning();
+    } finally {
+      const restore = readReg();
+      restore.apps[appId].envFile = original.envFile;
+      writeReg(restore);
+    }
+  });
+
+  skipWithoutProbe('start 环境预检失败：ENV_MISSING/ENV_FILE_UNREADABLE 且不产生新运行副作用', () => {
+    const regFile = path.join(home, 'registry.json');
+    const rtFile = path.join(home, 'runtime', `${appId}.json`);
+    const logsDir = path.join(home, 'logs', appId);
+    const readReg = () => JSON.parse(fs.readFileSync(regFile, 'utf8'));
+    const writeReg = (reg) => fs.writeFileSync(regFile, JSON.stringify(reg, null, 2));
+    const original = readReg().apps[appId];
+    const stopped = runAt(home, ['stop', 'env-smoke-envfile']);
+    assert.equal(stopped.code, 0, stopped.stdout + stopped.stderr);
+    const rtBefore = fs.readFileSync(rtFile, 'utf8');
+    const logsBefore = fs.readdirSync(logsDir).sort();
+    const assertNoSideEffects = (regBefore, extra = {}) => {
+      assert.equal(fs.readFileSync(rtFile, 'utf8'), rtBefore, '启动失败改写了运行记录');
+      assert.equal(fs.readFileSync(regFile, 'utf8'), regBefore, '启动失败改写了注册表');
+      assert.deepEqual(fs.readdirSync(logsDir).sort(), logsBefore, '启动失败创建了新日志批次');
+      const st = runAt(home, ['status', 'env-smoke-envfile'], extra);
+      assert.equal(st.code, 0, st.stdout + st.stderr);
+      assert.equal(st.json.data.status, 'STOPPED');
+      assert.equal(st.json.data.run.runId, JSON.parse(rtBefore).current.runId);
+    };
+
+    try {
+      const startMissing = [`PR_SMOKE_START_MISSING_A_${suffix}`, `PR_SMOKE_START_MISSING_B_${suffix}`];
+      const reg1 = readReg();
+      reg1.apps[appId].envRefs = [...(original.envRefs ?? []), ...startMissing];
+      writeReg(reg1);
+      const regBefore = fs.readFileSync(regFile, 'utf8');
+      const r = runAt(home, ['start', 'env-smoke-envfile'], { PR_SMOKE_HOST_REF: hostRef });
+      assert.equal(r.code, 3, r.stdout + r.stderr);
+      assert.equal(r.json.error.code, 'ENV_MISSING');
+      for (const name of startMissing) assert(r.json.error.message.includes(name), `start ENV_MISSING 未列出 ${name}`);
+      assertNoSideEffects(regBefore, { PR_SMOKE_HOST_REF: hostRef });
+    } finally {
+      const restore = readReg();
+      restore.apps[appId].envRefs = original.envRefs;
+      writeReg(restore);
+    }
+
+    try {
+      const reg2 = readReg();
+      reg2.apps[appId].envFile = path.join(base, 'missing-start.env');
+      writeReg(reg2);
+      const regBefore = fs.readFileSync(regFile, 'utf8');
+      const r = runAt(home, ['start', 'env-smoke-envfile'], { PR_SMOKE_HOST_REF: hostRef });
+      assert.equal(r.code, 3, r.stdout + r.stderr);
+      assert.equal(r.json.error.code, 'ENV_FILE_UNREADABLE');
+      assertNoSideEffects(regBefore, { PR_SMOKE_HOST_REF: hostRef });
     } finally {
       const restore = readReg();
       restore.apps[appId].envFile = original.envFile;
