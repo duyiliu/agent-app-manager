@@ -618,7 +618,10 @@ export function cmdCleanupWrapper(ctx, ref) {
     let t;
     try { t = psProc('terminate', { id: cur.wrapperPid, creationFileTime: now.creationFileTime, image: now.image, freeze: true }); }
     catch (e) { t = { result: 'error', message: e.message }; }
-    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound' || t.result === 'mismatch') {
+    if (t.result === 'mismatch') {
+      throw conflictError('IDENTITY_UNKNOWN', `wrapper(pid=${cur.wrapperPid}) 在终止前身份发生变化（${t.field ?? 'unknown'}），拒绝清理且未标记完成；UNKNOWN 证据保留`, { runId: cur.runId, wrapperPid: cur.wrapperPid, detail: t });
+    }
+    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound') {
       cur.wrapperCleaned = true;
       cur.wrapperCleanupAt = new Date().toISOString();
       cur.wrapperCleanupResult = t.result;

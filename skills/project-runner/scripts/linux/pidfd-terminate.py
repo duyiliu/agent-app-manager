@@ -13,7 +13,7 @@ def emit(result, **extra):
 
 def identity(pid):
     try:
-        with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="surrogateescape") as stat_file:
             raw = stat_file.read()
         fields = raw[raw.rfind(")") + 2:].split()
         if fields[0] in ("Z", "X", "x"):
@@ -34,7 +34,7 @@ def identity(pid):
 
 def process_state(pid):
     try:
-        with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="surrogateescape") as stat_file:
             raw = stat_file.read()
         fields = raw[raw.rfind(")") + 2:].split()
         return fields[0]
@@ -92,6 +92,8 @@ def main():
         return
 
     try:
+        frozen = False
+        signal_sent = False
         current = identity(pid)
         if current["result"] != "ok":
             emit(current["result"], **{k: v for k, v in current.items() if k != "result"})
@@ -105,25 +107,23 @@ def main():
         if freeze:
             try:
                 signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+                frozen = True
             except ProcessLookupError:
                 emit("exited")
                 return
             except OSError as error:
                 emit("error", code="freezeFailed", message=str(error))
                 return
-            frozen = wait_stopped(pid, 2000)
-            if frozen == "exited":
+            frozen_state = wait_stopped(pid, 2000)
+            if frozen_state == "exited":
                 emit("exited")
                 return
-            if frozen != "stopped":
-                resume(pidfd)
+            if frozen_state != "stopped":
                 emit("error", code="freezeTimeout", message="进程未在 2000ms 内停止，未发送终止信号")
                 return
             # 冻结后进程无法 exec：此刻复核身份是稳定的。
             current = identity(pid)
             if current["result"] != "ok":
-                if current["result"] != "exited":
-                    resume(pidfd)
                 emit(current["result"], **{k: v for k, v in current.items() if k != "result"})
                 return
             field = None
@@ -132,11 +132,11 @@ def main():
             elif current["image"] != expected_image:
                 field = "image"
             if field:
-                resume(pidfd)
                 emit("mismatch", field=field)
                 return
         try:
             signal.pidfd_send_signal(pidfd, sig)
+            signal_sent = True
         except ProcessLookupError:
             emit("exited")
             return
@@ -151,6 +151,10 @@ def main():
         else:
             emit("terminateTimeout")
     finally:
+        # 冻结后任何非成功终止路径（mismatch/异常/发信号失败）都必须 SIGCONT，
+        # 避免 cleanup-wrapper 失败反而把目标或 wrapper 永久留在停止状态。
+        if frozen and not signal_sent:
+            resume(pidfd)
         os.close(pidfd)
 
 
@@ -159,3 +163,6 @@ if __name__ == "__main__":
         main()
     except (ValueError, IndexError) as error:
         emit("error", code="badArgs", message=str(error))
+    except Exception as error:
+        # main() 的 finally 已在冻结后恢复 SIGCONT；这里保证任何未预期异常也返回可解析结果。
+        emit("error", code="internalError", message=f"{type(error).__name__}: {error}")

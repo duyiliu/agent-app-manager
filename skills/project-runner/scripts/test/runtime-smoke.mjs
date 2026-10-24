@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { isWindows, findExecutable, killTree, listDescendants, findProcesses } from './platform.mjs';
@@ -126,6 +126,28 @@ try {
     await check('Linux pidfd 终止在身份不匹配时拒绝发送信号', () => {
       const r = psProc('terminate', { id: process.pid, creationFileTime: 'wrong-boot:0', image: '/wrong/image' });
       assert.equal(r.result, 'mismatch');
+    });
+    await check('Linux freeze helper 处理非 ASCII comm 且不遗留停止进程', async () => {
+      if (!pyReal) skip('PATH 中无真实 python');
+      // /proc/<pid>/stat 的 comm 可含非 UTF-8/ASCII 字节；helper 必须以可容错解码读取，
+      // 且冻结后任何失败路径都不能把进程留在 SIGSTOP 状态。
+      const code = "import ctypes,time; ctypes.CDLL(None).prctl(15, bytes([255,254,253]), 0, 0, 0); time.sleep(30)";
+      const child = spawn(pyReal, ['-c', code], { stdio: 'ignore' });
+      try {
+        let id = null;
+        for (let i = 0; i < 50; i++) {
+          id = psProc('capture', { id: child.pid });
+          if (id.result === 'ok') break;
+          await wait(100);
+        }
+        assert.equal(id?.result, 'ok', `子进程未就绪：${JSON.stringify(id)}`);
+        const r = psProc('terminate', { id: child.pid, creationFileTime: id.creationFileTime, image: id.image, freeze: true });
+        assert.equal(r.result, 'terminated', `freeze 终止失败：${JSON.stringify(r)}`);
+        const after = psProc('capture', { id: child.pid });
+        assert(after.result === 'notfound' || after.result === 'exited', `进程仍存活：${JSON.stringify(after)}`);
+      } finally {
+        try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+      }
     });
   }
 
@@ -259,17 +281,25 @@ try {
     if (!nodeRunId && skipped) skip('前置受管启动已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdexec', root: projCmd, entry: 'exec', mode: 'node',
-      command: 'sleep 5; exec node srv.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 8000,
+      // 先让 discover 超时落 UNKNOWN，再等 wrapper 自己 exec 成目标；若目标在超时前出现，
+      // 该用例会错误地变成成功启动，无法覆盖恢复边界。
+      command: 'sleep 8; exec node srv.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 3000,
     }));
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'DISCOVERY_TIMEOUT');
     const st = cli('status', 'cmdexec');
     assert.equal(st.code, 0, st.text);
+    assert.equal(st.json.data.status, 'UNKNOWN');
     const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${st.json.data.appId}.json`), 'utf8'));
     const wrapperPid = rt.current.wrapperPid;
     assert(Number.isInteger(wrapperPid) && wrapperPid > 0, '缺少 wrapperPid 证据');
     strayPids.push(wrapperPid);
-    const before = psProc('capture', { id: wrapperPid });
+    let before = psProc('capture', { id: wrapperPid });
+    for (let i = 0; i < 80; i++) {
+      before = psProc('capture', { id: wrapperPid });
+      if (before.result === 'ok' && String(before.image) !== String(rt.current.wrapperImage)) break;
+      await wait(250);
+    }
     assert.equal(before.result, 'ok', `exec 后的目标未存活：${JSON.stringify(before)}`);
     assert.notEqual(String(before.image), String(rt.current.wrapperImage), 'wrapper 未发生 exec，场景不成立');
     const c = cli('cleanup-wrapper', 'cmdexec');
