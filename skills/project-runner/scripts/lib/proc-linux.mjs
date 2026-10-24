@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { TERMINATE_WAIT_MS, COMMAND_DISCOVER_TIMEOUT_MS, EXIT, ManagerError } from './constants.mjs';
+import { sleepSync } from './proc.mjs';
 
 const PROC = '/proc';
 const PIDFD_TERMINATE = fileURLToPath(new URL('../linux/pidfd-terminate.py', import.meta.url));
@@ -27,10 +28,6 @@ export function bootId() {
     catch { bootIdCache = 'boot-unknown'; }
   }
   return bootIdCache;
-}
-
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // /proc/<pid>/stat 的 comm 可含空格与括号：先取最后一个 ')'，再按空白切分。
@@ -242,26 +239,13 @@ export function discover(rootPid, expectedImage, waitMs = COMMAND_DISCOVER_TIMEO
   for (;;) {
     const rows = snapshotProcesses();
     if (rows.error) return { result: 'error', code: 'procUnreadable', message: rows.error.message };
-    const byParent = new Map();
-    for (const [pid, s] of rows) {
-      if (!byParent.has(s.ppid)) byParent.set(s.ppid, []);
-      byParent.get(s.ppid).push(pid);
-    }
-    let found = [];
-    const queue = [rootPid];
-    const seen = new Set();
-    while (queue.length) {
-      const cur = queue.shift();
-      for (const child of byParent.get(cur) ?? []) {
-        if (seen.has(child)) continue;
-        seen.add(child);
-        queue.push(child);
-        const s = rows.get(child);
-        const image = readImage(child, s.comm);
-        const base = image.startsWith('comm:') ? image.slice(5) : path.basename(image);
-        if (base === expectedImage || s.comm === expectedImage) {
-          found.push({ pid: child, image, comm: s.comm, cmd: readCmdline(child), creationFileTime: `${bootId()}:${s.starttime}` });
-        }
+    const found = [];
+    for (const child of descendantsOf(rootPid, childrenByParent(rows))) {
+      const s = rows.get(child);
+      const image = readImage(child, s.comm);
+      const base = image.startsWith('comm:') ? image.slice(5) : path.basename(image);
+      if (base === expectedImage || s.comm === expectedImage) {
+        found.push({ pid: child, image, comm: s.comm, cmd: readCmdline(child), creationFileTime: `${bootId()}:${s.starttime}` });
       }
     }
     // 已知启动器单链折叠（与 ps/proc.ps1 同规则）：只别除「是其他候选祖先且命令行命中已知

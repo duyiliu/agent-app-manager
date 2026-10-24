@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import { lockPath } from './store.mjs';
 import { psProc, selfIdentityCapture } from './probe.mjs';
+import { sleepSync } from './proc.mjs';
 import { conflictError, dataError } from './errors.mjs';
 
 function holderAlive(holder) {
@@ -13,10 +14,6 @@ function holderAlive(holder) {
   if (r.result === 'notfound' || r.result === 'exited') return false; // 明确已退出 → 持有者已死
   if (r.result !== 'ok') return true; // 权限不足等未知情形：保守视为存活，拒绝回收
   return String(r.creationFileTime) === String(holder.creationFileTime); // 复用 → 视为死锁可回收
-}
-
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // 读取锁持有者，容忍「先占位后补全」的写入窗口：内容不完整时短时重试，

@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { usageError, conflictError } from './errors.mjs';
+import { decodeText } from './decode.mjs';
 
 export const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 export const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
@@ -117,6 +118,13 @@ export function loadUnmanagedDesc(file) {
   const errs = [];
   if (!ALIAS_RE.test(d.alias ?? '')) errs.push(`alias 需匹配 ${ALIAS_RE}`);
   if (!d.root || !path.isAbsolute(d.root)) errs.push('root 必须是绝对路径');
+  // 宽松校验仍要挡住明显非法类型：这些字段会原样进注册表，错了在下游才炸。
+  if (d.displayName != null && typeof d.displayName !== 'string') errs.push('displayName 必须是字符串');
+  if (d.entry != null && !ENTRY_RE.test(d.entry)) errs.push(`entry 需匹配 ${ENTRY_RE}`);
+  if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
+  if (d.cwd != null && (typeof d.cwd !== 'string' || !path.isAbsolute(d.cwd))) errs.push('cwd 必须是绝对路径');
+  if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需 1-65535 的整数');
+  if (d.logHints != null && (!Array.isArray(d.logHints) || d.logHints.some((h) => typeof h !== 'string'))) errs.push('logHints 必须是字符串数组');
   if (errs.length) throw usageError(`描述无效：${errs.join('；')}`);
   return d;
 }
@@ -187,15 +195,9 @@ function posixExeRejection(resolved) {
   return null;
 }
 
-// where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：UTF-8 解码失败回退 GBK；
-// 精简 ICU 的 Node 可能不带 GBK 解码器，再回退 lossy UTF-8，绝不让解码器缺失阻断解析。
-function decodeCmdOutput(buf) {
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-  catch {
-    try { return new TextDecoder('gbk').decode(buf); }
-    catch { return new TextDecoder('utf-8').decode(buf); }
-  }
-}
+// where 的输出按系统 ANSI 代码页编码（中文 Windows 为 GBK）：与日志解码同策略，
+// 收敛到 lib/decode.mjs（UTF-8 严格 → GBK → lossy UTF-8）。
+const decodeCmdOutput = decodeText;
 
 export function resolveExe(exe, cwd) {
   if (process.platform !== 'win32') return resolveExePosix(exe, cwd);

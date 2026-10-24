@@ -269,7 +269,9 @@ if ($Action -eq 'discover') {
   while ($true) {
     $rows = $null
     try {
-      $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate, CommandLine
+      # 两段式（#82-B2）：主扫描不拉 CommandLine（WMI 最贵字段），
+      # 仅出现多个候选、需要启动器折叠判定时才按候选 pid 补拉。
+      $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate
     } catch {
       [pscustomobject]@{ result = 'error'; code = 'cimFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
       exit 0
@@ -296,7 +298,7 @@ if ($Action -eq 'discover') {
         [void]$queue.Add($cpid)
         $img = [string]$c.ExecutablePath
         if ($img -and ([IO.Path]::GetFileName($img) -ieq $Image)) {
-          $found += [pscustomobject]@{ pid = $cpid; image = $img; creationFileTime = [string]$c.CreationDate.ToFileTime(); cmd = [string]$c.CommandLine }
+          $found += [pscustomobject]@{ pid = $cpid; image = $img; creationFileTime = [string]$c.CreationDate.ToFileTime(); cmd = '' }
         }
       }
     }
@@ -305,6 +307,12 @@ if ($Action -eq 'discover') {
     # 候选（npm-cli/yarn/pnpm/maven/gradle wrapper）；其余同映像链（目标自身派生同映像
     # 子进程）结构上不可区分，仍按歧义拒绝，安全边界不变。
     if ($found.Count -gt 1) {
+      # 仅歧义路径补拉 CommandLine：候选通常 2-3 个，按 pid 定点查询远轻于全表扫描
+      foreach ($f in $found) {
+        try {
+          $f.cmd = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($f.pid)" -Property CommandLine).CommandLine
+        } catch { $f.cmd = '' }
+      }
       $parentOf = @{}
       foreach ($p in $rows) { $parentOf[[int64]$p.ProcessId] = [int64]$p.ParentProcessId }
       $ancestorSet = @{}

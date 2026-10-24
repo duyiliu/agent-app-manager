@@ -44,12 +44,15 @@ function openInBrowser(url) {
 
 export async function startUiServer({ home, port = 0, open = false, api }) {
   let boundPort = port;
+  // 首页静态内容缓存为 Buffer：每个轮询会话都会反复 GET /，读盘一次即可（#82-B4）；
+  // 进程内缓存，更新 index.html 后重启 ui 生效。
+  let indexHtmlCache = null;
+  const indexHtml = () => (indexHtmlCache ??= fs.readFileSync(INDEX_FILE));
 
   async function route(res, u, method) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
-      const html = fs.readFileSync(INDEX_FILE);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(html);
+      res.end(indexHtml());
       return;
     }
     if (u.pathname === '/api/lifecycle') {

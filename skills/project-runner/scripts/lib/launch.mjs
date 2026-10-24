@@ -130,10 +130,20 @@ export async function launchManaged(home, appId, app, opts = {}) {
     failUnresolved('SPAWN_FAILED', `进程启动失败（${spawnError.message}）；意图与证据已保留（runId=${runId}），拒绝自动重试`, { cause: String(spawnError.code ?? spawnError.message) });
   }
 
+  // logger 身份采集：必须放在目标核验/discover 之后的 RUNNING 落账前——
+  // 启动热路径上每多一次 pwsh 调用都会推迟 discover，挤占命令模式
+  // 「目标延迟 spawn 后代」场景的歧义窗口余量（runtime-smoke #39 回归）。
+  function captureLoggerCreationFileTime(cur) {
+    try {
+      const lcap = psProc('capture', { id: cur.loggerPid });
+      if (lcap.result === 'ok') cur.loggerCreationFileTime = lcap.creationFileTime;
+    } catch { /* 探测失败可忽略：status 侧降级为 pid-only 存活探测 */ }
+  }
+
   rt.current.startedAt = new Date().toISOString();
+  rt.current.loggerPid = child.pid; // 两种模式都记录：status 据此核验日志管道存活（#82-A3）
   if (isCommand) {
     rt.current.wrapperPid = child.pid; // 先记 logger pid；pidFile 出现后覆盖为真实 wrapper
-    rt.current.loggerPid = child.pid;
   } else {
     rt.current.pid = child.pid;
   }
@@ -179,6 +189,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.phase = 'RUNNING';
       rt.current.creationFileTime = cap.creationFileTime;
       rt.current.image = cap.image;
+      captureLoggerCreationFileTime(rt.current); // 目标核验后再采：多一次 pwsh 也不挤占启动热路径
       writeRuntime(home, appId, rt);
       return rt.current;
     }
@@ -213,6 +224,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.pid = d.candidates[0].pid;
       rt.current.creationFileTime = t.creationFileTime;
       rt.current.image = t.image;
+      captureLoggerCreationFileTime(rt.current);
       writeRuntime(home, appId, rt);
       return rt.current;
     }

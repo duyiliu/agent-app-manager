@@ -38,8 +38,12 @@ export function detectProjects(root) {
     if (mEnv) return { expectedPort: Number(mEnv[1]), source: '.env:PORT' };
     for (const cfg of ['vite.config.ts', 'vite.config.js', 'vite.config.mts', 'vite.config.mjs']) {
       const text = read(cfg);
-      const m = /port\s*:\s*(\d{2,5})/.exec(text);
-      if (m) return { expectedPort: Number(m[1]), source: `${cfg}:server.port` };
+      // 先限定 server 段；裸 port: 也可能命中 preview.port（预览端口 ≠ dev 端口），
+      // 命中但不在 server 段时标注歧义，由人工核对而非静默采信。
+      const mServer = /server\s*:[\s\S]{0,300}?\bport\s*:\s*(\d{2,5})/.exec(text);
+      if (mServer) return { expectedPort: Number(mServer[1]), source: `${cfg}:server.port` };
+      const mAny = /\bport\s*:\s*(\d{2,5})/.exec(text);
+      if (mAny) return { expectedPort: Number(mAny[1]), source: `${cfg}:port（未在 server 段，可能是 preview.port，请人工核对）` };
     }
     for (const cfg of ['src/main/resources/application.properties', 'application.properties']) {
       const m = /^\s*server\.port\s*=\s*(\d{2,5})\s*$/m.exec(read(cfg));

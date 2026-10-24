@@ -8,6 +8,7 @@ import { appContext } from './runtime.mjs';
 import { ID_RE } from './desc.mjs';
 import { UI_FILE_CHUNK, TMP_NAME_RE, uiBlocked, uiFail, uiResolveFile } from './ui-data.mjs';
 import { readTailLines, MAX_LOG_BYTES, RUN_LOG_FILE_RE } from './logs.mjs';
+import { pickDecoder } from './decode.mjs';
 import { verifyRun } from './probe.mjs';
 import { usageError, notFoundError } from './errors.mjs';
 
@@ -233,7 +234,7 @@ export function followLogs(rt, runId, file, initialLines) {
         fs.readSync(fd, buf, 0, len, pos);
         try { process.stdout.write(decoder.decode(buf, { stream: true })); }
         catch {
-          try { decoder = new TextDecoder('gbk'); } catch { decoder = new TextDecoder('utf-8'); }
+          decoder = pickDecoder('gbk');
           process.stdout.write(decoder.decode(buf));
         }
       } finally {
@@ -258,7 +259,7 @@ export function followLogs(rt, runId, file, initialLines) {
               fs.readSync(fd, buf, 0, len, pos);
               try { process.stdout.write(decoder.decode(buf, { stream: true })); }
               catch {
-                try { decoder = new TextDecoder('gbk'); } catch { decoder = new TextDecoder('utf-8'); }
+                decoder = pickDecoder('gbk');
                 process.stdout.write(decoder.decode(buf));
               }
             } finally {

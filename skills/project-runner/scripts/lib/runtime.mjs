@@ -204,11 +204,34 @@ function settleStoppedWriteback(home, appId, marked) {
   }
 }
 
+// logger（log-writer）存活核验：只读、尽力而为、绝不误报。
+// loggerPid 缺失（旧版记录）→ null；进程已退出 → 断流提示；启动时记录了
+// loggerCreationFileTime 且 capture 不一致 → PID 复用提示；capture 失败
+// （无权限/探针异常）→ 不提示（保守：误报比漏报更糟）。
+export function loggerAliveNote(cur) {
+  if (!cur || !Number.isInteger(cur.loggerPid) || cur.loggerPid <= 0) return null;
+  let pidAlive;
+  try { process.kill(cur.loggerPid, 0); pidAlive = true; }
+  catch (e) { pidAlive = e?.code === 'EPERM'; }
+  if (!pidAlive) return 'logger 进程已退出：日志管道断流，可能丢失尾部输出，请人工核验';
+  if (cur.loggerCreationFileTime) {
+    try {
+      const cap = psProc('capture', { id: cur.loggerPid });
+      if (cap.result === 'ok' && String(cap.creationFileTime) !== String(cur.loggerCreationFileTime)) {
+        return 'logger PID 已被复用：日志管道状态不可信，请人工核验';
+      }
+    } catch { /* 探测失败不提示 */ }
+  }
+  return null;
+}
+
 // 查询即核验，并按 OS 事实落账；rtPrefetched 允许调用方（如 cmdList）复用已读的运行
 // 记录避免二次磁盘读——settleStoppedWriteback 在锁内仍会重读最新值，不影响并发正确性。
 export function statusWithFacts(home, appId, prefetched = null, rtPrefetched = undefined) {
   const rt = rtPrefetched !== undefined ? rtPrefetched : readRuntimeStrict(home, appId);
   const st = computeStatus(home, appId, rt, prefetched);
+  // logger 是日志管道：其死亡不改写目标进程状态，仅以提示透出（#82-A3）。
+  if (st.status === 'RUNNING' && rt?.current) st.loggerNote = loggerAliveNote(rt.current);
   if (st.writeback && rt && rt.current) {
     settleStoppedWriteback(home, appId, { endedAt: rt.current.endedAt, exitNote: rt.current.exitNote, runId: rt.current.runId });
   }

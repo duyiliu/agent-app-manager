@@ -18,6 +18,8 @@ let outFd = fs.openSync(outPath, 'a');
 let errFd = fs.openSync(errPath, 'a');
 const rotatedStreams = new Set();
 const recordedStreams = new Set();
+const rotateFailedStreams = new Set();
+const recordedFailedStreams = new Set();
 let rotationRetryTimer = null;
 let rotationRetryAttempts = 0;
 
@@ -32,19 +34,24 @@ function scheduleRotationRetry() {
 }
 
 function persistRotationState() {
-  if ([...rotatedStreams].every((stream) => recordedStreams.has(stream))) return;
+  if ([...rotatedStreams].every((stream) => recordedStreams.has(stream))
+    && [...rotateFailedStreams].every((stream) => recordedFailedStreams.has(stream))) return;
   try {
     withLock(home, appId, 'log-rotation', () => {
       const rt = readRuntimeStrict(home, appId);
       if (rt?.current?.runId !== runId) {
         for (const stream of rotatedStreams) recordedStreams.add(stream);
+        for (const stream of rotateFailedStreams) recordedFailedStreams.add(stream);
         return;
       }
       const streams = new Set([...(rt.current.logRotatedStreams ?? []), ...rotatedStreams]);
-      rt.current.logRotated = true;
+      const failed = new Set([...(rt.current.logRotateFailedStreams ?? []), ...rotateFailedStreams]);
+      if (streams.size) rt.current.logRotated = true;
       rt.current.logRotatedStreams = [...streams];
+      if (failed.size) rt.current.logRotateFailedStreams = [...failed];
       atomicWriteJson(runtimeFile, rt);
       for (const stream of rotatedStreams) recordedStreams.add(stream);
+      for (const stream of rotateFailedStreams) recordedFailedStreams.add(stream);
     });
   } catch {
     scheduleRotationRetry();
@@ -53,6 +60,11 @@ function persistRotationState() {
 
 function markRotated(stream) {
   rotatedStreams.add(stream);
+  persistRotationState();
+}
+
+function markRotateFailed(stream) {
+  rotateFailedStreams.add(stream);
   persistRotationState();
 }
 
@@ -80,11 +92,29 @@ function writeChunk(stream, input) {
   let size = isOut ? outSize : errSize;
   const filePath = isOut ? outPath : errPath;
   if (chunk.length > limit) chunk = chunk.subarray(chunk.length - limit);
+  if (fd == null) {
+    // 此前轮转 reopen 失败（标记过 rotateFailed）：懒重开——append 模式，
+    // 若 rename 当时也失败则旧内容仍在，append 续写不覆盖；仍失败则丢本
+    // chunk 等下次再试，日志管道故障绝不波及目标进程。
+    try {
+      fd = fs.openSync(filePath, 'a');
+      size = (() => { try { return fs.statSync(filePath).size; } catch { return 0; } })();
+      if (isOut) { outFd = fd; outSize = size; } else { errFd = fd; errSize = size; }
+    } catch { return; }
+  }
   if (size + chunk.length > limit) {
     try { fs.closeSync(fd); } catch { /* already closed */ }
     try { fs.unlinkSync(`${filePath}.1`); } catch { /* absent */ }
     try { fs.renameSync(filePath, `${filePath}.1`); } catch { /* best effort */ }
-    fd = fs.openSync(filePath, 'w');
+    try {
+      fd = fs.openSync(filePath, 'w');
+    } catch {
+      // reopen 失败：置空 fd 转为懒重开路径，并持久化 logRotateFailedStreams
+      // 供 status/UI 透出——不再静默丢后续全部日志。
+      if (isOut) outFd = null; else errFd = null;
+      markRotateFailed(stream);
+      return;
+    }
     size = 0;
     if (isOut) outFd = fd; else errFd = fd;
     markRotated(stream);

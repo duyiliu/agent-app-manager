@@ -231,9 +231,9 @@ aside {
 #appList { flex:1; overflow:auto; padding:8px }
 
 .app-search { padding:0 10px 8px; }
-.app-search input { width:100%; box-sizing:border-box; background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:6px; padding:5px 8px; font-size:12px; outline:none }
-.app-search input:focus { border-color:var(--acc) }
-.port-link { color:var(--acc); text-decoration:none }
+.app-search input { width:100%; box-sizing:border-box; background:var(--panel-2); border:1px solid var(--line); color:var(--text); border-radius:6px; padding:5px 8px; font-size:12px; outline:none }
+.app-search input:focus { border-color:var(--accent) }
+.port-link { color:var(--accent); text-decoration:none }
 .port-link:hover { text-decoration:underline }
 .app-card {
   display:block;
@@ -640,6 +640,7 @@ try { notifiedRuns = new Set(JSON.parse(sessionStorage.getItem('pr-ui-notified-r
 let wantedHistoryRun = null, selectedHistoryRun = null;
 let fatal = false;            // 403（非本机访问）后停止轮询
 let degrading = false;        // 数据损坏等持久性错误
+let appsBusy = false, statusBusy = false; // loadApps/loadStatus 在飞守卫：响应慢于轮询周期时不堆叠请求
 
 async function api(path, signal, method = 'GET') {
   const u = new URL(path, location.origin);
@@ -667,12 +668,12 @@ function notifyExit(runId, status, note) {
   const banner = $('#exitBanner');
   banner.hidden = false;
   banner.textContent = `批次 ${runId} 状态变化：${status}${note ? ` · ${note}` : ''}`;
-  // 浏览器通知：首次触发时申请权限，授权后 RUNNING→STOPPED/UNKNOWN 也推系统通知（标签页切走时仍可见）
+  // 浏览器通知：授权后 RUNNING→STOPPED/UNKNOWN 也推系统通知（标签页切走时仍可见）。
+  // 权限只能在用户手势中申请（浏览器会静默拒绝轮询回调里的 requestPermission），
+  // 已挪到首次点击页面时询问（见事件区）。
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       new Notification(`project-runner · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
-    } else if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
     }
   } catch { /* 通知不可用时仅保留页面横幅 */ }
 }
@@ -778,7 +779,8 @@ function updateTitle() {
   document.title = (running > 0 ? `(${running}) ` : '') + 'Project Runner · 运行管理台';
 }
 async function loadApps() {
-  if (fatal || (paused && !manualRefresh)) return;
+  if (fatal || (paused && !manualRefresh) || appsBusy) return;
+  appsBusy = true;
   try {
     const d = await api('/api/apps');
     hideBannerIfRecovered();
@@ -807,6 +809,7 @@ async function loadApps() {
     if (!selected) renderDetail(null);
     conn('已连接 · ' + new Date().toLocaleTimeString());
   } catch (e) { handlePollError(e); }
+  finally { appsBusy = false; }
 }
 // 任一轮询成功即视为数据层恢复可读：清掉 degrading 让日志跟随恢复轮询并隐藏横幅。
 // DATA_UNREADABLE 可能是瞬时的（杀软扫描/原子写窗口）；若损坏持续，下一轮轮询会重新上报。
@@ -914,6 +917,10 @@ function renderDetail(d) {
     card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：就绪与 JRebel/热加载验证需按 Skill 规程用真实证据判定，本页不代替该结论。'));
   }
   if (d.note) card.appendChild(el('div', 'hint-line', 'note: ' + d.note));
+  if (d.loggerNote) card.appendChild(el('div', 'alert', d.loggerNote));
+  if (run?.logRotateFailedStreams?.length) {
+    card.appendChild(el('div', 'alert', `日志轮转重开失败（${run.logRotateFailedStreams.join('/')}）：期间输出可能未落盘，管道后续自动恢复重试；请人工核验日志完整性。`));
+  }
 
   const body = el('div', 'card-body');
   const grid = el('div', 'kv');
@@ -1004,7 +1011,8 @@ async function doLifecycle(alias, op, extra = '') {
   manualRefresh = true;
   loadStatus(); // 立刻重绘按钮为执行中态，不等请求返回（stop/restart 可能数秒）
   try {
-    const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}${extra}`, undefined, 'POST');
+    // 启停可能耗时数十秒（命令模式 discover 上限 ~60s），加 150s 超时防永久挂起
+    const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}${extra}`, AbortSignal.timeout(150_000), 'POST');
     const pid = r.pid ?? r.start?.pid;
     showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}`, false);
   } catch (e) {
@@ -1018,7 +1026,8 @@ async function doLifecycle(alias, op, extra = '') {
 }
 
 async function loadStatus() {
-  if (fatal || (paused && !manualRefresh) || !selected) return;
+  if (fatal || (paused && !manualRefresh) || !selected || statusBusy) return;
+  statusBusy = true;
   try {
     const detail = await api('/api/status?app=' + encodeURIComponent(selected));
     const old = previousStatuses.get(selected);
@@ -1031,7 +1040,7 @@ async function loadStatus() {
   } catch (e) {
     if (e.status === 404) { renderDetail(null); return; }
     handlePollError(e);
-  }
+  } finally { statusBusy = false; }
 }
 function selectApp(alias) {
   if (selected === alias) return;
@@ -1060,6 +1069,7 @@ const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppre
 const classify = t => errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
   : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(t) ? 'sql' : '';
 let logSrc = null, logSrcLabel = '', logSrcWasCurrent = false, offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
+let srcDead = false; // 当前源 404 已失效：停止每秒轮询风暴，手动刷新或换源可恢复
 let renderedId = 0, sourcesVersion = 0, sourcesController = null, sourcesBySrc = new Map();
 let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBusy = false;
 // 过滤在渲染层做：lines 数组始终保留全量，清空条件即恢复全视图；
@@ -1102,7 +1112,7 @@ function logHint(text, error = false) {
 }
 function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
-  lines = []; nextId = 1; boundary = ''; removed = 0; following = true;
+  lines = []; nextId = 1; boundary = ''; removed = 0; following = true; srcDead = false;
   logSize = 0; logFallbackLabel = '日志'; renderedDomCount = 0;
   updateFollow();
   renderMeta();
@@ -1155,10 +1165,11 @@ function renderLines(force = false) {
   renderMeta();
 }
 async function pollTail() {
-  if (fatal || (paused && !manualRefresh) || degrading || !selected || !logSrc || tailBusy) return;
+  if (fatal || (paused && !manualRefresh) || degrading || !selected || !logSrc || tailBusy || (srcDead && !manualRefresh)) return;
   tailBusy = true;
   try {
     const d = await api(`/api/tail?app=${encodeURIComponent(selected)}&src=${encodeURIComponent(logSrc)}&offset=${offset}`);
+    srcDead = false;
     if (offset >= 0 && d.start !== offset) {
       pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
       lines = []; removed = 0; boundary = '日志已截断，读取位置已重置';
@@ -1187,7 +1198,13 @@ async function pollTail() {
     renderMeta();
     conn('已连接 · ' + new Date().toLocaleTimeString());
   } catch (e) {
-    if (e.status === 404) { logHint('日志文件不存在（可能已被清理，或该批次未产生该流输出）。'); return; }
+    if (e.status === 404) {
+      // 源已失效：不再每秒重试（轮询风暴），提示并刷新源列表；手动刷新或换源可恢复。
+      srcDead = true;
+      logHint('日志文件不存在（可能已被清理，或该批次未产生该流输出）；已暂停此源的轮询，可另选源或点刷新重试。');
+      loadSources();
+      return;
+    }
     handlePollError(e);
   } finally { tailBusy = false; }
 }
@@ -1284,6 +1301,12 @@ async function manualReload() {
   } finally { manualRefresh = false; }
 }
 $('#refreshBtn').addEventListener('click', manualReload);
+// 通知权限只能在用户手势中申请：首次点击页面任意处时询问一次（轮询回调里申请会被静默拒绝）。
+document.addEventListener('click', () => {
+  try {
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+  } catch {}
+}, { once: true });
 $('#appSearch').addEventListener('input', renderApps);
 $('#pauseBtn').addEventListener('click', () => {
   paused = !paused;
