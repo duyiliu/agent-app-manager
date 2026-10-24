@@ -84,18 +84,37 @@ function scheduleExitRetry() {
   }, delay);
 }
 
+// command 模式的直接子进程通常是 shell wrapper，manager 托管的是 discover 找到的后代。
+// 只有确认直接子进程就是受管目标（例如 Linux shell exec 后 pid 不变）时，才把它的
+// 退出结果写成目标 exit；否则单独写 wrapperExit，避免把 wrapper 的退出码/信号冒充目标。
+function isCommandWrapper(run) {
+  if (run?.kind !== 'command') return false;
+  return !(Number.isInteger(run.pid) && Number.isInteger(run.wrapperPid) && run.pid === run.wrapperPid);
+}
+
+function applyExitEvidence(run) {
+  if (!run || run.runId !== runId) return false;
+  if (isCommandWrapper(run)) run.wrapperExit = exitInfo;
+  else run.exit = exitInfo;
+  return true;
+}
+
 function persistExitState() {
   if (!exitInfo || exitRecorded) return;
   try {
     withLogEvidenceLock(home, appId, 'log-exit', () => {
       const rt = readRuntimeStrict(home, appId);
-      // 仅当前 run 仍是本 logger 对应的批次时才写入；旧 run 已归档/新 run 已启动时丢弃，
-      // 绝不让迟到的 close 事件覆盖新记录。
-      if (rt?.current?.runId !== runId) {
+      // 先匹配 current；目标退出后若 manager 已因 stdio 延迟/并发 start 把旧 run
+      // 归档到 prevRuns，则继续按 runId 写入历史条目，绝不改新 current。
+      let matched = applyExitEvidence(rt?.current);
+      if (!matched) {
+        const archived = (rt?.prevRuns ?? []).find((p) => p.runId === runId);
+        matched = applyExitEvidence(archived);
+      }
+      if (!matched) {
         exitRecorded = true;
         return;
       }
-      rt.current.exit = exitInfo;
       atomicWriteJson(runtimeFile, rt);
       exitRecorded = true;
     });
@@ -169,18 +188,22 @@ function forward(stream, isOut) {
 }
 forward(target.stdout, true);
 forward(target.stderr, false);
+// 退出证据必须在 'exit' 落账：'close' 要等 stdio 全部关闭，若目标派生的子进程继续
+// 持有 stdout/stderr 管道，会延迟到旧 run 已归档之后，导致证据丢失。
+// 日志 fd 仍在下面 'close' 时关闭，临终输出不丢。
+target.on('exit', (code, signal) => {
+  if (spawnFailed) return;
+  exitInfo = {
+    code: Number.isInteger(code) ? code : null,
+    signal: signal ?? null,
+    at: new Date().toISOString(),
+  };
+  persistExitState();
+});
 // 'close' 在进程终止且 stdio 管道全部关闭后才触发：退出瞬间管道里残余的数据
-// 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出；'exit' 事件无此保证。
+// 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出。
 target.on('close', (code, signal) => {
   persistRotationState();
-  if (!spawnFailed) {
-    exitInfo = {
-      code: Number.isInteger(code) ? code : null,
-      signal: signal ?? null,
-      at: new Date().toISOString(),
-    };
-    persistExitState();
-  }
   try { fs.closeSync(outFd); } catch {}
   try { fs.closeSync(errFd); } catch {}
   if (!spawnFailed) process.exitCode = code ?? (signal ? 1 : 0);

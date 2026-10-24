@@ -38,7 +38,10 @@ export function archiveCurrent(rt, opts = {}) {
     const entry = {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, kind: cur.kind ?? 'direct',
       startedAt: cur.startedAt, endedAt: cur.endedAt ?? null,
-      lastError: cur.lastError ?? null, exit: cur.exit ?? null,
+      pid: cur.pid ?? null, image: cur.image ?? null,
+      wrapperPid: cur.wrapperPid ?? null, wrapperCreationFileTime: cur.wrapperCreationFileTime ?? null,
+      lastError: cur.lastError ?? null,
+      exit: cur.exit ?? null, wrapperExit: cur.wrapperExit ?? null,
       archivedAt: new Date().toISOString(),
     };
     if (opts.reason) {

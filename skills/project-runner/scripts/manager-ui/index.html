@@ -957,6 +957,10 @@ function renderDetail(d) {
     : null;
   kvRow(grid, '退出结果', run?.exitSummary, run?.exitSummary ? exitClass(runExit) : undefined);
   kvRow(grid, '退出码/信号', runExitText, exitClass(runExit));
+  if (run?.wrapperExit) {
+    const wrapperExitText = `${exitLabel(run.wrapperExit)}${run.wrapperExit.at ? ' · ' + fmtTime(run.wrapperExit.at) : ''}`;
+    kvRow(grid, 'wrapper 退出（非目标）', wrapperExitText, 'dim');
+  }
   kvRow(grid, '退出说明', run?.exitNote, run?.exitNote ? 'dim' : undefined);
   kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
   kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');

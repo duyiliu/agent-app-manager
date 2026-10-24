@@ -423,7 +423,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       logRotated: cur.logRotated ?? false, logRotatedStreams: cur.logRotatedStreams ?? [],
       logRotateFailedStreams: cur.logRotateFailedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
-      exit: runExit, exitSummary: runExitSummary,
+      exit: runExit, exitSummary: runExitSummary, wrapperExit: cur.wrapperExit ?? null,
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),
@@ -527,10 +527,11 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
     const v = psProc('verify', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
     if (v.result === 'ok') treeSnapshot = snapshotTree(cur);
   }
-  const markStopped = (note, extra = {}, killTree = false) => {
+  const markStopped = (note, extra = {}, killTree = false, exitEvidence = null) => {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = note;
+    if (exitEvidence) cur.exit = { ...exitEvidence, at: cur.endedAt };
     invalidateVerifyCache(cur.pid); // 终止后立即作废缓存存活结论，避免 stop→start 竞态读到旧值
     cleanupWrapper(rt); // 命令模式：先清理残留 wrapper，再处理目标后代
     const treeKilled = opts.tree ? (killTree && treeSnapshot ? terminateTreeSnapshot(treeSnapshot) : []) : null;
@@ -544,7 +545,11 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   if (opts.graceMs != null) {
     const g = psProc('grace', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, waitMs: opts.graceMs });
     if (g.result === 'gracefulTerminated') {
-      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`, {}, true);
+      // 有信号语义的平台（Linux pidfd SIGTERM）可直接留下目标退出证据；Windows
+      // taskkill 无 /F 不产生 POSIX signal，不臆造 signal。
+      const graceExit = process.platform === 'linux'
+        ? { code: null, signal: 'SIGTERM', source: 'manager-stop' } : null;
+      return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`, {}, true, graceExit);
     }
     if (g.result !== 'stillAlive') {
       // gracefulTerminated/stillAlive 之外的结果视同普通 terminate 结果走下面分支
@@ -565,7 +570,12 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   const t = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
   if (t.result === 'terminated') {
     const graceNote = opts.graceMs != null ? `；已先等待 grace ${opts.graceMs}ms 未退出` : '';
-    return markStopped(`terminated(137) 有界强制停止${opts.tree ? '（--tree）' : ''}${graceNote}`, {}, true);
+    // stop 自己发出的有界强杀也是目标退出事实：command 模式下 wrapper 的 exit 不能
+    // 代表目标，这里先在锁内落下受管目标的信号/137 语义证据，后续 logger 仅能补写同类。
+    const forcedExit = process.platform === 'linux'
+      ? { code: null, signal: 'SIGKILL', source: 'manager-stop' }
+      : { code: 137, signal: null, source: 'manager-stop' };
+    return markStopped(`terminated(137) 有界强制停止${opts.tree ? '（--tree）' : ''}${graceNote}`, {}, true, forcedExit);
   }
   if (t.result === 'exited' || t.result === 'notfound') {
     return { ...markStopped('进程已自行退出'), result: 'alreadyStopped' };
