@@ -4,11 +4,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readTailLines } from '../lib/logs.mjs';
+import { readRuntimeStrict, registryPath } from '../lib/store.mjs';
+import { computeAppId } from '../lib/desc.mjs';
+import { launchManaged } from '../lib/launch.mjs';
 
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'log-writer.mjs');
+const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-log-rotation-'));
 
 function runLogger(name, limit, script, fileOverride, prepare) {
@@ -87,6 +91,63 @@ try {
   const rotateFailedRuntime = JSON.parse(fs.readFileSync(rotateFailed.runtimeFile, 'utf8'));
   assert.deepEqual(rotateFailedRuntime.current.logRotateFailedStreams, ['stdout'], 'runtime 应标记 stdout 轮转失败');
   assert(!rotateFailedRuntime.current.logRotated, 'rename 失败不应标记为已轮转');
+
+  // 启动阶段轮转失败：目标在 launchManaged 身份采集完成前写入超限数据，
+  // log-writer 先落 runtime；launch 最终落账不得用旧快照覆盖失败证据。
+  const startupDir = path.join(temp, 'startup-rotation');
+  const startupHome = path.join(startupDir, 'home');
+  const startupRoot = path.join(startupDir, 'app');
+  fs.mkdirSync(path.join(startupHome, 'runtime'), { recursive: true });
+  fs.mkdirSync(path.join(startupHome, 'locks'));
+  fs.mkdirSync(startupRoot, { recursive: true });
+  const startupRootReal = fs.realpathSync(startupRoot);
+  const startupAppId = computeAppId(startupRootReal, 'default');
+  fs.writeFileSync(path.join(startupRoot, 'rotate.js'), `
+const fs = require('node:fs');
+const path = require('node:path');
+const logDir = path.join(process.env.SMOKE_HOME, 'logs', process.env.SMOKE_APPID);
+const latest = fs.readdirSync(logDir)
+  .filter((name) => name.endsWith('.stdout.log'))
+  .map((name) => { const file = path.join(logDir, name); return { file, mtimeMs: fs.statSync(file).mtimeMs }; })
+  .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+fs.mkdirSync(latest.file + '.1');
+process.stdout.write('s'.repeat(1024), () => setTimeout(() => {
+  process.stdout.write('startup-rotate-failed\\n', () => {});
+}, 100));
+setInterval(() => {}, 1000);
+`, 'utf8');
+  const startupApp = {
+    appId: startupAppId, alias: 'startup-rotate', entry: 'default', mode: 'node', root: startupRootReal, cwd: startupRootReal,
+    exe: process.execPath, args: ['rotate.js'], command: null, expectedImage: null,
+    envRefs: [], env: { SMOKE_HOME: startupHome, SMOKE_APPID: startupAppId }, logMaxBytes: 1024,
+    expectedPort: null, readyLogPattern: null, readyUrl: null,
+  };
+  let startupCur = null;
+  try {
+    startupCur = await launchManaged(startupHome, startupAppId, startupApp);
+    let startupRt = null;
+    for (let i = 0; i < 50; i++) {
+      startupRt = readRuntimeStrict(startupHome, startupAppId);
+      if (startupRt?.current?.logRotateFailedStreams?.includes('stdout')) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(startupRt?.current?.logRotateFailedStreams, ['stdout'], '启动完成后的 runtime 必须保留轮转失败状态');
+    assert(!startupRt.current.logRotated, '启动阶段轮转失败不应误报 logRotated');
+    const startupLog = fs.readFileSync(startupRt.current.logPaths.stdout, 'utf8');
+    assert.equal(startupLog, 's'.repeat(1024) + 'startup-rotate-failed\n', '启动阶段失败轮转不得截断既有日志');
+    fs.writeFileSync(registryPath(startupHome), JSON.stringify({ schemaVersion: 1, apps: { [startupAppId]: startupApp } }));
+    const status = spawnSync(process.execPath, [MANAGER, '--home', startupHome, '--json', 'status', 'startup-rotate'], {
+      encoding: 'utf8', windowsHide: true,
+    });
+    assert.equal(status.status, 0, status.stdout + status.stderr);
+    const statusRun = JSON.parse(status.stdout).data.run;
+    assert.deepEqual(statusRun.logRotateFailedStreams, ['stdout'], 'status 必须保留启动阶段的轮转失败 stream');
+    assert.equal(statusRun.logRotated, false, 'status 不应误报 logRotated');
+  } finally {
+    if (startupCur?.pid) { try { process.kill(startupCur.pid, 'SIGKILL'); } catch { /* 已退出 */ } }
+    if (startupCur?.loggerPid) { try { process.kill(startupCur.loggerPid, 'SIGKILL'); } catch { /* 已退出 */ } }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
   // pidFile=0 契约：目标 spawn 失败时快速落 SPAWN_FAILED 所需的错误信号
   const spawnFailed = await runLogger('spawn-failed', 1024, "process.stdout.write('never')", 'Z:/definitely/missing/target.exe');
   assert.equal(spawnFailed.code, 1, 'spawn 失败时 logger 应以非零码退出');
