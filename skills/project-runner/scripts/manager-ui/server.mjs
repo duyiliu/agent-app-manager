@@ -45,7 +45,7 @@ function openInBrowser(url) {
 export async function startUiServer({ home, port = 0, open = false, api }) {
   let boundPort = port;
 
-  async function route(res, u) {
+  async function route(res, u, method) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
       const html = fs.readFileSync(INDEX_FILE);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -53,6 +53,9 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       return;
     }
     if (u.pathname === '/api/lifecycle') {
+      // 外层方法守卫只挡「非 GET 且非 lifecycle-POST」，这里必须再查一次：
+      // 否则 GET /api/lifecycle?op=stop 会被 <img>/导航等跨站请求触达（CSRF）。
+      if (method !== 'POST') throw fail(405, '启停/移除仅接受 POST');
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null) });
     }
     if (u.pathname === '/api/doctor') {
@@ -134,10 +137,21 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       if (req.method !== 'GET' && !(req.method === 'POST' && u.pathname === '/api/lifecycle')) {
         return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '仅支持 GET 与 POST /api/lifecycle' } });
       }
+      if (u.pathname === '/api/lifecycle') {
+        // 跨站写操作拦截：POST 属 simple request 无 CORS 预检，仅靠 Host 校验挡不住
+        // 浏览器里恶意页面直接 fetch 本服务。Sec-Fetch-Site=cross-site 一律拒；
+        // Origin 存在时必须同源（curl/脚本不带这两个头，不受影响）。
+        const site = String(req.headers['sec-fetch-site'] ?? '').toLowerCase();
+        const origin = String(req.headers.origin ?? '');
+        const allowedOrigins = [`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`];
+        if (site === 'cross-site' || (origin && !allowedOrigins.includes(origin))) {
+          return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '跨站写操作被拒绝' } });
+        }
+      }
     } catch (e) {
       return sendJson(res, errorStatus(e), { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: e.message } });
     }
-    route(res, u).catch((e) => {
+    route(res, u, req.method).catch((e) => {
       const status = errorStatus(e);
       if (status >= 500) console.error(e?.stack ?? e);
       // ManagerError 业务原因（包括依赖/冲突）原样透出；未知内部错误仍使用通用文案。

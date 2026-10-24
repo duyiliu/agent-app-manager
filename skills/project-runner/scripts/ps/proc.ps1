@@ -106,17 +106,33 @@ public static class ProcUtil {
     finally { CloseHandle(h); }
   }
 
-  // terminate-tree：不核验身份直接终止指定 pid（仅用于已确认是受管目标后代的进程）。
-  public static string KillPid(int pid) {
-    IntPtr h = OpenProcess(TERMINATE, false, pid);
+  // --grace：持有已核验句柄期间发起 taskkill（无 /F：GUI 收 WM_CLOSE），并用同一
+  // 句柄 WaitForSingleObject 确认退出。句柄存活期内 PID 不会被回收复用——原先
+  // "Verify→关句柄→taskkill"之间留了一个复用窗口。句柄无需 TERMINATE 权限。
+  public static string Grace(int pid, long creationFileTime, string image, int waitMs) {
+    IntPtr h = OpenProcess(QUERY | SYNCHRONIZE, false, pid);
     if (h == IntPtr.Zero) {
       int err = Marshal.GetLastWin32Error();
       if (err == ERROR_INVALID_PARAMETER) return "NOTFOUND";
       return Err("openFailed", err);
     }
     try {
-      if (!TerminateProcess(h, 137)) return Err("terminateFailed", Marshal.GetLastWin32Error());
-      return "OK";
+      string v = VerifyOnHandle(h, creationFileTime, image);
+      if (!v.StartsWith("OK")) return v;
+      try {
+        var start = new System.Diagnostics.ProcessStartInfo {
+          FileName = "taskkill",
+          Arguments = "/PID " + pid.ToString(),
+          CreateNoWindow = true,
+          UseShellExecute = false,
+          RedirectStandardOutput = true,
+          RedirectStandardError = true,
+        };
+        var p = System.Diagnostics.Process.Start(start);
+        p.WaitForExit(10000);
+      } catch { /* taskkill 发起失败不致命：仍按句柄等待退出确认 */ }
+      uint w = WaitForSingleObject(h, (uint)Math.Max(0, waitMs));
+      return w == 0 ? "GRACE_DONE" : "GRACE_ALIVE";
     }
     finally { CloseHandle(h); }
   }
@@ -328,6 +344,8 @@ if ($Action -eq 'discover') {
 }
 
 # terminate-tree 的后代枚举：Win32_Process 按 ParentProcessId BFS。
+# 只取拓扑（pid/ppid）：WMI 的 CreationDate 精度远低于内核 FILETIME，不能当
+# 核验身份用；后代身份在杀的时候由 ProcUtil.Capture 现采（与 Terminate 同源）。
 function Get-Descendants([int64]$rootPid) {
   $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId
   $byParent = @{}
@@ -391,14 +409,20 @@ if ($Action -eq 'descendants') {
 }
 
 if ($Action -eq 'terminate-tree') {
-  # 与 Linux terminateTree 同语义：先核验根身份，再杀快照后代，最后终止根。
+  # 与 Linux terminateTree 同语义：先核验根身份，再终止快照后代，最后终止根。
+  # 后代不再裸杀：先 Capture 采自身身份，再用同句柄核验+终止的 Terminate 原语——
+  # 快照到发信号之间若发生 PID 复用，终止句柄上的身份核验会拒绝误伤。
   $v = Parse-Result ([ProcUtil]::Verify($Id, [long]$CreationFileTime, $Image))
   if ($v.result -ne 'ok') { $v | ConvertTo-Json -Compress; exit 0 }
   $killed = @()
   try {
     foreach ($k in (Get-Descendants $Id)) {
-      $r = [ProcUtil]::KillPid([int]$k)
-      if ($r -eq 'OK') { $killed += $k }
+      $cpid = [int64]$k
+      $raw = [ProcUtil]::Capture([int]$cpid)
+      $parts = $raw -split "`t", 3
+      if ($parts[0] -ne 'OK') { continue } # 已退出/身份不可采：不触碰
+      $r = Parse-Result ([ProcUtil]::Terminate([int]$cpid, [long]$parts[1], [string]$parts[2], 0))
+      if ($r.result -in 'terminated', 'terminateTimeout') { $killed += $cpid }
     }
   } catch { }
   $t = Parse-Result ([ProcUtil]::Terminate($Id, [long]$CreationFileTime, $Image, $WaitMs))
@@ -409,24 +433,20 @@ if ($Action -eq 'terminate-tree') {
 }
 
 if ($Action -eq 'grace') {
-  # --grace：先核验身份，taskkill 不带 /F（GUI 收 WM_CLOSE；控制台程序多半拒绝，
-  # 由调用方回退强制终止）。WaitMs 内轮询 Capture 确认退出。
-  $v = Parse-Result ([ProcUtil]::Verify($Id, [long]$CreationFileTime, $Image))
-  if ($v.result -ne 'ok') { $v | ConvertTo-Json -Compress; exit 0 }
-  & taskkill /PID $Id 2>$null | Out-Null
-  $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $WaitMs))
-  while ($true) {
-    $c = Parse-Result ([ProcUtil]::Capture($Id))
-    if ($c.result -in 'exited', 'notfound') {
-      [pscustomobject]@{ result = 'gracefulTerminated' } | ConvertTo-Json -Compress
-      exit 0
-    }
-    if ((Get-Date) -ge $deadline) {
-      [pscustomobject]@{ result = 'stillAlive' } | ConvertTo-Json -Compress
-      exit 0
-    }
-    Start-Sleep -Milliseconds 200
+  # --grace：C# 侧持有已核验句柄执行 taskkill（无 /F）并用同一句柄等待退出——
+  # 句柄存活期内 PID 不复用，没有"核验后关句柄再按裸 PID 发信号"的窗口。
+  # 控制台程序多半不响应 WM_CLOSE：超时仍存活返回 stillAlive，由调用方回退强杀。
+  $raw = [ProcUtil]::Grace($Id, [long]$CreationFileTime, $Image, $WaitMs)
+  if ($raw -eq 'GRACE_DONE') {
+    [pscustomobject]@{ result = 'gracefulTerminated' } | ConvertTo-Json -Compress
+    exit 0
   }
+  if ($raw -eq 'GRACE_ALIVE') {
+    [pscustomobject]@{ result = 'stillAlive' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  Convert-Result $raw
+  exit 0
 }
 
 $raw = switch ($Action) {

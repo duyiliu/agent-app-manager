@@ -73,7 +73,11 @@ export function planPrune(home) {
       plan.skipped.push({ kind: 'logs', target: dir, reason: '符号链接目录，跳过' });
       continue;
     }
-    if (!st.isDirectory()) continue;
+    if (!st.isDirectory()) {
+      // logs/ 下不应出现游离文件（结构是 logs/<appId>/*.log）：报告出来而不是静默跳过
+      plan.skipped.push({ kind: 'logs', target: dir, reason: '不是目录（logs/ 下的游离条目），跳过' });
+      continue;
+    }
     if (!ID_RE.test(appId)) {
       plan.skipped.push({ kind: 'logs', target: dir, reason: '目录名不是合法 appId，跳过' });
       continue;

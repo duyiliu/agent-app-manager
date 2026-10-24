@@ -143,6 +143,15 @@ export async function launchManaged(home, appId, app, opts = {}) {
     // wrapper 是 log-writer spawn 的 cmd/sh（不是 logger 自身）。记录它的身份，
     // 供失败后的 cleanup-wrapper 同身份核验；pidFile 不可用时回退 logger 身份。
     const wrapperPid = readPidFile(pidFile);
+    if (wrapperPid === 0) {
+      // 与直连模式同一约定：pidFile=0 表示 cmd/sh wrapper 从未拉起，无存活进程，
+      // 直接落 STOPPED 可重试——不再走 discover 空等（logger 滞留时会拖到超时）。
+      rt.current.wrapperPid = null;
+      rt.current.phase = 'STOPPED';
+      rt.current.endedAt = new Date().toISOString();
+      rt.current.exitNote = 'command wrapper spawn failed（pidFile=0）；详见 stderr 批次日志';
+      failUnresolved('SPAWN_FAILED', `命令拉起失败（runId=${runId}）；错误原因见 stderr 日志尾部，未产生进程，可直接修正后重试`, { wrapperPid: 0, loggerPid: child.pid });
+    }
     if (wrapperPid) rt.current.wrapperPid = wrapperPid;
     try { cap = psProc('capture', { id: rt.current.wrapperPid }); }
     catch (e) { cap = { result: 'error', message: e.message }; }

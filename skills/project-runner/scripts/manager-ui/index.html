@@ -595,7 +595,7 @@ aside {
         <button id="pauseBtn" type="button" aria-pressed="false">暂停</button>
         <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" type="button" disabled>清屏</button>
-        <button id="dlBtn" type="button" disabled title="下载当前缓存的日志行">下载</button>
+        <button id="dlBtn" type="button" disabled title="下载日志（过滤激活时仅下载命中行）">下载</button>
         <span id="logMeta"></span>
       </div>
       <div id="log" tabindex="0" aria-label="日志内容"><div class="empty">选择左侧应用后查看日志。</div></div>
@@ -808,7 +808,9 @@ async function loadApps() {
     conn('已连接 · ' + new Date().toLocaleTimeString());
   } catch (e) { handlePollError(e); }
 }
-function hideBannerIfRecovered() { if (!degrading) hideBanner(); }
+// 任一轮询成功即视为数据层恢复可读：清掉 degrading 让日志跟随恢复轮询并隐藏横幅。
+// DATA_UNREADABLE 可能是瞬时的（杀软扫描/原子写窗口）；若损坏持续，下一轮轮询会重新上报。
+function hideBannerIfRecovered() { degrading = false; hideBanner(); }
 
 // ---------- 详情 ----------
 
@@ -940,6 +942,7 @@ function renderDetail(d) {
   kvRow(grid, 'stdout', run?.logPaths?.stdout);
   kvRow(grid, 'stderr', run?.logPaths?.stderr);
   kvRow(grid, '日志线索', run?.logHints?.length ? run.logHints.join('\n') : null, 'dim');
+  kvRow(grid, '日志轮转', run?.logRotated ? `已轮转（${(run.logRotatedStreams ?? []).join('/') || '未知流'}）· 源列表可选「轮转前」版本` : null, 'dim');
   kvRow(grid, '记录文件', d.runtimeFile, 'dim');
   if (d.managed === false) kvRow(grid, '能力', '非受管登记：仅记录启动尝试与日志线索，不提供跨会话启停', 'dim');
   body.appendChild(grid);
@@ -1159,6 +1162,9 @@ async function pollTail() {
     if (offset >= 0 && d.start !== offset) {
       pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
       lines = []; removed = 0; boundary = '日志已截断，读取位置已重置';
+      // 立即全量重绘：清掉 DOM 中陈旧行并显示截断提示，不等下一批数据到达
+      //（否则日志停写时旧内容会一直挂着，renderedDomCount 也失准）。
+      renderLines(true);
     } else if (offset < 0) {
       boundary = d.start > 0 ? `已加载尾部 ${fmtSize(d.size - d.start)}，更早内容未加载` : '从文件起始读取';
     }
@@ -1333,7 +1339,9 @@ $('#log').addEventListener('click', (e) => {
   copyText(row.textContent).then((ok) => { if (ok) { row.classList.add('copied'); setTimeout(() => row.classList.remove('copied'), 800); } });
 });
 $('#dlBtn').addEventListener('click', () => {
-  const text = lines.map((l) => l.text).join('\n');
+  // 过滤/只看错误激活时下载命中行（与所见一致）；否则下载缓存全量。
+  const out = (filterRe || errorsOnly) ? lines.filter((l) => lineVisible(l.text)) : lines;
+  const text = out.map((l) => l.text).join('\n');
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);

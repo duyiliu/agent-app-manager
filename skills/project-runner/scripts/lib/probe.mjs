@@ -75,15 +75,30 @@ export function portOccupants(port) {
   if (IS_LINUX) return linuxProc.portOccupants(port);
   // 单次 pwsh 调用完成端口+身份采集（proc.ps1 -Action port）：N 个监听人不再叠加
   // N 次 capture；identity.image 与 capture 同源，保持 #55 的 image 统一口径。
+  // 纯读操作，与 verify/capture 同口径走重试层，吸收偶发的 pwsh/Roslyn 崩溃。
+  return retryProcessProbe('port', () => portOccupantsOnce(port));
+}
+
+function portOccupantsOnce(port) {
   const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'port', '-Id', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
-    throw dependencyError(`端口诊断调用失败：${r.error.message}`);
+    const e = dependencyError(`端口诊断调用失败：${r.error.message}`);
+    e.psTransient = true;
+    throw e;
   }
-  if (r.status !== 0) throw dependencyError(`端口诊断失败：${(r.stderr || '').trim()}`);
+  if (r.status !== 0) {
+    const e = dependencyError(`端口诊断失败：${(r.stderr || '').trim()}`);
+    e.psTransient = true;
+    throw e;
+  }
   let parsed;
   const text = (r.stdout || '').trim();
-  try { parsed = text ? JSON.parse(text) : []; } catch { throw dependencyError('端口诊断输出无法解析'); }
+  try { parsed = text ? JSON.parse(text) : []; } catch {
+    const e = dependencyError('端口诊断输出无法解析');
+    e.psTransient = true;
+    throw e;
+  }
   // 单元素时 ConvertTo-Json 会退化为对象而非数组
   const rows = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? [parsed] : [];
   return rows.map((row) => ({
@@ -138,18 +153,37 @@ export function verifyRuns(runs) {
   // 统一字段名：对外用 pid，内部/proc.ps1 用 id
   const norm = items.map((r) => ({ id: r.pid, creationFileTime: r.creationFileTime, image: r.image }));
   if (IS_LINUX) return linuxProc.verifyBatch(norm);
+  // 纯读批量核验，同样可重试；失败时调用方仍会回退逐条核验兜底。
+  return retryProcessProbe('verify-batch', () => verifyRunsOnce(norm, items.length));
+}
+
+function verifyRunsOnce(norm, count) {
   const payload = Buffer.from(JSON.stringify(norm), 'utf8').toString('base64');
   const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'verify-batch', '-Json', payload],
-    { encoding: 'utf8', timeout: 30000 + items.length * 500, windowsHide: true });
+    { encoding: 'utf8', timeout: 30000 + count * 500, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
-    throw dependencyError(`pwsh 调用失败：${r.error.message}`);
+    const e = dependencyError(`pwsh 调用失败：${r.error.message}`);
+    e.psTransient = true;
+    throw e;
   }
-  if (r.status !== 0) throw dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+  if (r.status !== 0) {
+    const e = dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
+    e.psTransient = true;
+    throw e;
+  }
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
-  if (!line) throw dependencyError('proc.ps1 无输出');
+  if (!line) {
+    const e = dependencyError('proc.ps1 无输出');
+    e.psTransient = true;
+    throw e;
+  }
   let parsed;
-  try { parsed = JSON.parse(line); } catch { throw dependencyError(`proc.ps1 输出无法解析：${line}`); }
+  try { parsed = JSON.parse(line); } catch {
+    const e = dependencyError(`proc.ps1 输出无法解析：${line}`);
+    e.psTransient = true;
+    throw e;
+  }
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
