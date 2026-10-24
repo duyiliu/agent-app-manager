@@ -304,7 +304,8 @@ export function cmdList(ctx) {
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
     };
-  });  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
+  });
+  if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };
 }
 
@@ -400,6 +401,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       creationFileTime: cur.creationFileTime ?? null, image: cur.image ?? null,
       envResolved: cur.envResolved ?? [],
       logPaths: cur.logPaths, logHints: cur.logHints ?? null,
+      logRotated: cur.logRotated ?? false, logRotatedStreams: cur.logRotatedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
       evidenceFile,
     } : null,
@@ -586,17 +588,21 @@ export function cmdCleanupWrapper(ctx, ref) {
   });
 }
 
+// --grace 参数校验：stop/restart 共用（Number() 严格解析，3000abc 不豁免为 3000）。
+function parseGraceMs(opts) {
+  if (!opts.has('--grace')) return null;
+  const graceMs = Number(opts.get('--grace'));
+  if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 600000) {
+    throw usageError('--grace 需要 0-600000 的毫秒数');
+  }
+  return graceMs;
+}
+
 export function cmdStop(ctx, ref) {
   if (!ref) throw usageError('stop 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), { '--tree': 'flag', '--grace': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
-  let graceMs = null;
-  if (opts.has('--grace')) {
-    graceMs = Number.parseInt(opts.get('--grace'), 10);
-    if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 600000) {
-      throw usageError('--grace 需要 0-600000 的毫秒数');
-    }
-  }
+  const graceMs = parseGraceMs(opts);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLock(ctx.home, appId, 'stop', () => {
@@ -610,8 +616,10 @@ export function cmdStop(ctx, ref) {
 
 export async function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag' });
+  // --tree/--grace 透传给停旧实例那一步：等价于 stop --tree/--grace + start 的组合。
+  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag', '--tree': 'flag', '--grace': 'value' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const graceMs = parseGraceMs(opts);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLockAsync(ctx.home, appId, 'restart', async () => {
@@ -622,7 +630,7 @@ export async function cmdRestart(ctx, ref) {
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = app.command ? null : resolveExe(app.exe, cwd);
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
-    const stopResult = stopCurrent(ctx.home, appId, app, rt); // 必须确认退出才继续；抛错则中止，绝不先起后停
+    const stopResult = stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }); // 必须确认退出才继续；抛错则中止，绝不先起后停
     const appForLaunch = withRegistryLock(ctx.home, 'restart', () => {
       const reg = readRegistry(ctx.home);
       const a = reg.apps[appId];
@@ -822,6 +830,9 @@ export async function cmdUi(ctx) {
         lifecycle: (ref, op, ack) => {
           const fn = { start: cmdStart, stop: cmdStop, restart: cmdRestart, remove: cmdRemove }[op];
           if (!fn) throw usageError(`不支持的操作：${op}（仅 start|stop|restart|remove）`);
+          // --ack-unresolved 只在支持它的操作上生效；对 stop/restart 明确拒绝而非静默丢弃，
+          // 避免调用方误以为未结记录已被确认。
+          if (ack && op !== 'start' && op !== 'remove') throw usageError(`${op} 不支持 ack 参数（仅 start/remove 接受 --ack-unresolved）`);
           return fn({ ...ctx, rest: ack ? [ref, '--ack-unresolved', ack] : [ref] }, ref);
         },
       },

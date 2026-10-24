@@ -63,7 +63,9 @@ const target = spawn(file, args, { cwd, env: process.env, windowsHide: true, std
 if (Number.isInteger(target.pid) && target.pid > 0) {
   fs.writeFileSync(config.pidFile, String(target.pid));
 }
+let spawnFailed = false;
 target.on('error', (err) => {
+  spawnFailed = true;
   try {
     fs.writeFileSync(config.pidFile, '0');
     const line = `[project-runner] target spawn failed: ${err.code ?? ''} ${err.message} (file=${file})\n`;
@@ -100,9 +102,11 @@ function forward(stream, isOut) {
 }
 forward(target.stdout, true);
 forward(target.stderr, false);
-target.on('exit', (code, signal) => {
+// 'close' 在进程终止且 stdio 管道全部关闭后才触发：退出瞬间管道里残余的数据
+// 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出；'exit' 事件无此保证。
+target.on('close', (code, signal) => {
   persistRotationState();
   try { fs.closeSync(outFd); } catch {}
   try { fs.closeSync(errFd); } catch {}
-  process.exitCode = code ?? (signal ? 1 : 0);
+  if (!spawnFailed) process.exitCode = code ?? (signal ? 1 : 0);
 });

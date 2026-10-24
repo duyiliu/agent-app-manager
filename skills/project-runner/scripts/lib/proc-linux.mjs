@@ -111,13 +111,12 @@ export function verify(pid, expected) {
   return { result: 'ok', creationFileTime: id.creationFileTime, image: id.image };
 }
 
-export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS) {
-  if (!Number.isInteger(pid) || pid <= 0 || !expected?.creationFileTime || !expected?.image) {
-    return { result: 'error', code: 'badArgs' };
-  }
+// pidfd 终止原语：helper 先 pidfd_open 锚定进程实例，再核验记录身份，最后在同一
+// pidfd 上发信号并等待退出——PID 复用无法进入核验→发信号这个窗口。sig 为信号名。
+function pidfdTerminate(pid, expected, waitMs, sig) {
   let lastError = null;
   for (const python of ['python3', 'python']) {
-    const r = spawnSync(python, [PIDFD_TERMINATE, String(pid), String(expected.creationFileTime), String(expected.image), String(waitMs)],
+    const r = spawnSync(python, [PIDFD_TERMINATE, String(pid), String(expected.creationFileTime), String(expected.image), String(waitMs), sig],
       { encoding: 'utf8', timeout: Math.max(0, waitMs) + 5000, windowsHide: true, maxBuffer: 64 * 1024 });
     if (r.error?.code === 'ENOENT') continue;
     if (r.error) {
@@ -146,6 +145,13 @@ export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS) {
     EXIT.DEPENDENCY);
 }
 
+export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS) {
+  if (!Number.isInteger(pid) || pid <= 0 || !expected?.creationFileTime || !expected?.image) {
+    return { result: 'error', code: 'badArgs' };
+  }
+  return pidfdTerminate(pid, expected, waitMs, 'SIGKILL');
+}
+
 function childrenByParent(rows) {
   const byParent = new Map();
   for (const [pid, s] of rows) {
@@ -171,40 +177,21 @@ function descendantsOf(rootPid, byParent) {
   return found;
 }
 
-function waitExited(pid, expectedStart, waitMs) {
-  const deadline = Date.now() + Math.max(0, waitMs);
-  for (;;) {
-    const s = readStat(pid);
-    if (s.result === 'notfound' || s.result === 'exited') return { result: 'terminated' };
-    if (!s.ok) return s;
-    // 原实例已退出且 PID 被复用：不再触碰新进程。
-    if (s.starttime !== expectedStart) return { result: 'terminated' };
-    if (Date.now() >= deadline) return { result: 'terminateTimeout' };
-    sleepSync(50);
-  }
-}
-
-// --grace：核验同一身份后先发 SIGTERM，waitMs 内确认退出则返回 gracefulTerminated；
-// 超时仍存活返回 stillAlive，由调用方决定是否回退到 terminate 强杀。
+// --grace：与 terminate 同一 pidfd 同锚定核验语义，只把信号换成 SIGTERM；
+// waitMs 内确认退出 → gracefulTerminated，超时仍存活 → stillAlive，由调用方回退强杀。
 export function gracefulTerminate(pid, expected, waitMs) {
-  const v = verify(pid, expected);
-  if (v.result !== 'ok') return v;
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch (e) {
-    if (e.code === 'ESRCH') return { result: 'notfound' };
-    return { result: 'error', code: 'signalFailed', message: e.message };
+  if (!Number.isInteger(pid) || pid <= 0 || !expected?.creationFileTime || !expected?.image) {
+    return { result: 'error', code: 'badArgs' };
   }
-  const expectedStart = String(expected.creationFileTime).split(':')[1];
-  const w = waitExited(pid, expectedStart, waitMs);
-  if (w.result === 'terminated') return { result: 'gracefulTerminated' };
-  if (w.result === 'terminateTimeout') return { result: 'stillAlive' };
-  return w;
+  const r = pidfdTerminate(pid, expected, waitMs, 'SIGTERM');
+  if (r.result === 'terminated') return { result: 'gracefulTerminated' };
+  if (r.result === 'terminateTimeout') return { result: 'stillAlive' };
+  return r;
 }
 
-// --tree：核验同一身份后，先对快照中的全部后代发 SIGKILL，再终止目标本身。
-// 后代身份不逐一核验（仅按当时 ppid 拓扑），因此快照只是尽力而为的名单；
-// 新拉起的后代漏网是已知限制，记录 killedPids 供人工核验。
+// --tree：核验目标身份后，快照中的后代逐个复核 starttime 再 SIGKILL——快照到发信号
+// 之间若发生 PID 复用，starttime 必不相同，复核不过即跳过不杀；根进程走 terminate()
+// 的 pidfd 同锚定核验+终止。新拉起的后代漏网仍是已知限制，记录 killedPids 供人工核验。
 export function terminateTree(pid, expected, waitMs = TERMINATE_WAIT_MS) {
   const v = verify(pid, expected);
   if (v.result !== 'ok') return v;
@@ -213,15 +200,11 @@ export function terminateTree(pid, expected, waitMs = TERMINATE_WAIT_MS) {
   const kids = descendantsOf(pid, childrenByParent(rows));
   const killedPids = [];
   for (const k of kids) {
+    const s = readStat(k);
+    if (!s.ok || s.starttime !== rows.get(k)?.starttime) continue;
     try { process.kill(k, 'SIGKILL'); killedPids.push(k); } catch { /* 已退出/无权限：尽力而为 */ }
   }
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch (e) {
-    if (e.code === 'ESRCH') return { result: 'notfound', killedPids };
-    return { result: 'error', code: 'terminateFailed', message: e.message };
-  }
-  const w = waitExited(pid, String(expected.creationFileTime).split(':')[1], waitMs);
+  const w = terminate(pid, expected, waitMs);
   return { ...w, killedPids };
 }
 

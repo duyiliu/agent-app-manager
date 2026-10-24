@@ -207,9 +207,10 @@ function usageText() {
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
     '  stop <alias|appId> [--tree] [--grace <ms>]   停止受管实例：默认有界强制终止；',
     '       --tree 连带终止全部后代进程（#39）；--grace 先发优雅信号（Linux SIGTERM /',
-    '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止',
+    '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止；restart 的 --tree/--grace',
+    '       作用于停旧实例这一步',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
-    '  restart <alias|appId> [--force]   确认退出后重启（仅受管实例）',
+    '  restart <alias|appId> [--force] [--tree] [--grace <ms>]   确认退出后重启（仅受管实例；',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
@@ -268,8 +269,8 @@ async function main() {
       if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
     } else if (refCommands.has(command)) {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
-      if (command !== 'stop') { // stop 的 --tree/--grace 由 cmdStop 自行解析
-        const allowedFlags = { status: ['--probe', '--ready'], restart: ['--force'] }[command] ?? [];
+      if (command !== 'stop' && command !== 'restart') { // stop/restart 的 --tree/--grace 由各自 cmd 自行解析（值参无法进白名单）
+        const allowedFlags = { status: ['--probe', '--ready'] }[command] ?? [];
         const bad = ctx.rest.slice(1).find((a) => !allowedFlags.includes(a));
         if (bad !== undefined && bad !== null) throw usageError(`无法识别的参数：${bad}`);
       }

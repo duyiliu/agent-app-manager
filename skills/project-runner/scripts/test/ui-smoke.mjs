@@ -72,8 +72,8 @@ child.stdout.on('data', (d) => { banner += d; });
 child.stderr.on('data', (d) => { banner += d; });
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-const get = (p, { method = 'GET', host } = {}) => new Promise((res, rej) => {
-  const headers = {};
+const get = (p, { method = 'GET', host, headers: extra } = {}) => new Promise((res, rej) => {
+  const headers = { ...extra };
   if (host) headers.Host = host;
   const url = `http://127.0.0.1:${port}${p}`;
   const r = http.request(url, { method, headers }, (rs) => {
@@ -122,6 +122,25 @@ try {
 
   await check('Host 不匹配返回 403', async () => assert.equal((await get('/api/apps', { host: 'evil.example' })).status, 403));
   await check('POST 拒绝（405）', async () => assert.equal((await get('/api/apps', { method: 'POST' })).status, 405));
+
+  // lifecycle 写操作防 CSRF：GET 必须被方法守卫挡在业务之外（405 而非业务错误码），
+  // 跨站来源（Sec-Fetch-Site=cross-site 或异源 Origin）的 POST 一律 403。
+  await check('GET /api/lifecycle 拒绝（405）', async () => {
+    const r = await get('/api/lifecycle?app=nosuchapp&op=stop');
+    assert.equal(r.status, 405);
+  });
+  await check('cross-site POST /api/lifecycle 拒绝（403）', async () => {
+    const r = await get('/api/lifecycle?app=nosuchapp&op=stop', { method: 'POST', headers: { 'Sec-Fetch-Site': 'cross-site' } });
+    assert.equal(r.status, 403);
+  });
+  await check('异源 Origin 的 POST /api/lifecycle 拒绝（403）', async () => {
+    const r = await get('/api/lifecycle?app=nosuchapp&op=stop', { method: 'POST', headers: { Origin: 'http://evil.example' } });
+    assert.equal(r.status, 403);
+  });
+  await check('同源 POST /api/lifecycle 可进入业务（404 应用不存在）', async () => {
+    const r = await get('/api/lifecycle?app=nosuchapp&op=stop', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', Origin: `http://127.0.0.1:${port}` } });
+    assert.equal(r.status, 404);
+  });
 
   const apps = (await get('/api/apps')).json.data.apps;
   await check('应用列表（4 个登记应用）', () => assert.equal(apps.length, 4));

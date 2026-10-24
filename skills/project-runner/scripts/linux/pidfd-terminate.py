@@ -40,6 +40,12 @@ def main():
     expected_creation = sys.argv[2]
     expected_image = sys.argv[3]
     wait_ms = max(0, int(sys.argv[4]))
+    # 可选第 5 参：信号名（默认 SIGKILL；--grace 用 SIGTERM 温和先行）
+    try:
+        sig = getattr(signal, sys.argv[5]) if len(sys.argv) > 5 else signal.SIGKILL
+    except AttributeError:
+        emit("error", code="badArgs", message=f"unknown signal {sys.argv[5]}")
+        return
     try:
         pidfd = os.pidfd_open(pid, 0)
     except ProcessLookupError:
@@ -61,7 +67,7 @@ def main():
             emit("mismatch", field="image")
             return
         try:
-            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            signal.pidfd_send_signal(pidfd, sig)
         except ProcessLookupError:
             emit("exited")
             return
