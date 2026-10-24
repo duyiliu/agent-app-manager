@@ -48,6 +48,7 @@ const skipWithoutProbe = (name, fn) => {
   check(name, fn);
 };
 
+const cleanup = [];
 const hasPwsh = hasProcessProbe();
 if (!hasPwsh) console.log(`（未检测到进程探针 ${isWindows ? 'pwsh 7' : '/proc'}：本次仅执行不依赖核验的断言）`);
 
@@ -109,6 +110,7 @@ try {
   }, null, 2));
   const hostRef = 'host-ref-value';
   let appId = null;
+  cleanup.push({ home, alias: 'env-smoke-envfile' });
   skipWithoutProbe('envFile 注入变量且 envRefs 可由 envFile/宿主环境满足；疑似机密 env 非阻断告警', () => {
     const r = runAt(home, ['start-new', '--desc', descFile], { PR_SMOKE_HOST_REF: hostRef });
     assert.equal(r.code, 0, r.stdout + r.stderr);
@@ -147,11 +149,154 @@ try {
     assert(!text.includes(fileToken) && !text.includes(filePlain), 'status 回显了 envFile 值');
   });
 
+  skipWithoutProbe('restart 环境预检失败不停止旧实例、不改写运行证据与注册表', () => {
+    const rtFile = path.join(home, 'runtime', `${appId}.json`);
+    const regFile = path.join(home, 'registry.json');
+    const rtBefore = fs.readFileSync(rtFile, 'utf8');
+    const original = JSON.parse(fs.readFileSync(regFile, 'utf8')).apps[appId];
+    const readReg = () => JSON.parse(fs.readFileSync(regFile, 'utf8'));
+    const writeReg = (reg) => fs.writeFileSync(regFile, JSON.stringify(reg, null, 2));
+    const assertStillRunning = () => {
+      const st = runAt(home, ['status', 'env-smoke-envfile']);
+      assert.equal(st.code, 0, st.stdout + st.stderr);
+      assert.equal(st.json.data.status, 'RUNNING', '旧实例被停止或状态被改写');
+      assert.equal(st.json.data.run.runId, JSON.parse(rtBefore).current.runId);
+    };
+
+    try {
+      const missingRef = 'PR_SMOKE_RESTART_MISSING';
+      const reg1 = readReg();
+      reg1.apps[appId].envRefs = [...(original.envRefs ?? []), missingRef];
+      writeReg(reg1);
+      const regBefore = fs.readFileSync(regFile, 'utf8');
+      const r = runAt(home, ['restart', 'env-smoke-envfile']);
+      assert.equal(r.code, 3, r.stdout + r.stderr);
+      assert.equal(r.json.error.code, 'ENV_MISSING');
+      assert(r.json.error.message.includes(missingRef), 'restart ENV_MISSING 未列出缺失名称');
+      assert.equal(fs.readFileSync(rtFile, 'utf8'), rtBefore, 'restart 预检失败改写了运行记录');
+      assert.equal(fs.readFileSync(regFile, 'utf8'), regBefore, 'restart 预检失败改写了注册表');
+      assertStillRunning();
+    } finally {
+      const restore = readReg();
+      restore.apps[appId].envRefs = original.envRefs;
+      writeReg(restore);
+    }
+
+    try {
+      const reg2 = readReg();
+      reg2.apps[appId].envFile = path.join(base, 'missing-restart.env');
+      writeReg(reg2);
+      const regBefore = fs.readFileSync(regFile, 'utf8');
+      const r = runAt(home, ['restart', 'env-smoke-envfile']);
+      assert.equal(r.code, 3, r.stdout + r.stderr);
+      assert.equal(r.json.error.code, 'ENV_FILE_UNREADABLE');
+      assert.equal(fs.readFileSync(rtFile, 'utf8'), rtBefore, 'envFile 预检失败改写了运行记录');
+      assert.equal(fs.readFileSync(regFile, 'utf8'), regBefore, 'envFile 预检失败改写了注册表');
+      assertStillRunning();
+    } finally {
+      const restore = readReg();
+      restore.apps[appId].envFile = original.envFile;
+      writeReg(restore);
+    }
+  });
+
+  skipWithoutProbe('命令模式同样注入 envFile/envRefs 与环境字面值', () => {
+    const cmdHome = path.join(base, 'cmd-home');
+    const cmdOut = path.join(base, 'cmd-probe.json');
+    const cmdScript = path.join(root, 'cmd-probe.js');
+    const cmdEnvFile = path.join(base, 'cmd.env');
+    const cmdToken = 'cmd-file-token-not-persisted';
+    fs.writeFileSync(cmdScript, [
+      "const fs=require('fs');",
+      'fs.writeFileSync(process.argv[2], JSON.stringify({',
+      '  token: process.env.PR_SMOKE_CMD_TOKEN,',
+      '  plain: process.env.PR_SMOKE_CMD_PLAIN,',
+      '}));',
+      'setInterval(() => {}, 500);',
+    ].join('\n'));
+    fs.writeFileSync(cmdEnvFile, `PR_SMOKE_CMD_TOKEN=${cmdToken}\n`);
+    const cmdDesc = path.join(base, 'desc-cmd-envfile.json');
+    fs.writeFileSync(cmdDesc, JSON.stringify({
+      alias: 'env-smoke-cmd', root, entry: 'cmd', mode: 'node',
+      command: `node ${cmdScript} ${cmdOut}`,
+      expectedImage: path.basename(process.execPath),
+      discoverTimeoutMs: 5000,
+      envRefs: ['PR_SMOKE_CMD_TOKEN'],
+      envFile: cmdEnvFile,
+      env: { PR_SMOKE_CMD_PLAIN: 'cmd-plain-ok' },
+    }, null, 2));
+    cleanup.push({ home: cmdHome, alias: 'env-smoke-cmd' });
+    const r = runAt(cmdHome, ['start-new', '--desc', cmdDesc]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(r.json.data.status, 'RUNNING');
+    assert(waitFile(cmdOut), '命令模式目标进程未写出 env 探针文件');
+    const got = JSON.parse(fs.readFileSync(cmdOut, 'utf8'));
+    assert.equal(got.token, cmdToken, '命令模式未注入 envFile 值');
+    assert.equal(got.plain, 'cmd-plain-ok', '命令模式未注入 env 字面值');
+    const rtRaw = fs.readFileSync(path.join(cmdHome, 'runtime', `${r.json.data.appId}.json`), 'utf8');
+    assert(!rtRaw.includes(cmdToken), '命令模式 runtime 泄漏 envFile 值');
+  });
+
+  skipWithoutProbe('机密 env 告警在任何启动副作用前输出，启动失败仍可见且不回显值', () => {
+    const failHome = path.join(base, 'warn-fail-home');
+    const warnName = 'PR_SMOKE_WARN_SECRET';
+    const warnValue = 'warn-secret-value-never-echoed';
+    const failDesc = path.join(base, 'desc-warn-fail.json');
+    fs.writeFileSync(failDesc, JSON.stringify({
+      alias: 'env-smoke-warn', root, entry: 'warn', mode: 'node',
+      command: 'node -e "process.exit(1)"',
+      expectedImage: path.basename(process.execPath),
+      discoverTimeoutMs: 1000,
+      env: { [warnName]: warnValue },
+    }, null, 2));
+    cleanup.push({ home: failHome, alias: 'env-smoke-warn' });
+    const r = runAt(failHome, ['start-new', '--desc', failDesc]);
+    assert.notEqual(r.code, 0, '预期启动失败，实际成功');
+    assert(r.stderr.includes(warnName), `启动失败路径缺少机密 env 告警：${r.stderr}`);
+    assert(r.stderr.includes('envRefs') && r.stderr.includes('envFile'), `告警未提示改用 envRefs/envFile：${r.stderr}`);
+    assert(!r.stdout.includes(warnValue) && !r.stderr.includes(warnValue), '告警或输出回显了机密值');
+  });
+
+  if (isWindows) {
+    skipWithoutProbe('Windows: envRefs 名称大小写与宿主不同仍识别并注入', () => {
+      const caseHome = path.join(base, 'case-home');
+      const caseOut = path.join(base, 'case-probe.json');
+      const caseScript = path.join(root, 'case-probe.js');
+      const refLower = `pr_smoke_case_${suffix.toLowerCase()}`;
+      const hostUpper = refLower.toUpperCase();
+      fs.writeFileSync(caseScript, [
+        "const fs=require('fs');",
+        'fs.writeFileSync(process.argv[2], JSON.stringify({',
+        '  lower: process.env[process.argv[3]],',
+        '  upper: process.env[process.argv[4]],',
+        '}));',
+        'setInterval(() => {}, 500);',
+      ].join('\n'));
+      const caseDesc = path.join(base, 'desc-case.json');
+      fs.writeFileSync(caseDesc, JSON.stringify({
+        alias: 'env-smoke-case', root, entry: 'case', mode: 'node',
+        exe: process.execPath, args: [caseScript, caseOut, refLower, hostUpper],
+        envRefs: [refLower],
+      }, null, 2));
+      cleanup.push({ home: caseHome, alias: 'env-smoke-case' });
+      const r = runAt(caseHome, ['start-new', '--desc', caseDesc], { [hostUpper]: 'case-value' });
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.equal(r.json.data.status, 'RUNNING');
+      assert(waitFile(caseOut), '目标进程未写出大小写探针文件');
+      const got = JSON.parse(fs.readFileSync(caseOut, 'utf8'));
+      assert.equal(got.lower, 'case-value', '大小写不同时 envRefs 未被识别');
+      assert.equal(got.upper, 'case-value', '目标进程未取得宿主变量值');
+    });
+  }
+
   skipWithoutProbe('清理 envFile 测试实例', () => {
     const r = runAt(home, ['stop', 'env-smoke-envfile']);
     assert.equal(r.code, 0, r.stdout + r.stderr);
   });
 } finally {
+  for (const item of cleanup) {
+    try { runAt(item.home, ['stop', item.alias]); } catch { /* 已退出或从未启动 */ }
+  }
   fs.rmSync(base, { recursive: true, force: true });
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }

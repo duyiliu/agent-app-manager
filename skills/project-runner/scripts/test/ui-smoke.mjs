@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { hasProcessProbe } from './platform.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ui-smoke-'));
@@ -268,6 +269,35 @@ try {
     assert.equal(stuck.code, 3);
     assert(stuck.text.includes('UNRESOLVED_RUN'));
     assert(stuck.text.includes('--ack-unresolved'));
+  });
+
+  // UI 启停成功提示必须带出机密 env 告警（名称+建议，不含值）。
+  const regFile = path.join(home, 'registry.json');
+  const regNow = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+  regNow.apps.aenvwarn = {
+    appId: 'aenvwarn', alias: 'envwarn', displayName: 'ENV WARN', root, entry: 'envwarn',
+    cwd: root, mode: 'node', exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'],
+    envRefs: [], envFile: null, env: { DB_PASSWORD: 'ui-lifecycle-secret-value' },
+    expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
+  };
+  fs.writeFileSync(regFile, JSON.stringify(regNow, null, 2));
+  await check('管理台 lifecycle 启动透出 env 机密告警且不回显值', async () => {
+    if (!hasProcessProbe()) { console.log('  skip（缺进程探针，跳过生命周期告警检查）'); return; }
+    const headers = { 'Sec-Fetch-Site': 'same-origin', Origin: `http://127.0.0.1:${port}` };
+    let started = false;
+    try {
+      const r = await get('/api/lifecycle?app=envwarn&op=start', { method: 'POST', headers });
+      started = r.status === 200;
+      assert.equal(r.status, 200, r.body);
+      assert(r.json.data.envWarnings?.includes('DB_PASSWORD'), `缺少 env 告警：${r.body}`);
+      assert(r.json.data.envWarning?.includes('envRefs') && r.json.data.envWarning.includes('envFile'), `告警未提示 envRefs/envFile：${r.body}`);
+      assert(!r.body.includes('ui-lifecycle-secret-value'), 'lifecycle 响应回显了敏感 env 值');
+      // 页面脚本必须消费返回的告警并展示在成功提示中。
+      assert(page.body.includes('lifecycleEnvWarning(r)'), '页面未渲染 lifecycle env 告警');
+      assert(page.body.includes('· 警告：${envWarning}'), '页面成功提示未拼接 env 告警');
+    } finally {
+      if (started) await get('/api/lifecycle?app=envwarn&op=stop', { method: 'POST', headers });
+    }
   });
 } finally {
   child.kill();

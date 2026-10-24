@@ -114,23 +114,59 @@ export function readEnvFile(file, cwd) {
 
 // 启动前一次性解析环境：envFile 值只存在于内存，envRefs 校验失败会列出全部缺失名称。
 // 优先级沿用既有语义：进程环境 < envFile < desc.env（env 仍覆盖同名宿主变量）。
+// Windows 环境变量名不区分大小写：展开成普通对象后必须按大小写不敏感查找/合并，
+// 否则宿主已设置但大小写不同的引用会被误报为 ENV_MISSING。
+const ENV_CASE_INSENSITIVE = process.platform === 'win32';
+
+function mergeEnvLayers(...layers) {
+  if (!ENV_CASE_INSENSITIVE) return Object.assign({}, ...layers);
+  const merged = {};
+  const keysByLower = new Map();
+  for (const layer of layers) {
+    for (const [name, value] of Object.entries(layer ?? {})) {
+      const lower = name.toLowerCase();
+      const previous = keysByLower.get(lower);
+      if (previous !== undefined) delete merged[previous];
+      keysByLower.set(lower, name);
+      merged[name] = value;
+    }
+  }
+  return merged;
+}
+
+function findEnvValue(env, name) {
+  if (Object.prototype.hasOwnProperty.call(env, name)) return { found: true, key: name, value: env[name] };
+  if (ENV_CASE_INSENSITIVE) {
+    const lower = name.toLowerCase();
+    for (const [key, value] of Object.entries(env)) {
+      if (key.toLowerCase() === lower) return { found: true, key, value };
+    }
+  }
+  return { found: false };
+}
+
 export function prepareLaunchEnv(app) {
+  const warnings = envSecretWarnings(app.env ?? {});
+  // 告警必须在 registry 写入/进程拉起等副作用之前输出；即使随后环境校验失败或
+  // 进程拉不起来，用户也已看到“改用 envRefs/envFile”的提示。
+  if (warnings.length) process.stderr.write(`[project-runner] 警告：${envWarningMessage(warnings)}\n`);
   const envRefs = Array.isArray(app.envRefs) ? app.envRefs : [];
   const fileEnv = app.envFile ? readEnvFile(app.envFile, app.cwd) : {};
-  const env = { ...process.env, ...fileEnv, ...(app.env ?? {}) };
-  const missing = envRefs.filter((name) => !Object.prototype.hasOwnProperty.call(env, name));
+  const env = mergeEnvLayers(process.env, fileEnv, app.env ?? {});
+  const missing = [];
+  const envResolved = [];
+  for (const name of envRefs) {
+    if (findEnvValue(env, name).found) envResolved.push(name);
+    else missing.push(name);
+  }
   if (missing.length) {
     throw conflictError(
       'ENV_MISSING',
-      `启动前环境校验失败：缺少 envRefs 变量：${missing.join(', ')}；请先设置这些环境变量，或用 desc.envFile 提供（envRefs 只记录名称，envFile 值与路径均不写入运行记录）`,
+      `启动前环境校验失败：缺少 envRefs 变量：${missing.join(', ')}；请先设置这些环境变量，或用 desc.envFile 提供（envRefs 只记录名称，envFile 值不写入运行记录）`,
       { missing },
     );
   }
-  return {
-    env,
-    envResolved: envRefs.filter((name) => Object.prototype.hasOwnProperty.call(env, name)),
-    warnings: envSecretWarnings(app.env ?? {}),
-  };
+  return { env, envResolved, warnings };
 }
 
 // status/UI 回显：敏感名一律 ***，非敏感值保持原有截断行为。

@@ -885,10 +885,23 @@ function runLifecycleSubprocess(home, op, ref, ack) {
       clearTimeout(timer);
       let j = null;
       try { j = JSON.parse(out); } catch { /* stdout 非 JSON：走通用错误 */ }
-      if (j?.ok === true) return resolve(j.data);
+      // prepareLaunchEnv 在任何启动副作用前把机密 env 告警写到 stderr；
+      // 成功响应已有结构化告警，失败时也把这一行（不含值）附到错误里，避免 UI 丢失。
+      const envWarningLine = String(err).split(/\r?\n/).find((line) => line.startsWith('[project-runner] 警告：'))?.trim() ?? null;
+      if (j?.ok === true) {
+        const data = j.data ?? {};
+        if (envWarningLine && !data.envWarning) {
+          data.envWarning = envWarningLine.replace(/^\[project-runner\]\s*/, '');
+        }
+        return resolve(data);
+      }
       const e2 = j?.error ?? {};
+      const baseMessage = e2.message || err.trim() || `manager ${op} 异常退出（code=${code}）`;
+      const message = envWarningLine && !baseMessage.includes(envWarningLine)
+        ? `${baseMessage}\n${envWarningLine}`
+        : baseMessage;
       const errObj = Object.assign(
-        new Error(e2.message || err.trim() || `manager ${op} 异常退出（code=${code}）`),
+        new Error(message),
         { code: e2.code ?? 'LIFECYCLE_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 5 ? code : 4 },
       );
       if (e2.detail !== undefined) errObj.detail = e2.detail;
