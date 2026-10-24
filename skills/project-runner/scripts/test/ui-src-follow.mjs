@@ -249,6 +249,24 @@ try {
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
 
+  await check('所有生命周期操作首次点击只进入确认态，二次点击才提交', async () => {
+    run(`globalThis.__lifecycleCalls = []; doLifecycle = (alias, op, extra = '') => { __lifecycleCalls.push({ alias, op, extra }); };`);
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);
+    const startBtn = () => [...elFor('detailOps').querySelectorAll('.op-btn')].find((b) => b.textContent === '启动' || b.textContent === '确认启动');
+    const clickBtn = (btn) => btn.dispatch('click', { target: btn, stopPropagation() {} });
+    assert.equal(startBtn()?.textContent, '启动', '普通启动初始应为未确认态');
+    clickBtn(startBtn());
+    assert.equal(run('__lifecycleCalls.length'), 0, '普通启动首次点击不应提交生命周期请求');
+    assert.equal(run('armedOp'), 'his:start:', '首次点击应进入确认态');
+    await poll(`[...document.querySelectorAll('.op-btn')].some((b) => b.textContent === '确认启动')`, (v) => v === true, 3000);
+    assert.equal(startBtn()?.textContent, '确认启动', '重绘后应显示确认启动');
+    clickBtn(startBtn());
+    assert.equal(run('__lifecycleCalls.length'), 1, '二次点击应提交一次生命周期请求');
+    assert.equal(run('__lifecycleCalls[0].alias'), 'his');
+    assert.equal(run('__lifecycleCalls[0].op'), 'start');
+    assert.equal(run('__lifecycleCalls[0].extra'), '');
+    run('disarmOp()');
+  });
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);

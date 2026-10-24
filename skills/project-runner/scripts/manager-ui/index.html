@@ -852,7 +852,7 @@ function renderDetail(d) {
     const makeOps = () => {
       const ops = el('span', 'op-group');
       const mk = (label, op, enabled, title, extra = '') => {
-        const needsConfirm = op !== 'start' || extra;
+        const needsConfirm = true; // 所有生命周期操作（含普通启动）都需二次点击确认
         const armed = armedOp === `${d.alias}:${op}:${extra}`;
         const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
         const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);

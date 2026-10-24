@@ -254,6 +254,33 @@ try {
     const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.appId}.json`), 'utf8'));
     assert.equal(rt.current.wrapperCleaned, true);
   });
+  await check('cleanup-wrapper 拒绝清理已 exec 成目标候选的 wrapper（Linux 映像变化）', async () => {
+    if (isWindows) skip('仅 Linux /bin/sh exec 语义');
+    if (!nodeRunId && skipped) skip('前置受管启动已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdexec', root: projCmd, entry: 'exec', mode: 'node',
+      command: 'sleep 5; exec node srv.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 8000,
+    }));
+    assert.equal(r.code, 3, r.text);
+    assert.equal(r.json.error.code, 'DISCOVERY_TIMEOUT');
+    const st = cli('status', 'cmdexec');
+    assert.equal(st.code, 0, st.text);
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${st.json.data.appId}.json`), 'utf8'));
+    const wrapperPid = rt.current.wrapperPid;
+    assert(Number.isInteger(wrapperPid) && wrapperPid > 0, '缺少 wrapperPid 证据');
+    strayPids.push(wrapperPid);
+    const before = psProc('capture', { id: wrapperPid });
+    assert.equal(before.result, 'ok', `exec 后的目标未存活：${JSON.stringify(before)}`);
+    assert.notEqual(String(before.image), String(rt.current.wrapperImage), 'wrapper 未发生 exec，场景不成立');
+    const c = cli('cleanup-wrapper', 'cmdexec');
+    assert.equal(c.code, 3, c.text);
+    assert.equal(c.json.error.code, 'IDENTITY_UNKNOWN');
+    const after = psProc('capture', { id: wrapperPid });
+    assert.equal(after.result, 'ok', `cleanup-wrapper 误杀了已 exec 的目标进程：${JSON.stringify(after)}`);
+    // 该 PID 已属目标候选，由人工核验后显式清理；测试里按采集身份自行收尾。
+    const cleaned = psProc('terminate', { id: wrapperPid, creationFileTime: after.creationFileTime, image: after.image });
+    assert(['terminated', 'exited', 'notfound', 'mismatch'].includes(cleaned.result), `目标清理失败：${JSON.stringify(cleaned)}`);
+  });
   await check('command 模式发现超时：DISCOVERY_TIMEOUT 留证 UNKNOWN', () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
@@ -477,7 +504,7 @@ try {
   });
 } finally {
   // 兜底：按当时仍在的后代 PID 清理，不只依赖 wrapper PID（wrapper 可能先死，#46）
-  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail']) {
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail', 'cmdexec']) {
     try { cli('stop', a, '--tree'); } catch { /* 忽略 */ }
   }
   const cleanupFailures = [];
