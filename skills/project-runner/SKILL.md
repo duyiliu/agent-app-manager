@@ -116,6 +116,7 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 ## 5. 就绪判定与热加载验证
 
 - 后台启动并将 stdout/stderr 重定向到上述日志文件，勿在前台长时间等待。
+- 受管 `start`/`start-new`/`restart` 可加 `--wait-ready [--ready-timeout <ms>]`（默认 60s）：启动前必须已配置 `readyLogPattern`/`readyUrl`，否则用法错误且不产生进程；进程 RUNNING 后同步轮询就绪，READY 才返回 0，超时返回退出码 6/`READY_TIMEOUT` 且进程保持 RUNNING，进程提前退出立即失败。等待期从本批次日志起点增量扫描（上限 `logMaxBytes`），不会漏掉超出 5000 行尾部窗口的早期标记。
 - `mode: jrebel` 时先确认日志出现 JRebel banner/监控目录；`mode: java`/`python`/`node`/`proc` 跳过该步。再确认应用自身就绪消息（Java 的 started 日志、vite 的 `Local: http://...`、uvicorn 的 `Application startup complete`、Django 的 `Starting development server at` 等，以项目实际输出为准）或项目明确的 readiness 接口，并核对目标端口监听。端口开放或通用 health 成功只说明进程存活，不足以证明目标业务功能生效。
 - 验证具体改动时，按用户要求调用业务接口或既有场景；不擅自执行全量测试、制造/清理业务数据。
 - `mode: jrebel` 下 Java 类变更查看 `Reloading class ...` 等日志；mapper XML 是否热加载取决于项目插件配置，查看 `Reloading SQL maps`。若未出现热加载日志，先检查产物同步和监控目录，不直接断言启动失败。`mode: java` 没有热加载，验证方式只能是重新编译并重启，重启前说明服务中断影响。

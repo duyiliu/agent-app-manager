@@ -8,18 +8,22 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION } from './constants.mjs';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
-import { usageError, notFoundError, conflictError } from './errors.mjs';
-import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
+import { usageError, notFoundError, conflictError, readinessTimeoutError } from './errors.mjs';
+import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES, RUN_LOG_MAX_BYTES } from './desc.mjs';
 import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
 import { readTailLines, MAX_LOG_LINES } from './logs.mjs';
+import { decodeText } from './decode.mjs';
 import { planPrune, applyPrune } from './prune.mjs';
 import { bootId } from './proc-linux.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
+const READY_WAIT_DEFAULT_MS = 60000;
+const READY_WAIT_MAX_MS = 600000;
+const READY_POLL_MS = 250;
 
 // ---------- 简单选项解析 ----------
 
@@ -62,10 +66,15 @@ export function parseNamed(args, spec) {
 }
 
 export async function cmdStartNew(ctx) {
-  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value', '--force': 'flag' });
+  const opts = parseNamed(ctx.rest, {
+    '--desc': 'value', '--ack-unresolved': 'value', '--force': 'flag',
+    '--wait-ready': 'flag', '--ready-timeout': 'value',
+  });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const readyOpts = parseReadyOptions(opts);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
+  requireReadyEvidence(desc, readyOpts.waitReady); // 启动前拒绝，不产生任何进程或登记副作用
   const appId = computeAppId(desc.root, desc.entry);
   return withLockAsync(ctx.home, appId, 'start-new', async () => {
     // 已有受管实例在运行则拒绝（并发/重复启动只允许一份实例）
@@ -86,14 +95,19 @@ export async function cmdStartNew(ctx) {
       return a;
     });
     const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
+    const readiness = readyOpts.waitReady
+      ? await waitForReady(ctx.home, app, cur, readyOpts.timeoutMs)
+      : null;
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       ...(cur.wrapperPid ? { wrapperPid: cur.wrapperPid } : {}),
-      readinessUntested: true, logPaths: cur.logPaths,
+      ...startReadyFields(readiness), logPaths: cur.logPaths,
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
-      note: '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
+      note: readiness
+        ? '已同步等待就绪：进程 RUNNING 且已有 READY 证据；证据不是业务功能验收'
+        : '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
     };
   });
 }
@@ -350,9 +364,11 @@ const readyRe = (pattern) => {
   return r;
 };
 
-async function readinessCheck(home, app, cur) {
-  const evidence = [];
-  if (app.readyLogPattern && cur?.runId) {
+async function readinessCheck(home, app, cur, opts = {}) {
+  const evidence = [...(opts.logEvidence ?? [])];
+  // opts.logEvidence 由等待器提供时表示已从批次日志起点增量扫描，避免 status 的
+  // 5000 行尾部窗口漏掉早期标记；undefined 表示 status --ready 的既有尾读语义。
+  if (opts.logEvidence === undefined && app.readyLogPattern && cur?.runId) {
     const re = readyRe(app.readyLogPattern);
     const dir = path.join(home, 'logs', app.appId);
     for (const stream of ['stdout', 'stderr']) {
@@ -379,6 +395,126 @@ async function readinessCheck(home, app, cur) {
   const configured = Boolean(app.readyLogPattern || app.readyUrl);
   const state = !configured ? 'UNTESTED' : evidence.some((e) => !e.failed) ? 'READY' : 'NOT_READY';
   return { state, configured, evidence };
+}
+
+// UTF-8 尾部可能被写入切分：只解码完整前缀，残余字节留到下次与新增内容一起解码。
+// 非法 UTF-8（如 GBK）返回整个缓冲区，交给 decodeText 的既有回退策略。
+function completeUtf8Prefix(buf) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  try { decoder.decode(buf); return buf.length; } catch { /* 可能只是尾部不完整 */ }
+  for (let cut = 1; cut <= 3 && cut <= buf.length; cut++) {
+    try {
+      decoder.decode(buf.subarray(0, buf.length - cut));
+      return buf.length - cut;
+    } catch { /* 继续尝试更短的尾部 */ }
+  }
+  return buf.length;
+}
+
+// 等待期日志扫描器：从本批次日志起点按字节增量读取（上限 logMaxBytes），
+// 跨 chunk 保留未完成行/未完成 UTF-8 字节，避免早期就绪标记落在 status 的
+// 5000 行窗口之外。
+function createReadyLogScanner(home, app, cur) {
+  const streams = ['stdout', 'stderr'];
+  const maxBytes = app.logMaxBytes ?? RUN_LOG_MAX_BYTES;
+  const re = app.readyLogPattern ? readyRe(app.readyLogPattern) : null;
+  const dir = path.join(home, 'logs', app.appId);
+  const state = new Map(streams.map((stream) => [stream, {
+    offset: 0, pending: '', carry: Buffer.alloc(0), matched: null,
+  }]));
+  return () => {
+    if (!re || !cur?.runId) return [];
+    const evidence = [];
+    for (const stream of streams) {
+      const st = state.get(stream);
+      if (st.matched) { evidence.push(st.matched); continue; }
+      const file = path.join(dir, `${cur.runId}.${stream}.log`);
+      let size;
+      try { size = fs.statSync(file).size; } catch { continue; }
+      // 轮转/截断后文件变小：从头重扫新文件，不留下跨轮转的偏移。
+      if (size < st.offset) { st.offset = 0; st.pending = ''; st.carry = Buffer.alloc(0); }
+      const end = Math.min(size, maxBytes);
+      let text = '';
+      if (end > st.offset) {
+        try {
+          const len = end - st.offset;
+          const buf = Buffer.alloc(len);
+          const fd = fs.openSync(file, 'r');
+          try { fs.readSync(fd, buf, 0, len, st.offset); } finally { fs.closeSync(fd); }
+          st.offset = end;
+          const combined = st.carry.length ? Buffer.concat([st.carry, buf]) : buf;
+          const cut = completeUtf8Prefix(combined);
+          text = decodeText(combined.subarray(0, cut));
+          st.carry = combined.subarray(cut);
+        } catch { continue; }
+      }
+      if (!text && !st.pending) continue;
+      const parts = `${st.pending}${text}`.split(/\r?\n/);
+      st.pending = parts.pop() ?? '';
+      const hit = parts.find((l) => re.test(l)) ?? (st.pending && re.test(st.pending) ? st.pending : null);
+      if (hit != null) {
+        st.matched = { kind: 'logPattern', stream, matched: hit.slice(0, 200) };
+        evidence.push(st.matched);
+      }
+    }
+    return evidence;
+  };
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// --wait-ready 参数：默认 60s；--ready-timeout 只在等待模式下有意义。
+function parseReadyOptions(opts) {
+  const waitReady = opts.has('--wait-ready');
+  if (!waitReady && opts.has('--ready-timeout')) {
+    throw usageError('--ready-timeout 需要与 --wait-ready 一起使用');
+  }
+  let timeoutMs = READY_WAIT_DEFAULT_MS;
+  if (opts.has('--ready-timeout')) {
+    const n = Number(opts.get('--ready-timeout'));
+    if (!Number.isInteger(n) || n < 0 || n > READY_WAIT_MAX_MS) {
+      throw usageError(`--ready-timeout 需要 0-${READY_WAIT_MAX_MS} 的毫秒数`);
+    }
+    timeoutMs = n;
+  }
+  return { waitReady, timeoutMs };
+}
+
+function requireReadyEvidence(app, waitReady) {
+  if (waitReady && !app.readyLogPattern && !app.readyUrl) {
+    throw usageError('--wait-ready 需要先为应用配置 readyLogPattern 或 readyUrl（否则无法判定业务就绪）');
+  }
+}
+
+// 同步等待就绪：进程提前退出立即失败；超时抛出 READY_TIMEOUT（退出码 6）并保持
+// runtime 的 RUNNING 记录不变，调用方可继续用 status --ready 核验。
+async function waitForReady(home, app, cur, timeoutMs) {
+  const startedAt = Date.now();
+  const scanLog = createReadyLogScanner(home, app, cur);
+  let last = null;
+  for (;;) {
+    const v = verifyRun(cur);
+    if (!v.alive) {
+      throw conflictError('PROCESS_EXITED', `${app.alias} 在就绪前已退出（runId=${cur.runId}），停止等待`, {
+        runId: cur.runId, pid: cur.pid, status: 'STOPPED', timeoutMs, readiness: last,
+      });
+    }
+    last = await readinessCheck(home, app, cur, { logEvidence: scanLog() });
+    const waitedMs = Date.now() - startedAt;
+    if (last.state === 'READY') return { ...last, waitedMs };
+    if (waitedMs >= timeoutMs) {
+      throw readinessTimeoutError(`${app.alias} 在 ${timeoutMs}ms 内未就绪（runId=${cur.runId}）；进程仍 RUNNING，可用 status --ready 继续核验`, {
+        runId: cur.runId, pid: cur.pid, status: 'RUNNING', timeoutMs, waitedMs, readiness: last,
+      });
+    }
+    await delay(Math.max(1, Math.min(READY_POLL_MS, timeoutMs - waitedMs)));
+  }
+}
+
+function startReadyFields(readiness) {
+  return readiness
+    ? { readinessUntested: false, readiness }
+    : { readinessUntested: true };
 }
 
 export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false) {
@@ -428,8 +564,12 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
 export async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value', '--force': 'flag' });
+  const opts = parseNamed(ctx.rest.slice(1), {
+    '--ack-unresolved': 'value', '--force': 'flag',
+    '--wait-ready': 'flag', '--ready-timeout': 'value',
+  });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const readyOpts = parseReadyOptions(opts);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
@@ -438,6 +578,7 @@ export async function cmdStart(ctx, ref) {
     if (!app.exe && !app.command) {
       throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置；需 Skill 重新分析该项目并走 start-new`);
     }
+    requireReadyEvidence(app, readyOpts.waitReady); // 先于任何写操作/启动
     // 结构性检查：路径/产物失效只报该应用，不做全盘扫描（AC02）
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = app.command ? null : resolveExe(app.exe, cwd);
@@ -459,13 +600,18 @@ export async function cmdStart(ctx, ref) {
       return a;
     });
     const cur = await launchManaged(ctx.home, appId, appForLaunch, { abandonRunId: abandon?.runId ?? null });
+    const readiness = readyOpts.waitReady
+      ? await waitForReady(ctx.home, appForLaunch, cur, readyOpts.timeoutMs)
+      : null;
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
-      readinessUntested: true, logPaths: cur.logPaths,
+      ...startReadyFields(readiness), logPaths: cur.logPaths,
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
-      note: '复用已保存启动配置；进程存活不等于业务就绪',
+      note: readiness
+        ? '复用已保存启动配置并同步等待就绪；READY 证据不是业务功能验收'
+        : '复用已保存启动配置；进程存活不等于业务就绪',
     };
   });
 }
@@ -661,14 +807,19 @@ export function cmdStop(ctx, ref) {
 export async function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
   // --tree/--grace 透传给停旧实例那一步：等价于 stop --tree/--grace + start 的组合。
-  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag', '--tree': 'flag', '--grace': 'value' });
+  const opts = parseNamed(ctx.rest.slice(1), {
+    '--force': 'flag', '--tree': 'flag', '--grace': 'value',
+    '--wait-ready': 'flag', '--ready-timeout': 'value',
+  });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const graceMs = parseGraceMs(opts);
+  const readyOpts = parseReadyOptions(opts);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLockAsync(ctx.home, appId, 'restart', async () => {
     const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
+    requireReadyEvidence(app, readyOpts.waitReady); // 必须先校验：否则会先停旧实例再报用法错误
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
     const cwd = realpathOrConflict('cwd', app.cwd);
@@ -685,10 +836,19 @@ export async function cmdRestart(ctx, ref) {
       return a;
     });
     const cur = await launchManaged(ctx.home, appId, appForLaunch);
+    const readiness = readyOpts.waitReady
+      ? await waitForReady(ctx.home, appForLaunch, cur, readyOpts.timeoutMs)
+      : null;
     return {
       appId, alias: app.alias, stop: stopResult,
-      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths, ...(portEvidence ? { portEvidence } : {}) },
-      note: '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
+      start: {
+        runId: cur.runId, pid: cur.pid, status: 'RUNNING',
+        ...startReadyFields(readiness), logPaths: cur.logPaths,
+        ...(portEvidence ? { portEvidence } : {}),
+      },
+      note: readiness
+        ? '已确认旧实例退出后启动新实例并同步等待就绪；READY 证据不是业务功能验收'
+        : '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
     };
   });
 }
@@ -860,7 +1020,7 @@ function probeManagerUi(port) {
 }
 
 // 生命周期操作经 manager.mjs --json 子进程执行：stdout 是同一数据契约的 JSON。
-// 子进程退出码即 ManagerError exitCode（1-5），重构错误后 errorStatus 映射不变；
+// 子进程退出码即 ManagerError exitCode（1-6），重构错误后 errorStatus 映射不变；
 // 180s 超时兜底（CLI 前端 150s abort 通常先到），超时强杀子进程——中断的
 // start/stop 按既有语义留下 STARTING/UNKNOWN 未结证据，不静默伪造结果。
 function runLifecycleSubprocess(home, op, ref, ack) {
@@ -888,7 +1048,7 @@ function runLifecycleSubprocess(home, op, ref, ack) {
       const e2 = j?.error ?? {};
       const errObj = Object.assign(
         new Error(e2.message || err.trim() || `manager ${op} 异常退出（code=${code}）`),
-        { code: e2.code ?? 'LIFECYCLE_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 5 ? code : 4 },
+        { code: e2.code ?? 'LIFECYCLE_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 6 ? code : 4 },
       );
       if (e2.detail !== undefined) errObj.detail = e2.detail;
       reject(errObj);

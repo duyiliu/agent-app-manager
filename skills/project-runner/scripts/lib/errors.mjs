@@ -6,3 +6,4 @@ export const notFoundError = (m, d) => new ManagerError('NOT_FOUND', m, EXIT.NOT
 export const conflictError = (code, m, d) => new ManagerError(code, m, EXIT.CONFLICT, d);
 export const dependencyError = (m, d) => new ManagerError('PWSH_MISSING', m, EXIT.DEPENDENCY, d);
 export const dataError = (code, m, d) => new ManagerError(code, m, EXIT.DATA, d);
+export const readinessTimeoutError = (m, d) => new ManagerError('READY_TIMEOUT', m, EXIT.READY_TIMEOUT, d);
