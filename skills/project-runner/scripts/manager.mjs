@@ -90,6 +90,97 @@ function emitErr(ctx, command, e) {
   }
 }
 
+// ---------- watch：周期采样 status/list，JSON 模式输出 NDJSON 帧流 ----------
+
+const WATCH_DEFAULT_INTERVAL_MS = 2000;
+const WATCH_MIN_INTERVAL_MS = 500;
+const WATCH_MAX_INTERVAL_MS = 60000;
+
+// --watch [--interval <ms>]：仅 watch 模式允许 --interval；间隔限制在 500-60000ms，
+// 避免每帧 pwsh/proc 探测过密。未带 --watch 返回 null，保持原有单次输出现状。
+function parseWatchInterval(opts) {
+  if (!opts.has('--watch')) {
+    if (opts.has('--interval')) throw usageError('--interval 需要与 --watch 一起使用');
+    return null;
+  }
+  if (!opts.has('--interval')) return WATCH_DEFAULT_INTERVAL_MS;
+  const raw = opts.get('--interval');
+  const interval = Number(raw);
+  if (!Number.isInteger(interval) || interval < WATCH_MIN_INTERVAL_MS || interval > WATCH_MAX_INTERVAL_MS) {
+    throw usageError(`--interval 需要 ${WATCH_MIN_INTERVAL_MS}-${WATCH_MAX_INTERVAL_MS} 的整数（毫秒），当前：${raw}`);
+  }
+  return interval;
+}
+
+// 常驻循环由本进程持有：收到 SIGINT 或 stdout 管道断开时只清理定时器与监听器后正常退出。
+// status/list 本身不持有应用锁；status 的退出落账在锁内同步完成，不会遗留半把锁。
+async function runWatch(ctx, command, interval, firstData, produce) {
+  const json = ctx.json;
+  const tty = Boolean(process.stdout.isTTY);
+  const renderFrame = (data) => {
+    if (json) {
+      // NDJSON：一行一帧，不 pretty-print，便于 jq -c / while read 逐行消费
+      process.stdout.write(`${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: true, command, data })}\n`);
+      return;
+    }
+    if (tty) process.stdout.write('\u001b[2J\u001b[H'); // 清屏并把光标移到左上角重绘
+    process.stdout.write(`${renderHuman(command, data)}\n`);
+  };
+
+  let stopped = false;
+  let timer = null;
+  let resolveDone;
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+  const stop = (code) => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) { clearTimeout(timer); timer = null; }
+    process.removeListener('SIGINT', onSigint);
+    resolveDone(code);
+  };
+  // Ctrl+C / 下游断管都立即结束本进程；watch 未持有应用锁，无需额外释放。
+  // stdout 的 error 监听保留到进程退出，避免同一管道再次报错时成为未处理事件。
+  const onSigint = () => { stop(EXIT.OK); process.exit(EXIT.OK); };
+  const onStdoutError = (err) => {
+    // 下游关闭（如 | head）时 Node 写 stdout 报 EPIPE；视作消费方主动结束，干净退出。
+    const code = err?.code === 'EPIPE' || err?.code === 'ERR_STREAM_DESTROYED' ? EXIT.OK : EXIT.DATA;
+    stop(code);
+    process.exit(code);
+  };
+  process.on('SIGINT', onSigint);
+  process.stdout.on('error', onStdoutError);
+
+  if (!json && !tty) process.stdout.write(`[watch] 非 TTY：逐帧输出（interval=${interval}ms，Ctrl+C 退出）\n`);
+
+  const tick = async () => {
+    if (stopped) return;
+    let data;
+    try {
+      data = await produce();
+    } catch (e) {
+      if (stopped) return;
+      // 中途数据损坏/目标消失：JSON 模式仍保持一行一帧的错误信封，避免污染 NDJSON；
+      // 错误是终止性的，输出后退出，下一帧不再继续。
+      if (json) {
+        const error = { code: e.code ?? 'UNKNOWN', message: e.message };
+        if (e.detail !== undefined) error.detail = e.detail;
+        process.stdout.write(`${JSON.stringify({ schemaVersion: SCHEMA_VERSION, ok: false, command, error })}\n`);
+      } else {
+        process.stderr.write(`[watch] 帧失败[${e.code ?? 'UNKNOWN'}] ${e.message}\n`);
+      }
+      stop(e.exitCode ?? EXIT.DATA);
+      return;
+    }
+    if (stopped) return;
+    renderFrame(data);
+    if (!stopped) timer = setTimeout(tick, interval);
+  };
+
+  renderFrame(firstData); // 立即给出首帧，不等待一个 interval
+  if (!stopped) timer = setTimeout(tick, interval);
+  process.exitCode = await done;
+}
+
 function renderHuman(command, data) {
   switch (command) {
     case 'version':
@@ -198,9 +289,10 @@ function usageText() {
     '',
     '命令：',
     '  version                           显示 manager 版本号（--version/-v 同效）',
-    '  list                              列出已登记应用与实时状态',
-    '  status <alias|appId> [--probe] [--ready]   单应用详情；--probe 检测本机 TCP 监听，',
-    '       --ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据',
+    '  list [--watch [--interval <ms>]]       列出已登记应用与实时状态；--watch 周期输出全应用快照',
+    '  status <alias|appId> [--probe] [--ready] [--watch [--interval <ms>]]   单应用详情；--probe 检测本机 TCP 监听，',
+    '       --ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；--watch 周期采样，',
+    '       --json 时为 NDJSON（每行一帧），人类模式 TTY 清屏重绘、非 TTY 逐帧输出',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
     '  doctor [--json]                    只读自检（不修复）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
@@ -278,11 +370,28 @@ async function main() {
     }
     switch (command) {
       case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
-      case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
-      case 'status': {
-        const opts = parseNamed(ctx.rest.slice(1), { '--probe': 'flag', '--ready': 'flag' });
+      case 'list': {
+        const opts = parseNamed(ctx.rest, { '--watch': 'flag', '--interval': 'value' });
         if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
-        data = await cmdStatus(ctx, ctx.rest[0], opts.has('--probe'), opts.has('--ready'));
+        const interval = parseWatchInterval(opts);
+        if (interval != null) {
+          await runWatch(ctx, command, interval, cmdList(ctx), () => cmdList(ctx));
+          return;
+        }
+        data = cmdList(ctx);
+        break;
+      }
+      case 'status': {
+        const opts = parseNamed(ctx.rest.slice(1), { '--probe': 'flag', '--ready': 'flag', '--watch': 'flag', '--interval': 'value' });
+        if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+        const interval = parseWatchInterval(opts);
+        const read = () => cmdStatus(ctx, ctx.rest[0], opts.has('--probe'), opts.has('--ready'));
+        if (interval != null) {
+          const first = await read();
+          await runWatch(ctx, command, interval, first, read);
+          return;
+        }
+        data = await read();
         break;
       }
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;

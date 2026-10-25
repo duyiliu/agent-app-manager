@@ -6,7 +6,7 @@
 
 ```bash
 node "<安装目录>/scripts/manager.mjs" [--home <隔离数据目录>] [--json] <命令>
-# list | status <别名|appId> [--probe] [--ready] | start <别名|appId> [--ack-unresolved <runId>] | stop <别名|appId> [--tree] [--grace <ms>] | restart <别名|appId> [--force] [--tree] [--grace <ms>]
+# list [--watch [--interval <ms>]] | status <别名|appId> [--probe] [--ready] [--watch [--interval <ms>]] | start <别名|appId> [--ack-unresolved <runId>] | stop <别名|appId> [--tree] [--grace <ms>] | restart <别名|appId> [--force] [--tree] [--grace <ms>]
 # remove <别名|appId> [--ack-unresolved <runId>]　移除登记（须无存活受管实例；只删注册表条目，运行记录与日志证据保留）
 # prune [--dry-run] [--apply]　回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run，--apply 才删除）
 # logs <别名|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow] [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]
@@ -31,6 +31,7 @@ Agent 使用规程：
    - 当前没有 `STARTING`/`UNKNOWN` 未结记录时带 `--ack-unresolved` → `ACK_MISMATCH`（避免误用过期 runId）。
    成功启动的输出会带 `abandonedRunId`/`abandonedReason`，需向用户说明“旧账已被显式放弃、证据保留在 prevRuns”。
 5. **状态解读**：`RUNNING`=进程存活（不等于业务就绪）；`STOPPED` 有退出证据；`STARTING`=启动进行中；`UNKNOWN`=中断/身份不可核验/非受管记录。`STARTING`/`UNKNOWN` 的受管记录属于未结记录，重启受 4.1/4.2 约束。PID/端口仅有证据才填写；JRebel 是否验证、业务是否就绪与本状态分开表述，不互相冒充。
+5.1 **周期监控（watch）**：`status <ref> --watch [--interval <ms>]` 与 `list --watch [--interval <ms>]` 按间隔重复采样（默认 2000ms，允许 500-60000ms 的整数，越界为 usageError）。人类模式在 TTY 清屏重绘；非 TTY 退化为逐帧输出并在首行注明。`--json` 模式输出 NDJSON：每行一帧 `{ schemaVersion, ok, command, data }`，可直接接 `jq -c` 或 `while read` 做条件轮询；`--probe`/`--ready` 的证据随每帧输出。Ctrl+C 或 stdout 管道断开时退出，不持有应用锁、不残留锁文件；无 `--watch` 时输出与单次命令完全一致。
 6. **数据与安全**：注册表/运行记录在 `~/.project-runner/`（`registry.json`、`runtime/`、`logs/`、`locks/`），不进 Git、不进业务项目；损坏或不兼容版本会以退出码 5 拒绝操作并保留原件——此时报告用户人工处置，不要删文件重建。受管日志按启动批次（runId）保存在数据目录；项目脚本自己写的 `.tmp` 日志保持原路径原样。日志入口统一为 `manager ui`（网页，含日志源与文件树）与 `manager logs`（CLI，`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析）。注册表不落 Token/密码/明文命令行；日志内容可能含敏感信息，外发前按既有规则检查。
 6.1 **移除登记（remove）**：应用不再需要时用 `remove <别名|appId>` 从注册表移除。仅允许无存活受管实例时移除：current 为 RUNNING 且核验存活一律拒绝（退出码 3，`INSTANCE_RUNNING`，先 `stop` 再 `remove`）；STARTING/UNKNOWN 未结记录默认拒绝（`UNRESOLVED_RUN`），人工核验已退出后用 `--ack-unresolved <runId>` 显式放弃（规则同 4.2）。remove 只删注册表条目，`runtime/<appId>.json` 与 `logs/<appId>/` 证据一律保留；成功后 `list` 不再显示该应用，`status`/`logs` 按“未登记”报 NOT_FOUND（证据文件仍在数据目录，可人工查看）。不要用删 registry.json/runtime 文件的方式“移除”。
 6.2 **残留回收（prune）**：`prune [--dry-run] [--apply]` 回收三类残留——`logs/<appId>/` 超保留期历史批次日志（保留 current 与 prevRuns（≤20，PREV_RUNS_KEEP）引用的 runId，其余回收）、`locks/*.lock.stale-*` 死锁回收残留、数据目录内 `.tmp-<pid>-<hex>` 原子写孤儿临时文件。**默认 dry-run** 只打印将删内容，确认后加 `--apply` 才真正删除；绝不删 current 运行日志与 runtime/registry 证据，绝不触碰数据目录之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝（退出码 5），不删任何文件。逐应用在应用锁内判定，锁忙/损坏或缺 pwsh 时跳过该应用并注明；不要在 prune 之外手工批量删 `logs/` 下的文件。

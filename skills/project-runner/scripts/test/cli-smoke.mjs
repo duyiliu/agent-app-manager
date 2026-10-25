@@ -121,6 +121,47 @@ const run = (args) => new Promise((res) => {
 });
 const registryOnDisk = () => JSON.parse(fs.readFileSync(path.join(home, 'registry.json'), 'utf8'));
 
+// watch 常驻输出收集器：凑齐条件后主动关闭读端（制造 EPIPE）或发送 SIGINT，
+// 再等待子进程退出，验证退出码与是否有残留监听/锁。
+const watchCollect = (args, { human = false, interrupt = false, until, timeoutMs = 20000 } = {}) => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [MANAGER, '--home', home, ...(human ? [] : ['--json']), ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let buf = '';
+  let stderr = '';
+  let closing = false;
+  const lines = [];
+  const timer = setTimeout(() => {
+    try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+    reject(new Error(`watch 未在 ${timeoutMs}ms 内达到条件或退出：\nstdout=${lines.join('\n')}\nstderr=${stderr}`));
+  }, timeoutMs);
+  child.stderr.on('data', (d) => { stderr += d; });
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (line.trim()) lines.push(line);
+    }
+    if (closing || !until(lines, buf)) return;
+    closing = true;
+    if (interrupt) {
+      try { child.kill('SIGINT'); } catch { /* 已退出 */ }
+    } else {
+      // 关闭下游读端：下一次写 stdout 必须触发 EPIPE 并让 watch 干净退出
+      child.stdout.removeAllListeners('data');
+      child.stdout.destroy();
+    }
+  });
+  child.on('error', (e) => { clearTimeout(timer); reject(e); });
+  child.on('exit', (code, signal) => {
+    clearTimeout(timer);
+    resolve({ code, signal, lines, stderr });
+  });
+});
+
 let failed = 0;
 const check = async (name, fn) => {
   try { await fn(); console.log(`  ok  ${name}`); }
@@ -198,6 +239,75 @@ await check('detect 空目录返回空数组和建议，不报错', async () => 
 await check('detect 缺 root 使用参数错误契约', async () => {
   assert.equal((await run(['detect', '--json'])).code, 1);
 });
+
+// ---------- status/list --watch ----------
+
+await check('--watch --interval 越界/非整数、--interval 缺 --watch 均为 usageError', async () => {
+  for (const args of [
+    ['status', 'ok', '--watch', '--interval', '100'],
+    ['status', 'ok', '--watch', '--interval', '499'],
+    ['status', 'ok', '--watch', '--interval', '60001'],
+    ['status', 'ok', '--watch', '--interval', '500.5'],
+    ['list', '--watch', '--interval', '0'],
+    ['status', 'ok', '--interval', '1000'],
+  ]) {
+    const r = await run([...args, '--json']);
+    assert.equal(r.code, 1, `${args.join(' ')} 应为退出码 1：${r.text}`);
+    assert.equal(r.json.error.code, 'USAGE', `${args.join(' ')} 错误码`);
+  }
+});
+
+await check('status --watch --json 输出 NDJSON 帧流，--probe/--ready 每帧带证据，管道断开干净退出', async () => {
+  const w = await watchCollect(['status', 'ok', '--watch', '--interval', '500', '--probe', '--ready'], {
+    until: (lines) => lines.length >= 2,
+  });
+  assert.equal(w.code, 0, `管道断开应退出码 0：${w.stderr}`);
+  assert.equal(w.signal, null);
+  const frames = w.lines.slice(0, 2).map((line) => JSON.parse(line));
+  for (const f of frames) {
+    assert.equal(f.schemaVersion, 1);
+    assert.equal(f.ok, true);
+    assert.equal(f.command, 'status');
+    assert.equal(f.data.alias, 'ok');
+    assert.equal(Object.hasOwn(f.data, 'portListening'), true, '--probe 帧缺 portListening');
+    assert.equal(f.data.readiness.state, 'UNTESTED', '--ready 帧缺就绪证据');
+  }
+});
+
+await check('list --watch --json 输出全应用快照帧，管道断开干净退出', async () => {
+  const w = await watchCollect(['list', '--watch', '--interval', '500'], {
+    until: (lines) => lines.length >= 2,
+  });
+  assert.equal(w.code, 0, `管道断开应退出码 0：${w.stderr}`);
+  const frames = w.lines.slice(0, 2).map((line) => JSON.parse(line));
+  for (const f of frames) {
+    assert.equal(f.ok, true);
+    assert.equal(f.command, 'list');
+    assert(f.data.apps.some((a) => a.alias === 'ok'), 'list 帧缺全应用快照');
+  }
+});
+
+await check('status --watch 人类非 TTY 模式逐帧输出并注明', async () => {
+  const w = await watchCollect(['status', 'ok', '--watch', '--interval', '500'], {
+    human: true,
+    until: (lines) => lines[0]?.includes('非 TTY') && lines.some((l) => l.includes('status=STOPPED')),
+  });
+  assert.equal(w.code, 0, `管道断开应退出码 0：${w.stderr}`);
+  assert(w.lines[0].includes('逐帧输出'), w.lines[0]);
+});
+
+if (!isWindows) {
+  await check('status --watch 收到 SIGINT 干净退出且不残留锁', async () => {
+    const locksBefore = fs.readdirSync(path.join(home, 'locks')).sort();
+    const w = await watchCollect(['status', 'ok', '--watch', '--interval', '500'], {
+      interrupt: true,
+      until: (lines) => lines.length >= 1,
+    });
+    assert.equal(w.code, 0, `SIGINT 应退出码 0：${w.stderr}`);
+    assert.equal(w.signal, null);
+    assert.deepEqual(fs.readdirSync(path.join(home, 'locks')).sort(), locksBefore, 'SIGINT 后不应新增锁');
+  });
+}
 
 // ---------- logs 统一日志源 ----------
 
