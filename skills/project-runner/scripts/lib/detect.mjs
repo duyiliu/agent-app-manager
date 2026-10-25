@@ -69,7 +69,11 @@ export function detectProjects(root) {
       const abs = path.join(dir, ...parts);
       try {
         if (!fs.statSync(abs).isFile()) continue;
-        return { rel: path.relative(dir, abs), display: parts.join('/') };
+        // Linux venv 的 bin/python 常是指向 python3.12 等版本化解释器的符号链接；
+        // 进程探针按 /proc/<pid>/exe 基名精确匹配，expectedImage 必须用真实映像名。
+        let image = path.basename(abs);
+        try { image = path.basename(fs.realpathSync.native(abs)); } catch { /* 保留入口基名 */ }
+        return { rel: path.relative(dir, abs), display: parts.join('/'), image };
       } catch { /* 没有该 venv 候选 */ }
     }
     return null;
@@ -81,9 +85,14 @@ export function detectProjects(root) {
       : { command: pythonExec, venv: null };
   };
   const pythonExpectedImage = (venv) => (venv
-    ? path.basename(venv.rel)
+    ? venv.image
     : `${pythonExec}${process.platform === 'win32' ? exeSuffix : ''}`);
   const projectRootFor = (dir) => path.resolve(absoluteRoot, dir === '.' ? '' : dir);
+  // 端口必须是 manager desc 可接受的 1–65535；越界值（0、65536、99999）不采信。
+  const parsePort = (raw) => {
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null;
+  };
 
   // expectedPort 推断：从常见配置文件读端口，并标注证据出处（不猜端口）。
   const inferPort = (dir) => {
@@ -92,17 +101,20 @@ export function detectProjects(root) {
     const envTexts = envNames.map((name) => ({ name, text: read(name) }));
     // .env.local 通常覆盖 .env；再退到常见开发环境文件，仍只在有显式 PORT 时采用。
     for (const { name, text } of envTexts) {
-      const m = /^(?:export\s+)?(?:PORT|SERVER_PORT)\s*=\s*["']?(\d{2,5})["']?\s*$/m.exec(text);
-      if (m) return { expectedPort: Number(m[1]), source: `${name}:PORT` };
+      const m = /^(?:export\s+)?(?:PORT|SERVER_PORT)\s*=\s*["']?(\d+)["']?\s*$/m.exec(text);
+      const port = m ? parsePort(m[1]) : null;
+      if (port !== null) return { expectedPort: port, source: `${name}:PORT` };
     }
     for (const cfg of ['vite.config.ts', 'vite.config.js', 'vite.config.mts', 'vite.config.mjs']) {
       const text = read(cfg);
       // 先限定 server 段；裸 port: 也可能命中 preview.port（预览端口 ≠ dev 端口），
       // 命中但不在 server 段时标注歧义，由人工核对而非静默采信。
-      const mServer = /server\s*:[\s\S]{0,300}?\bport\s*:\s*(\d{2,5})/.exec(text);
-      if (mServer) return { expectedPort: Number(mServer[1]), source: `${cfg}:server.port` };
-      const mAny = /\bport\s*:\s*(\d{2,5})/.exec(text);
-      if (mAny) return { expectedPort: Number(mAny[1]), source: `${cfg}:port（未在 server 段，可能是 preview.port，请人工核对）` };
+      const mServer = /server\s*:[\s\S]{0,300}?\bport\s*:\s*(\d+)/.exec(text);
+      const serverPort = mServer ? parsePort(mServer[1]) : null;
+      if (serverPort !== null) return { expectedPort: serverPort, source: `${cfg}:server.port` };
+      const mAny = /\bport\s*:\s*(\d+)/.exec(text);
+      const anyPort = mAny ? parsePort(mAny[1]) : null;
+      if (anyPort !== null) return { expectedPort: anyPort, source: `${cfg}:port（未在 server 段，可能是 preview.port，请人工核对）` };
     }
 
     // Spring：application.properties / application-<profile>.properties / yml/yaml，
@@ -152,9 +164,10 @@ export function detectProjects(root) {
     const portOf = (item) => {
       const text = read(item.rel);
       const m = item.ext === 'properties'
-        ? /^\s*server\.port\s*=\s*(\d{2,5})\s*$/m.exec(text)
-        : /server\s*:[\s\S]{0,200}?port\s*:\s*(\d{2,5})/.exec(text);
-      return m ? { expectedPort: Number(m[1]), source: `${item.rel}:server.port` } : null;
+        ? /^\s*server\.port\s*=\s*(\d+)\s*$/m.exec(text)
+        : /server\s*:[\s\S]{0,200}?port\s*:\s*(\d+)/.exec(text);
+      const port = m ? parsePort(m[1]) : null;
+      return port !== null ? { expectedPort: port, source: `${item.rel}:server.port` } : null;
     };
     // Spring 中后激活的 profile 覆盖先激活的；只查明确激活的 profile。
     for (let i = activeProfiles.length - 1; i >= 0; i--) {

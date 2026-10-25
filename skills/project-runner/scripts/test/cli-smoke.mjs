@@ -220,12 +220,14 @@ const phpNoPortRoot = path.join(detectMoreRoot, 'php-no-port-app');
 const phpPortRoot = path.join(detectMoreRoot, 'php-port-app');
 const springInactiveProfileRoot = path.join(detectMoreRoot, 'spring-inactive-profile-app');
 const springProfileOnlyRoot = path.join(detectMoreRoot, 'spring-profile-only-app');
+const invalidEnvPortRoots = ['0', '65536', '99999'].map((port) => path.join(detectMoreRoot, `port-env-${port}`));
+const invalidSpringPortRoots = ['0', '65536', '99999'].map((port) => path.join(detectMoreRoot, `port-spring-${port}`));
 const frameworkFixtures = [
   ['react-app', 'react-scripts', 'start'],
   ['svelte-app', '@sveltejs/kit', 'dev'],
   ['astro-app', 'astro', 'dev'],
 ];
-for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
+for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...invalidEnvPortRoots, ...invalidSpringPortRoots, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
 
 // pnpm + dev:*：脚本只在没有 dev/start/serve 时回退识别；.env.local 提供端口。
 w(path.join(devStarRoot, 'package.json'), JSON.stringify({ scripts: { 'dev:web': 'vite' }, devDependencies: { vite: '^6' }, packageManager: 'pnpm@9.0.0' }));
@@ -248,8 +250,15 @@ w(path.join(uvRoot, 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n'
 w(path.join(venvRoot, 'requirements.txt'), 'Flask==3.0\n');
 w(path.join(venvRoot, 'app.py'), 'app = None\n');
 const venvPython = isWindows ? path.join('.venv', 'Scripts', 'python.exe') : path.join('.venv', 'bin', 'python');
+const venvImage = isWindows ? 'python.exe' : 'python3.12';
 fs.mkdirSync(path.dirname(path.join(venvRoot, venvPython)), { recursive: true });
-w(path.join(venvRoot, venvPython), '');
+if (isWindows) {
+  w(path.join(venvRoot, venvPython), '');
+} else {
+  // Linux venv 的 python 常指向版本化解释器；expectedImage 必须解析到真实映像名。
+  w(path.join(venvRoot, path.dirname(venvPython), venvImage), '');
+  fs.symlinkSync(venvImage, path.join(venvRoot, venvPython));
+}
 // Go：go.mod + package main/func main 才给候选；嵌套 go.mod 归属内层模块。
 w(path.join(goRoot, 'go.mod'), 'module example.com/goapp\n\ngo 1.22\n');
 w(path.join(goRoot, 'main.go'), 'package main\n\nfunc main() {}\n');
@@ -275,6 +284,14 @@ w(path.join(springInactiveProfileRoot, 'src/main/resources/application-prod.yml'
 w(path.join(springProfileOnlyRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
 fs.mkdirSync(path.join(springProfileOnlyRoot, 'src/main/resources'), { recursive: true });
 w(path.join(springProfileOnlyRoot, 'src/main/resources/application-dev.yml'), 'server:\n  port: 9091\n');
+// 越界端口（0/65536/99999）不得进入 expectedPort 或证据。
+for (const [i, port] of ['0', '65536', '99999'].entries()) {
+  w(path.join(invalidEnvPortRoots[i], 'package.json'), JSON.stringify({ scripts: { dev: 'vite' }, devDependencies: { vite: '^6' } }));
+  w(path.join(invalidEnvPortRoots[i], '.env.local'), `PORT=${port}\n`);
+  w(path.join(invalidSpringPortRoots[i], 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
+  fs.mkdirSync(path.join(invalidSpringPortRoots[i], 'src/main/resources'), { recursive: true });
+  w(path.join(invalidSpringPortRoots[i], 'src/main/resources/application.properties'), `server.port=${port}\n`);
+}
 // Pipfile / setup.py 也是 Python 依赖证据。
 w(path.join(pipfileRoot, 'Pipfile'), '[packages]\ndjango = "*"\n');
 w(path.join(pipfileRoot, 'manage.py'), 'import django\n');
@@ -340,7 +357,7 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   const venv = inRoot(venvRoot);
   assert.equal(venv.length, 1);
   assert.equal(venv[0].desc.command, `${venvPython} -m flask --app app run`);
-  assert.equal(venv[0].desc.expectedImage, path.basename(venvPython));
+  assert.equal(venv[0].desc.expectedImage, venvImage, 'expectedImage 应解析 venv 符号链接到真实解释器映像名');
   assert(venv[0].evidence.rule.includes('interpreter:venv(.venv'));
 
   const go = inRoot(goRoot);
@@ -380,6 +397,19 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.equal(springProfileOnly.length, 1);
   assert.equal(springProfileOnly[0].desc.expectedPort, undefined, '仅有未激活 profile 时不得报告端口');
   assert(!springProfileOnly[0].evidence.rule.includes('application-dev.yml'), '未激活 profile 不得进入端口证据');
+
+  for (const dir of invalidEnvPortRoots) {
+    const found = inRoot(dir);
+    assert.equal(found.length, 1, `无效环境端口 fixture 应有候选：${dir}`);
+    assert.equal(found[0].desc.expectedPort, undefined, `越界环境端口不得输出：${dir}`);
+    assert(!found[0].evidence.rule.includes('port:'), `越界环境端口不得进入证据：${found[0].evidence.rule}`);
+  }
+  for (const dir of invalidSpringPortRoots) {
+    const found = inRoot(dir);
+    assert.equal(found.length, 1, `无效 Spring 端口 fixture 应有候选：${dir}`);
+    assert.equal(found[0].desc.expectedPort, undefined, `越界 Spring 端口不得输出：${dir}`);
+    assert(!found[0].evidence.rule.includes('port:'), `越界 Spring 端口不得进入证据：${found[0].evidence.rule}`);
+  }
 
   const pipfile = inRoot(pipfileRoot);
   assert.equal(pipfile.length, 1);
