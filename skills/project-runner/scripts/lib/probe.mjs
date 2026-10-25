@@ -114,6 +114,72 @@ function portOccupantsOnce(port) {
   }));
 }
 
+// pid→实际监听端口（#107）：只返回本地地址与端口，不采集命令行。
+// Windows 用 Get-NetTCPConnection -OwningProcess；Linux 走 /proc/net/tcp{,6} inode
+// 与 /proc/<pid>/fd 的归属关系。进程已退出/无权限时返回空数组（不猜、不降级）。
+export function listListeningPorts(pid) {
+  ensureSupported();
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  if (IS_LINUX) return linuxProc.listeningPorts(pid);
+  const rows = retryProcessProbe('listening', () => listeningPortsOnce(pid));
+  return rows.map(({ localAddress, localPort }) => ({ localAddress, localPort }));
+}
+
+function listeningPortsOnce(pid) {
+  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'listening', '-Id', String(pid)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  return parseListeningOutput(r);
+}
+
+function parseListeningOutput(r) {
+  if (r.error) {
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口探测依赖它');
+    const e = dependencyError(`端口探测调用失败：${r.error.message}`);
+    e.psTransient = true;
+    throw e;
+  }
+  if (r.status !== 0) {
+    const e = dependencyError(`端口探测失败：${(r.stderr || '').trim()}`);
+    e.psTransient = true;
+    throw e;
+  }
+  const text = (r.stdout || '').trim();
+  if (!text) return [];
+  let parsed;
+  try { parsed = JSON.parse(text); } catch {
+    const e = dependencyError('端口探测输出无法解析');
+    e.psTransient = true;
+    throw e;
+  }
+  // 单元素时 ConvertTo-Json 会退化为对象而非数组
+  const rows = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? [parsed] : [];
+  return rows
+    .map((row) => ({ pid: row.pid ?? null, localAddress: row.localAddress ?? null, localPort: row.localPort }))
+    .filter((row) => Number.isInteger(row.localPort) && row.localPort > 0);
+}
+
+// 批量：ui list 对 N 个 RUNNING 应用只起 1 次 pwsh（Linux 直接读一次 /proc/net）。
+// 返回 Map<pid, [{localAddress,localPort}]>。
+export function listListeningPortsBatch(pids) {
+  ensureSupported();
+  const unique = [...new Set((pids ?? []).filter((p) => Number.isInteger(p) && p > 0))];
+  const map = new Map(unique.map((pid) => [pid, []]));
+  if (!unique.length) return map;
+  const rows = IS_LINUX
+    ? linuxProc.listeningPortsBatch(unique)
+    : retryProcessProbe('listening-batch', () => listeningPortsBatchOnce(unique));
+  for (const row of rows) {
+    const list = map.get(row.pid);
+    if (list) list.push({ localAddress: row.localAddress, localPort: row.localPort });
+  }
+  return map;
+}
+
+function listeningPortsBatchOnce(pids) {
+  const payload = Buffer.from(JSON.stringify(pids), 'utf8').toString('base64');
+  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'listening-batch', '-Json', payload], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  return parseListeningOutput(r);
+}
+
 export function portConflict(port, force, ignorePid = null) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   const occupants = portOccupants(port).filter((p) => p.pid !== ignorePid);

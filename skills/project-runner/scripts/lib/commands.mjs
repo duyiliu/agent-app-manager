@@ -10,7 +10,7 @@ import { SCHEMA_VERSION } from './constants.mjs';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict, atomicWriteJson } from './store.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
-import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
+import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, listListeningPorts, listListeningPortsBatch, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
 import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
@@ -20,6 +20,12 @@ import { planPrune, applyPrune } from './prune.mjs';
 import { bootId } from './proc-linux.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
+
+// 实际监听端口去重排序：同一端口可能在 0.0.0.0 与 :: 各有一条监听记录。
+function uniqueListeningPorts(entries) {
+  return [...new Set((entries ?? []).map((e) => e?.localPort).filter((p) => Number.isInteger(p) && p > 0))]
+    .sort((a, b) => a - b);
+}
 
 // ---------- 简单选项解析 ----------
 
@@ -314,6 +320,18 @@ export function cmdList(ctx) {
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
     };
   });
+  // 列表也附实际监听端口（#107）：一次批量枚举所有 RUNNING pid，避免每个应用各起一次 pwsh。
+  // 枚举失败不回退到 expectedPort 冒充实际端口；UI 会按无 actualPorts 处理。
+  const runningPids = [...new Set(rows.filter((r) => r.status === 'RUNNING' && Number.isInteger(r.pid)).map((r) => r.pid))];
+  if (runningPids.length) {
+    try {
+      const byPid = listListeningPortsBatch(runningPids);
+      for (const row of rows) {
+        if (row.status !== 'RUNNING' || !Number.isInteger(row.pid)) continue;
+        row.actualPorts = uniqueListeningPorts(byPid.get(row.pid) ?? []);
+      }
+    } catch { /* 端口枚举失败不阻断 list；UI 回退 expectedPort */ }
+  }
   if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };
 }
@@ -381,7 +399,7 @@ async function readinessCheck(home, app, cur) {
   return { state, configured, evidence };
 }
 
-export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false) {
+export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -390,6 +408,22 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const cur = rt && rt.current;
   const evidenceFile = runtimePath(ctx.home, appId);
   const portListening = probeRequested && Number.isInteger(app.expectedPort) ? await tcpListening(app.expectedPort) : null;
+  // 实际端口是 pid→监听端口枚举（#107），只在进程被核验为 RUNNING 时查询：
+  // 已停止的旧记录不会因 PID 复用而误报新进程的端口。
+  const collectPorts = probeRequested || portsRequested;
+  let actualPorts = null;
+  let actualPortsError = null;
+  if (collectPorts) {
+    actualPorts = [];
+    const probePid = st.status === 'RUNNING' ? (st.pid ?? cur?.pid ?? null) : null;
+    if (Number.isInteger(probePid)) {
+      try { actualPorts = uniqueListeningPorts(listListeningPorts(probePid)); }
+      catch (e) { actualPortsError = `${e.code ?? 'PORT_PROBE_FAILED'}: ${e.message}`; }
+    }
+  }
+  const portMismatch = collectPorts && Number.isInteger(app.expectedPort)
+    ? actualPorts.length > 0 && !actualPorts.includes(app.expectedPort)
+    : false;
   const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
@@ -400,8 +434,9 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
-    portNote: probeRequested ? '端口监听仅为 TCP 证据；监听 ≠ 业务就绪' : '使用 --probe 执行本机 TCP 监听探测',
+    portNote: probeRequested ? '端口监听仅为 TCP 证据；监听 ≠ 业务就绪；actualPorts 为受管进程实际监听端口' : '使用 --probe 执行本机 TCP 监听探测与 pid→实际端口枚举',
     ...(probeRequested ? { portListening } : {}),
+    ...(collectPorts ? { actualPorts, portMismatch, ...(actualPortsError ? { actualPortsError } : {}) } : {}),
     ...(jrebelEvidence ? { jrebelEvidence } : {}),
     run: cur ? {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, mode: cur.mode,
@@ -912,7 +947,7 @@ export async function cmdUi(ctx) {
       open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         list: () => cmdList(ctx),
-        status: (ref) => cmdStatus(ctx, ref).then((data) => { delete data.portListening; delete data.portNote; return data; }),
+        status: (ref) => cmdStatus(ctx, ref, false, false, true).then((data) => { delete data.portListening; delete data.portNote; return data; }),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
         listSources: (ref) => listSources(ctx.home, ref),

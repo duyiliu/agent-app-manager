@@ -111,7 +111,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ~~~text
 list [--json]
-status <alias|appId> [--probe] [--ready] [--json]  # --probe 附加本机 TCP 监听探测；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据
+status <alias|appId> [--probe] [--ready] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
 doctor [--json]                          # 只读自检（不修复）
 start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
@@ -212,3 +212,5 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 - **follow 轮转重置**：`logs --follow` 检测到 `size < pos`（log-writer 已 rename 旧文件并重建同名新文件）时重置到新文件起始继续跟随并提示；旧尾部可用 `--src run:<runId>.<stream>.1` 查看。
 - **ui 渲染窗口有界**：过滤激活时旧逻辑按「DOM 行数−缓存行数」修剪永不触发，长会话 DOM 无界增长；改为计数式上限（MAX_LINES），不再每 tick 全量 `querySelectorAll`。
 - 其他：仓库根新增 `package.json`（engines + `npm test`/`npm run check` 聚合冒烟）；`decodeCmdOutput` 在无 GBK 解码器的 Node 上回退 lossy UTF-8。
+
+**v2.9（2026-10-25，实际监听端口，issue #107）**：新增跨平台 `listListeningPorts(pid)`（Windows `Get-NetTCPConnection -State Listen -OwningProcess`；Linux 解析 `/proc/<pid>/fd` 的 socket inode 与 `/proc/net/tcp{,6}` LISTEN 表），只返回本地地址与端口，不采集命令行。`status --probe` 新增 `actualPorts`（去重排序）与 `portMismatch`（配置 `expectedPort` 不在实际监听端口集合内时为 true；进程非 RUNNING 时不查询，避免 PID 复用误报旧端口）；`list` 以一次批量枚举为 RUNNING 应用附 `actualPorts`。`manager ui` 优先展示并链接实际端口，`expectedPort` 保留为启动前冲突检查与回退展示，端口漂移时给出显式提示。冒烟：`runtime-smoke` 覆盖「expectedPort 被外部占用、受管进程顺延到另一端口」以及停止后不再返回旧端口；`ui-src-follow` 覆盖列表/详情链接指向实际端口。
