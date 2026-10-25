@@ -260,6 +260,17 @@ try {
     run(`lifecycleBusy = false; lifecycleOpKey = null;`);
     await run('loadStatus()');
   });
+  await check('健康总览：列表与详情展示 READY 及监听/HTTP 证据', () => {
+    run(`healthByAlias = new Map([['ahis', { appId:'ahis', status:'RUNNING', state:'READY', expectedPort:8080, listening:true, readiness:{ state:'READY', configured:true, evidence:[{ kind:'http', url:'http://127.0.0.1:8080/ready', status:200 }] } }]])`);
+    run(`renderApps()`);
+    assert(elFor('appList').textContent.includes('READY'), '应用列表缺少健康状态');
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:8080, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:123, logPaths:{} } })`);
+    const text = elFor('detail').textContent;
+    for (const marker of ['健康', 'READY', '监听 127.0.0.1:8080 → 是', 'HTTP 200', '监听（TCP）≠ 业务就绪']) {
+      assert(text.includes(marker), `详情健康区块缺少 ${marker}：${text}`);
+    }
+    assert(elFor('detailSummary').querySelectorAll('.hl-READY').length >= 1, '摘要栏缺少健康状态 pill');
+  });
 } finally {
   child.kill();
   fs.rmSync(base, { recursive: true, force: true });

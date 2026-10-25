@@ -70,6 +70,9 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     if (u.pathname === '/api/apps') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...api.list(), home } });
     }
+    if (u.pathname === '/api/health') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.health() });
+    }
     if (u.pathname === '/api/status') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.status(u.searchParams.get('app') || '') });
     }
