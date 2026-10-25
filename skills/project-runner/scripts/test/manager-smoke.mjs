@@ -565,14 +565,21 @@ try {
     }
   });
 } finally {
-  try { if (currentPid) process.kill(currentPid, 'SIGKILL'); } catch { /* 已退出 */ }
-  // stop 返回后 log-writer 可能仍在同一 cwd 下落退出证据（毫秒级）；Windows 上
-  // 立即删临时目录会偶发 EBUSY。等待内部短写完成，不修改任何智能断言。
-  for (let i = 0; i < 50; i++) {
-    try { fs.rmSync(base, { recursive: true, force: true }); break; }
-    catch (e) { if (i === 49) throw e; sleep(100); }
+  if (currentPid) {
+    try { process.kill(currentPid, 'SIGKILL'); } catch { /* 已退出 */ }
+    if (isWindows) {
+      try { spawnSync('taskkill', ['/pid', String(currentPid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* 已退出 */ }
+    }
   }
+  // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。
+  let cleaned = false;
+  for (let i = 0; i < 150; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); cleaned = true; break; }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+  }
+  if (!cleaned) console.warn(`[warn] 临时目录清理超时，已跳过（不影响断言）：${base}`);
 }
+
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }
 if (skipped.length) console.log(`\n${skipped.length} 项跳过（缺 pwsh 7）`);
 console.log('\nmanager smoke ok');
