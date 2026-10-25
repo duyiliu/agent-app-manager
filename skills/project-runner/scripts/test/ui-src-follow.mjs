@@ -138,7 +138,7 @@ const documentStub = {
   execCommand: () => false,
 };
 // 页面通过 $('#id') 取元素：预挂到 body 下，保证 querySelectorAll 子树搜索与 closest 可用
-const roots = ['appList', 'detail', 'detailBar', 'detailSummary', 'detailOps', 'runSel', 'log', 'fdTree', 'logMeta'];
+const roots = ['appList', 'detail', 'detailBar', 'detailSummary', 'detailOps', 'runSel', 'log', 'fdTree', 'logMeta', 'portOverlay', 'portTitle', 'portBody', 'portClose'];
 for (const id of roots) documentStub.body.appendChild(elFor(id));
 elFor('fileDrawer').hidden = true; // 文件抽屉默认关闭，跳过 loadTree 分支
 
@@ -149,6 +149,13 @@ const port = await new Promise((res, rej) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
   s.on('error', rej);
 });
+// 端口诊断面板测试使用本进程持有的真实监听。
+const diagServer = net.createServer();
+await new Promise((resolve, reject) => {
+  diagServer.once('error', reject);
+  diagServer.listen(0, '127.0.0.1', resolve);
+});
+const diagPort = diagServer.address().port;
 const origin = `http://127.0.0.1:${port}`;
 const child = spawn(process.execPath, [MANAGER, '--home', home, 'ui', '--port', String(port)], { stdio: ['ignore', 'pipe', 'pipe'] });
 let banner = '';
@@ -214,6 +221,20 @@ try {
 
   await check('初始选中=当前批次 stdout', () => assert.equal(run('logSrc'), 'run:rtest1.stdout'));
 
+  const diagProbe = await get(`/api/port?port=${diagPort}`);
+  if (diagProbe.status === 200) {
+    await run(`diagnosePort(${diagPort})`);
+    await check('端口诊断面板展示安全字段与等效 CLI 命令', () => {
+      assert.equal(elFor('portOverlay').hidden, false);
+      const text = elFor('portBody').textContent;
+      assert(text.includes(`PID ${process.pid}`), `缺少 pid 证据：${text}`);
+      assert(text.includes(`port ${diagPort}`), '缺少等效 CLI 命令');
+      assert(!/commandline/i.test(text), '页面泄露命令行字段');
+    });
+  } else {
+    console.log('  skip（缺少端口探针依赖，跳过端口诊断面板检查）');
+  }
+
   await restartAndSync('rtest2');
   await check('重启后切到新当前批次 stdout', () => assert.equal(run('logSrc'), 'run:rtest2.stdout'));
 
@@ -262,6 +283,7 @@ try {
   });
 } finally {
   child.kill();
+  diagServer.close();
   fs.rmSync(base, { recursive: true, force: true });
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }

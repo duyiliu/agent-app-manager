@@ -12,12 +12,96 @@ import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.m
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
+const MANAGER_MJS = path.resolve(SCRIPT_DIR, '..', 'manager.mjs');
 const TAIL_CHUNK = 256 * 1024;
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(data));
+}
+
+// 管理台只投影端口诊断的安全字段：命令行/参数等一律不进入 HTTP 响应。
+// 即使底层探针以后补上 commandLine，页面也不会拿到（白名单而非黑名单）。
+function sanitizeIdentity(id) {
+  if (!id || typeof id !== 'object') return null;
+  const out = {};
+  if (typeof id.result === 'string') out.result = id.result;
+  if (typeof id.code === 'string') out.code = id.code;
+  if (typeof id.creationFileTime === 'string') out.creationFileTime = id.creationFileTime;
+  if (typeof id.image === 'string') out.image = id.image;
+  if (Number.isInteger(id.win32)) out.win32 = id.win32;
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizePortOccupant(row) {
+  if (!row || typeof row !== 'object') return null;
+  const out = {};
+  if (Number.isInteger(row.pid) || row.pid === null) out.pid = row.pid;
+  for (const k of ['processName', 'executablePath', 'startedAt', 'localAddress', 'source', 'note']) {
+    if (typeof row[k] === 'string') out[k] = row[k];
+  }
+  if (Number.isInteger(row.localPort)) out.localPort = row.localPort;
+  const identity = sanitizeIdentity(row.identity);
+  if (identity) out.identity = identity;
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizeLogPaths(paths) {
+  if (!paths || typeof paths !== 'object') return undefined;
+  const out = {};
+  for (const k of ['stdout', 'stderr']) if (typeof paths[k] === 'string') out[k] = paths[k];
+  return Object.keys(out).length ? out : undefined;
+}
+
+// 发现候选只暴露定位所需字段；候选里的 cmd/命令行不得外传。
+function sanitizeCandidate(c) {
+  if (!c || typeof c !== 'object') return null;
+  const out = {};
+  if (Number.isInteger(c.pid)) out.pid = c.pid;
+  if (typeof c.image === 'string') out.image = c.image;
+  if (typeof c.creationFileTime === 'string') out.creationFileTime = c.creationFileTime;
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizeProbeResult(r) {
+  if (!r || typeof r !== 'object') return undefined;
+  const out = {};
+  for (const k of ['result', 'code', 'creationFileTime', 'image']) if (typeof r[k] === 'string') out[k] = r[k];
+  if (Number.isInteger(r.win32)) out.win32 = r.win32;
+  return Object.keys(out).length ? out : undefined;
+}
+
+const DETAIL_STRING_KEYS = new Set(['runId', 'expectedImage', 'cause', 'code', 'result', 'reason', 'note', 'source']);
+const DETAIL_NUMBER_KEYS = new Set(['pid', 'wrapperPid', 'port']);
+function sanitizeErrorDetail(detail, depth = 0) {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail) || depth > 2) return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(detail)) {
+    if (DETAIL_STRING_KEYS.has(k) && typeof v === 'string') out[k] = v;
+    else if (DETAIL_NUMBER_KEYS.has(k) && Number.isInteger(v)) out[k] = v;
+    else if (k === 'forced' && typeof v === 'boolean') out.forced = v;
+    else if (k === 'stderrTail' && typeof v === 'string') out.stderrTail = v.slice(-4000);
+    else if (k === 'logPaths') {
+      const paths = sanitizeLogPaths(v);
+      if (paths) out.logPaths = paths;
+    } else if (k === 'occupants' && Array.isArray(v)) {
+      out.occupants = v.map(sanitizePortOccupant).filter(Boolean);
+    } else if (k === 'candidates' && Array.isArray(v)) {
+      out.candidates = v.map(sanitizeCandidate).filter(Boolean);
+    } else if (k === 'capture') {
+      const capture = sanitizeProbeResult(v);
+      if (capture) out.capture = capture;
+    } else if (k === 'detail') {
+      const nested = sanitizeErrorDetail(v, depth + 1);
+      if (nested) out.detail = nested;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function portCliCommand(port) {
+  return `node "${MANAGER_MJS}" port ${port}`;
 }
 
 // ManagerError 退出码契约 → HTTP 状态的 errorStatus 经 lib/constants.mjs 与 CLI 共用，避免接口契约分叉；数据损坏必须原样透出，不静默当空数据
@@ -63,6 +147,22 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     }
     if (u.pathname === '/api/doctor') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.doctor() });
+    }
+    if (u.pathname === '/api/port') {
+      // 只读端口诊断：与 CLI `port <N>` 同一数据层；响应仅含端口与安全字段投影。
+      const raw = u.searchParams.get('port');
+      const port = Number(raw);
+      if (raw == null || raw === '' || !Number.isInteger(port) || port < 1 || port > 65535) throw fail(400, 'port 需要 1-65535 的整数');
+      const data = await api.port(port);
+      return sendJson(res, 200, {
+        schemaVersion: SCHEMA_VERSION, ok: true,
+        data: {
+          port,
+          occupants: (data?.occupants ?? []).map(sanitizePortOccupant).filter(Boolean),
+          note: typeof data?.note === 'string' ? data.note : '外部进程仅诊断，不接管、不停止',
+          cliCommand: portCliCommand(port),
+        },
+      });
     }
     if (u.pathname === '/api/meta') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { version: MANAGER_VERSION } });
@@ -159,7 +259,12 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       if (status >= 500) console.error(e?.stack ?? e);
       // ManagerError 业务原因（包括依赖/冲突）原样透出；未知内部错误仍使用通用文案。
       const known = Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 5;
-      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: known || status < 500 ? e.message : '读取失败，请刷新重试' } });
+      const error = { code: e.code ?? 'INTERNAL', message: known || status < 500 ? e.message : '读取失败，请刷新重试' };
+      // detail 只回传白名单字段（端口占用人、runId、日志路径、候选 pid/image 等）；
+      // 命令行/参数不投影，stderrTail 仅保留末尾 4000 字符供定位启动失败。
+      const detail = sanitizeErrorDetail(e.detail);
+      if (detail !== undefined) error.detail = detail;
+      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error });
     });
   }
 

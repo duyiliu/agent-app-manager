@@ -33,11 +33,18 @@ w(path.join(proj, '.ssh', 'id_ecdsa'), 'PRIVATE KEY\n');
 w(path.join(proj, '.npmrc'), '//registry.npmjs.org/:_authToken=secret\n');
 w(hintFile, 'hint 1\n');
 const root = fs.realpathSync(proj);
+// 端口诊断测试使用本进程持有的真实监听：诊断结果必须有 pid/端口，且不得泄露命令行。
+const diagServer = net.createServer();
+await new Promise((resolve, reject) => {
+  diagServer.once('error', reject);
+  diagServer.listen(0, '127.0.0.1', resolve);
+});
+const diagPort = diagServer.address().port;
 
 w(path.join(home, 'registry.json'), JSON.stringify({
   schemaVersion: 1,
   apps: {
-    ahis: { appId: 'ahis', alias: 'his', displayName: 'HIS', root, entry: 'default', cwd: root, mode: 'jrebel', exe: process.execPath, args: [], envRefs: [], expectedPort: 8080, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+    ahis: { appId: 'ahis', alias: 'his', displayName: 'HIS', root, entry: 'default', cwd: root, mode: 'jrebel', exe: process.execPath, args: [], envRefs: [], expectedPort: diagPort, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
     arep: { appId: 'arep', alias: 'report', displayName: '报表', root, entry: 'default', cwd: root, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
     astuck: { appId: 'astuck', alias: 'stuck', displayName: '卡住的服务', root, entry: 'default', cwd: root, mode: 'jrebel', exe: process.execPath, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
     aghost: { appId: 'aghost', alias: 'ghost', displayName: '幽灵', root: path.join(base, 'missing-proj'), entry: 'default', cwd: path.join(base, 'missing-proj'), mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
@@ -155,6 +162,41 @@ try {
     assert(status.run.logPaths.stdout.endsWith('rtest1.stdout.log'));
   });
 
+  await check('GET /api/port 只读诊断脱敏并给出等效 CLI 命令', async () => {
+    const r = await get(`/api/port?port=${diagPort}`);
+    if (r.status === 503) { console.log('  skip（缺少端口探针依赖，跳过端口诊断检查）'); return; }
+    assert.equal(r.status, 200);
+    const d = r.json.data;
+    assert.equal(d.port, diagPort);
+    assert(Array.isArray(d.occupants) && d.occupants.length >= 1, '应至少发现本进程持有的监听');
+    assert(d.occupants.some((o) => o.pid === process.pid && o.localPort === diagPort), 'pid/端口证据不正确');
+    assert(typeof d.cliCommand === 'string' && d.cliCommand.includes(`port ${diagPort}`));
+    const text = JSON.stringify(d);
+    assert(!/commandline|"cmd"/i.test(text), '端口诊断响应泄露了命令行字段');
+  });
+  await check('GET /api/port 参数非法返回 400', async () => {
+    for (const q of ['', 'port=0', 'port=65536', 'port=abc', 'port=1.5']) {
+      const r = await get(`/api/port${q ? `?${q}` : ''}`);
+      assert.equal(r.status, 400, `期望 400，实际 ${r.status}（${q}）`);
+    }
+  });
+  await check('GET /api/port 仍校验 Host（403）', async () => {
+    assert.equal((await get(`/api/port?port=${diagPort}`, { host: 'evil.example' })).status, 403);
+  });
+
+  await check('PORT_IN_USE 错误响应回传白名单化 detail（不含命令行）', async () => {
+    const r = await get('/api/lifecycle?app=his&op=start', {
+      method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', Origin: `http://127.0.0.1:${port}` },
+    });
+    if (r.status === 503) { console.log('  skip（缺少端口探针依赖，跳过 PORT_IN_USE 检查）'); return; }
+    assert.equal(r.status, 409);
+    assert.equal(r.json.error.code, 'PORT_IN_USE');
+    const d = r.json.error.detail;
+    assert(d && d.port === diagPort, 'detail 应包含冲突端口');
+    assert(Array.isArray(d.occupants) && d.occupants.length >= 1, 'detail 应包含占用证据');
+    assert(!/commandline|"cmd"/i.test(JSON.stringify(d)), '错误 detail 泄露了命令行字段');
+  });
+
   const runs = (await get('/api/runs?app=his')).json.data;
   await check('批次列表（当前 + prevRuns）', () => {
     assert.equal(runs.current.runId, 'rtest1');
@@ -261,6 +303,7 @@ try {
   });
 } finally {
   child.kill();
+  diagServer.close();
   fs.rmSync(base, { recursive: true, force: true });
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }

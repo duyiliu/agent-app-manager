@@ -169,11 +169,15 @@ export function cmdRecordUnmanaged(ctx) {
   });
 }
 
-export function cmdPort(ctx, value) {
-  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
+export function portDiagnosis(value) {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw usageError('port 需要 1-65535 的整数');
   return { port, occupants: portOccupants(port), note: '外部进程仅诊断，不接管、不停止' };
+}
+
+export function cmdPort(ctx, value) {
+  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
+  return portDiagnosis(value);
 }
 
 export function cmdDoctor(ctx) {
@@ -912,6 +916,8 @@ export async function cmdUi(ctx) {
       open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         list: () => cmdList(ctx),
+        // 管理台端口诊断复用 CLI 同一实现；server.mjs 只做字段白名单投影。
+        port: (port) => portDiagnosis(port),
         status: (ref) => cmdStatus(ctx, ref).then((data) => { delete data.portListening; delete data.portNote; return data; }),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
