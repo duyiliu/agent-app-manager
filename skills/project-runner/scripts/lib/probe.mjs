@@ -45,8 +45,9 @@ function psProcOnce(action, params) {
     const e = dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
     // 短时探针可重试：proc.ps1 每次都在进程内用 Add-Type 编译 C#，偶发 Roslyn 栈溢出
     // 崩溃（0xC00000FD / “type initializer ... threw an exception”），与进程状态无关。
-    // discover 单次调用内部已轮询到超时，重试会把最坏等待放大到分钟级，故不重试。
-    if (action !== 'discover' && action !== 'terminate' && action !== 'terminate-tree' && action !== 'grace') e.psTransient = true;
+    // discover 的超时/wrapperExited 都以 exit 0 JSON 返回，非零退出必为 pwsh 快速崩溃，
+    // 重试不放大等待；terminate/grace 有副作用仍不重试。
+    if (action !== 'terminate' && action !== 'terminate-tree' && action !== 'grace') e.psTransient = true;
     throw e;
   }
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();

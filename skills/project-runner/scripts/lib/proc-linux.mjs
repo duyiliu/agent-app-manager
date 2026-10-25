@@ -239,7 +239,8 @@ export function discover(rootPid, expectedImage, waitMs = COMMAND_DISCOVER_TIMEO
   for (;;) {
     const rows = snapshotProcesses();
     if (rows.error) return { result: 'error', code: 'procUnreadable', message: rows.error.message };
-    const found = [];
+    // 后续叶子折叠会整体替换（found = leaves），必须可重绑
+    let found = [];
     for (const child of descendantsOf(rootPid, childrenByParent(rows))) {
       const s = rows.get(child);
       const image = readImage(child, s.comm);
