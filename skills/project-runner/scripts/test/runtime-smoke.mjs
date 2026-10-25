@@ -300,17 +300,32 @@ try {
     process.kill(r.json.data.pid, 'SIGKILL');
     let wrapperExit = null;
     let targetExit = null;
+    let watchError = null;
     for (let i = 0; i < 100; i++) {
       const rt = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
       wrapperExit = rt.current.wrapperExit ?? null;
       targetExit = rt.current.exit ?? null;
-      if (wrapperExit && targetExit) break;
+      watchError = rt.current.exitWatchError ?? null;
+      if (wrapperExit && (targetExit || watchError)) break;
       await wait(100);
     }
     assert.equal(wrapperExit?.code, 0, `wrapper 普通退出证据缺失：${JSON.stringify(wrapperExit)}`);
-    assert(targetExit, 'exit-watcher 未记录受管目标的真实退出');
-    assert(!(targetExit.code === 0 && targetExit.signal == null), `目标被 SIGKILL 后仍记为 wrapper 的正常退出：${JSON.stringify(targetExit)}`);
-    if (process.platform === 'linux') assert.equal(targetExit.signal, 'SIGKILL');
+    if (process.platform !== 'linux') {
+      // Windows 句柄在父进程回收后仍可读退出码，必须拿到真实证据。
+      assert(targetExit, 'exit-watcher 未记录受管目标的真实退出');
+      assert(!(targetExit.code === 0 && targetExit.signal == null), `目标被 SIGKILL 后仍记为 wrapper 的正常退出：${JSON.stringify(targetExit)}`);
+    } else {
+      // Linux 内核限制（已在 CI 实测）：非父进程 waitid(P_PIDFD) 一律 ECHILD，而 sh
+      // wrapper 会同步回收目标，僵尸窗口为 0——真实退出状态原理上不可得。此时
+      // watcher 必须明确落 unavailable 证据；能拿到时仍要求真实信号、不得冒充。
+      assert(targetExit || watchError, 'exit-watcher 未记录退出证据也未标记不可用');
+      if (targetExit) {
+        assert(!(targetExit.code === 0 && targetExit.signal == null), `目标被 SIGKILL 后仍记为 wrapper 的正常退出：${JSON.stringify(targetExit)}`);
+        assert.equal(targetExit.signal, 'SIGKILL');
+      } else {
+        assert.match(watchError.reason, /reaped before exit status/, `watcher 未给出明确的不可用原因：${JSON.stringify(watchError)}`);
+      }
+    }
     // stop 自己终止目标时，受管目标必须有独立于 wrapper 的退出证据。
     assert.equal(cli('stop', 'cmddetach').code, 0);
     const started = cli('start', 'cmddetach');
