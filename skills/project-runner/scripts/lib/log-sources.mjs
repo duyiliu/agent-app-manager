@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { appContext } from './runtime.mjs';
 import { ID_RE } from './desc.mjs';
 import { UI_FILE_CHUNK, TMP_NAME_RE, uiBlocked, uiFail, uiResolveFile } from './ui-data.mjs';
-import { readTailLines, MAX_LOG_BYTES, RUN_LOG_FILE_RE } from './logs.mjs';
+import { readTailLines, MAX_LOG_BYTES, RUN_LOG_FILE_RE, createLogFilter } from './logs.mjs';
 import { pickDecoder } from './decode.mjs';
 import { verifyRun } from './probe.mjs';
 import { usageError, notFoundError } from './errors.mjs';
@@ -196,7 +196,7 @@ export function mergeStreamTails(a, b) {
   return out;
 }
 
-export function followLogs(rt, runId, file, initialLines) {
+export function followLogs(rt, runId, file, initialLines, filterOptions = null) {
   const cur = rt && rt.current;
   process.on('SIGINT', () => {
     process.stderr.write('\n[已中止 follow]\n');
@@ -206,8 +206,47 @@ export function followLogs(rt, runId, file, initialLines) {
   if (!managedWithIdentity) {
     process.stderr.write(`[非受管或身份未知批次，无法自动结束；Ctrl+C 中止]\n`);
   }
+  // 无过滤时保持原有字节流直通；有过滤时按完整行推进，context 只需保留前 N 行。
+  const filter = filterOptions ? createLogFilter(filterOptions) : null;
+  let pending = '';
+  let reportedNoTimestamp = 0;
+  const emitFiltered = (line) => {
+    for (const out of filter.feed(line)) process.stdout.write(`${out}\n`);
+  };
+  const reportSinceSkips = () => {
+    if (!filter || filterOptions?.sinceMs == null) return;
+    const n = filter.stats().noTimestamp;
+    if (n > reportedNoTimestamp) {
+      process.stderr.write(`[--since 仅按行首时间戳过滤：${n} 行无时间戳已跳过]\n`);
+      reportedNoTimestamp = n;
+    }
+  };
+  const writeText = (text) => {
+    if (!filter) {
+      process.stdout.write(text);
+      return;
+    }
+    pending += text;
+    for (;;) {
+      const i = pending.indexOf('\n');
+      if (i < 0) break;
+      let line = pending.slice(0, i);
+      pending = pending.slice(i + 1);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      emitFiltered(line);
+    }
+  };
+  const flushPending = () => {
+    if (!filter || !pending) return;
+    let line = pending;
+    pending = '';
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    emitFiltered(line);
+  };
   const first = readTailLines(file, initialLines);
-  for (const l of first.lines) process.stdout.write(`${l}\n`);
+  if (filter) for (const l of first.lines) emitFiltered(l);
+  else for (const l of first.lines) process.stdout.write(`${l}\n`);
+  reportSinceSkips();
   let pos = fs.statSync(file).size;
   let decoder = new TextDecoder('utf-8', { fatal: true });
   let lastIdentityCheck = 0;
@@ -223,6 +262,7 @@ export function followLogs(rt, runId, file, initialLines) {
       // 旧 pos 指向的偏移在新文件中已不存在。重置到新文件起始继续跟随；
       // 旧文件尾部内容可用 logs --src run:<runId>.<stream>.1 查看。
       process.stderr.write(`\n[日志已轮转，从新文件起始继续跟随；轮转前尾部可用 --src run:${runId}.*.1 查看]\n`);
+      flushPending();
       pos = 0;
       decoder = new TextDecoder('utf-8', { fatal: true }); // 新文件可能重新以 UTF-8 开始
     }
@@ -232,10 +272,11 @@ export function followLogs(rt, runId, file, initialLines) {
         const len = Math.min(size - pos, MAX_LOG_BYTES);
         const buf = Buffer.alloc(len);
         fs.readSync(fd, buf, 0, len, pos);
-        try { process.stdout.write(decoder.decode(buf, { stream: true })); }
+        try { writeText(decoder.decode(buf, { stream: true })); }
         catch {
+          flushPending();
           decoder = pickDecoder('gbk');
-          process.stdout.write(decoder.decode(buf));
+          writeText(decoder.decode(buf));
         }
       } finally {
         fs.closeSync(fd);
@@ -257,10 +298,11 @@ export function followLogs(rt, runId, file, initialLines) {
             try {
               const buf = Buffer.alloc(len);
               fs.readSync(fd, buf, 0, len, pos);
-              try { process.stdout.write(decoder.decode(buf, { stream: true })); }
+              try { writeText(decoder.decode(buf, { stream: true })); }
               catch {
+                flushPending();
                 decoder = pickDecoder('gbk');
-                process.stdout.write(decoder.decode(buf));
+                writeText(decoder.decode(buf));
               }
             } finally {
               fs.closeSync(fd);
@@ -271,6 +313,8 @@ export function followLogs(rt, runId, file, initialLines) {
             }
           }
         } catch { /* 忽略 */ }
+        flushPending();
+        reportSinceSkips();
         clearInterval(tick);
         process.stderr.write(`\n[进程已退出，follow 结束]\n`);
         process.exit(0);
