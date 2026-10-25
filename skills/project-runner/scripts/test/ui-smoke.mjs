@@ -11,6 +11,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { hasProcessProbe, isWindows, killTree } from './platform.mjs';
+import { psProc } from '../lib/probe.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ui-smoke-'));
@@ -92,6 +94,7 @@ const exitInfo = (c) => new Promise((res) => {
 });
 
 let failed = 0;
+const cleanupPids = [];
 const check = async (name, fn) => {
   try { await fn(); console.log(`  ok  ${name}`); }
   catch (e) { failed++; console.log(`  FAIL ${name}: ${e.message}`); }
@@ -140,6 +143,33 @@ try {
   await check('同源 POST /api/lifecycle 可进入业务（404 应用不存在）', async () => {
     const r = await get('/api/lifecycle?app=nosuchapp&op=stop', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', Origin: `http://127.0.0.1:${port}` } });
     assert.equal(r.status, 404);
+  });
+  await check('remove 携带 tree 返回 400（不静默丢弃）', async () => {
+    const r = await get('/api/lifecycle?app=his&op=remove&tree=1', { method: 'POST' });
+    assert.equal(r.status, 400, r.body);
+    assert(r.json.error.message.includes('tree/grace'));
+  });
+  await check('remove 携带 grace 返回 400（不静默丢弃）', async () => {
+    const r = await get('/api/lifecycle?app=his&op=remove&grace=3000', { method: 'POST' });
+    assert.equal(r.status, 400, r.body);
+    assert(r.json.error.message.includes('tree/grace'));
+  });
+  await check('start 携带 tree/grace 返回 400（仅 stop/restart 可用）', async () => {
+    const r = await get('/api/lifecycle?app=his&op=start&tree=1&grace=3000', { method: 'POST' });
+    assert.equal(r.status, 400, r.body);
+    assert(r.json.error.message.includes('tree/grace'));
+  });
+  await check('stop 的 grace 越界/非整数返回 400', async () => {
+    for (const grace of ['3000abc', '-1', '600001']) {
+      const r = await get(`/api/lifecycle?app=his&op=stop&grace=${encodeURIComponent(grace)}`, { method: 'POST' });
+      assert.equal(r.status, 400, `${grace}: ${r.body}`);
+      assert(r.json.error.message.includes('grace'));
+    }
+  });
+  await check('stop 的 tree 非法取值返回 400', async () => {
+    const r = await get('/api/lifecycle?app=his&op=stop&tree=maybe', { method: 'POST' });
+    assert.equal(r.status, 400, r.body);
+    assert(r.json.error.message.includes('tree'));
   });
 
   const apps = (await get('/api/apps')).json.data.apps;
@@ -259,8 +289,100 @@ try {
     assert(stuck.text.includes('UNRESOLVED_RUN'));
     assert(stuck.text.includes('--ack-unresolved'));
   });
+
+  // ---------- UI 生命周期参数：真实进程经 /api/lifecycle 透传 stop --tree/--grace ----------
+  const hasProbe = hasProcessProbe();
+  const lifecycle = (name, fn) => {
+    if (!hasProbe) { console.log(`  skip  ${name}（缺进程探针，跳过生命周期参数检查）`); return; }
+    return check(name, fn);
+  };
+  const runManager = async (args) => {
+    const r = await exitInfo(spawn(process.execPath, [MANAGER, '--home', home, '--json', ...args], { stdio: ['ignore', 'pipe', 'pipe'] }));
+    let json = null;
+    try { json = JSON.parse(r.text); } catch { /* 非 JSON：用 text 报错 */ }
+    return { ...r, json };
+  };
+  const waitLogPid = async (file, re) => {
+    for (let i = 0; i < 60; i++) {
+      try {
+        const m = re.exec(fs.readFileSync(file, 'utf8'));
+        if (m) return Number(m[1]);
+      } catch { /* 日志尚未落盘 */ }
+      await wait(100);
+    }
+    return null;
+  };
+  const waitGone = async (pid) => {
+    let cap = null;
+    for (let i = 0; i < 50; i++) {
+      cap = psProc('capture', { id: pid });
+      if (cap.result === 'notfound' || cap.result === 'exited') return cap;
+      await wait(100);
+    }
+    throw new Error(`进程 ${pid} 仍存活：${JSON.stringify(cap)}`);
+  };
+
+  const treeProj = path.join(base, 'tree-proj');
+  fs.mkdirSync(treeProj, { recursive: true });
+  const treeRoot = fs.realpathSync(treeProj);
+  fs.writeFileSync(path.join(treeRoot, 'parent.js'),
+    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},500)'],{detached:true,stdio:'ignore'});c.unref();console.log('child='+c.pid);setInterval(()=>{},500);\n");
+  const descTree = path.join(base, 'desc-ui-tree.json');
+  fs.writeFileSync(descTree, JSON.stringify({
+    alias: 'ui-tree', root: treeRoot, entry: 'default', mode: 'node',
+    exe: process.execPath, args: ['parent.js'], envRefs: [],
+  }));
+
+  if (hasProbe) {
+    await lifecycle('UI stop tree=1 → 子进程一并退出，响应含 treeKilled/killedPids', async () => {
+      const s = await runManager(['start-new', '--desc', descTree]);
+      assert.equal(s.code, 0, s.text);
+      cleanupPids.push(s.json.data.pid);
+      const logFile = path.join(home, 'logs', s.json.data.appId, `${s.json.data.runId}.stdout.log`);
+      const childPid = await waitLogPid(logFile, /child=(\d+)/);
+      assert(childPid, '未能从 stdout 日志读到子进程 pid');
+      cleanupPids.push(childPid);
+      const r = await get(`/api/lifecycle?app=${encodeURIComponent(s.json.data.alias)}&op=stop&tree=1`, { method: 'POST' });
+      assert.equal(r.status, 200, r.body);
+      const d = r.json.data;
+      assert(Array.isArray(d.treeKilled), `treeKilled 应为数组：${r.body}`);
+      assert(d.treeKilled.some((k) => k.pid === childPid), `treeKilled 不含子进程 ${childPid}：${r.body}`);
+      assert(d.killedPids.includes(childPid), `killedPids 不含子进程 ${childPid}：${r.body}`);
+      await waitGone(childPid);
+    });
+  }
+
+  const graceMarker = path.join(base, 'grace-marker.txt');
+  fs.writeFileSync(path.join(treeRoot, 'grace.js'),
+    `process.on('SIGTERM',()=>{require('fs').writeFileSync(${JSON.stringify(graceMarker)},'graceful');process.exit(0)});setInterval(()=>{},500);\n`);
+  const descGrace = path.join(base, 'desc-ui-grace.json');
+  fs.writeFileSync(descGrace, JSON.stringify({
+    alias: 'ui-grace', root: treeRoot, entry: 'default', mode: 'node',
+    exe: process.execPath, args: ['grace.js'], envRefs: [],
+  }));
+
+  if (hasProbe) {
+    await lifecycle('UI stop grace=3000 → 先优雅等待，超时才强制（exitNote 记录 grace）', async () => {
+      const s = await runManager(['start-new', '--desc', descGrace]);
+      assert.equal(s.code, 0, s.text);
+      cleanupPids.push(s.json.data.pid);
+      const r = await get(`/api/lifecycle?app=${encodeURIComponent(s.json.data.alias)}&op=stop&grace=3000`, { method: 'POST' });
+      assert.equal(r.status, 200, r.body);
+      assert.equal(r.json.data.result, 'stopped');
+      const rtNow = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.json.data.appId}.json`), 'utf8'));
+      assert(rtNow.current.exitNote.includes('grace'), `exitNote 未记录 grace 过程：${rtNow.current.exitNote}`);
+      if (!isWindows) assert(fs.existsSync(graceMarker), 'Linux 下 SIGTERM 优雅退出未生效（缺 marker）');
+    });
+  }
 } finally {
   child.kill();
+  for (const pid of cleanupPids) {
+    try {
+      if (!pid) continue;
+      const cap = psProc('capture', { id: pid });
+      if (cap.result === 'ok') killTree(pid);
+    } catch { /* 已退出/探针不可用 */ }
+  }
   fs.rmSync(base, { recursive: true, force: true });
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }

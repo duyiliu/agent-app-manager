@@ -178,7 +178,7 @@ const ctx = vm.createContext({
   window: {},
   CSS: { escape: (s) => String(s) },
   Option: Opt,
-  fetch, URL, URLSearchParams, TextDecoder, AbortController, Blob, crypto,
+  fetch, URL, URLSearchParams, TextDecoder, AbortController, AbortSignal, Blob, crypto,
   setInterval, setTimeout, clearInterval, clearTimeout,
   console, alert: () => {},
 });
@@ -248,6 +248,42 @@ try {
   run('logSrc = null; logSrcWasCurrent = false;');
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
+
+  await check('详情卡生命周期控件：tree 复选框 + grace 毫秒输入，值跨重绘保留', () => {
+    run(`lifecycleTree = false; lifecycleGrace = ''; renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:1 } })`);
+    const box = elFor('detail').querySelector('.lifecycle-tree');
+    const grace = elFor('detail').querySelector('.lifecycle-grace');
+    assert(box && grace, '详情卡缺少 tree 复选框或 grace 输入');
+    assert.equal(box.type, 'checkbox');
+    assert.equal(grace.type, 'number');
+    box.checked = true; box.dispatch('change', { target: box });
+    grace.value = '3000'; grace.dispatch('input', { target: grace });
+    assert.equal(run('lifecycleTree'), true);
+    assert.equal(run('lifecycleGrace'), '3000');
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:1 } })`);
+    assert.equal(elFor('detail').querySelector('.lifecycle-tree').checked, true);
+    assert.equal(elFor('detail').querySelector('.lifecycle-grace').value, '3000');
+    run(`lifecycleTree = false; lifecycleGrace = '';`);
+  });
+
+  await check('stop 请求透传 tree/grace，横幅展示 treeKilled/killedPids', async () => {
+    run(`lifecycleTree = true; lifecycleGrace = '3000'; lifecycleBusy = false; lifecycleOpKey = null;`);
+    try {
+      run(`globalThis.__uiUrls = []; globalThis.__origFetch = fetch; fetch = async (u, opt) => { const s = String(u); if (s.includes('/api/lifecycle')) { globalThis.__uiUrls.push(s); return { ok:true, status:200, json:async()=>({ ok:true, data:{ result:'stopped', treeKilled:[{ pid:4321, image:'node' }], killedPids:[4321] } }) }; } return globalThis.__origFetch(u, opt); };`);
+      await run(`doLifecycle('his','stop')`);
+      const urls = run('__uiUrls');
+      assert.equal(urls.length, 1, JSON.stringify(urls));
+      const u = new URL(urls[0]);
+      assert.equal(u.searchParams.get('tree'), '1');
+      assert.equal(u.searchParams.get('grace'), '3000');
+      const banner = elFor('fatalBanner').textContent;
+      assert(banner.includes('treeKilled=1'), banner);
+      assert(banner.includes('killedPids=[4321]'), banner);
+    } finally {
+      run(`fetch = __origFetch;`);
+      run(`lifecycleTree = false; lifecycleGrace = '';`);
+    }
+  });
 
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);

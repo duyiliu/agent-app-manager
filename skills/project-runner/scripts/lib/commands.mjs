@@ -633,13 +633,19 @@ export function cmdCleanupWrapper(ctx, ref) {
 }
 
 // --grace 参数校验：stop/restart 共用（Number() 严格解析，3000abc 不豁免为 3000）。
-function parseGraceMs(opts) {
-  if (!opts.has('--grace')) return null;
-  const graceMs = Number(opts.get('--grace'));
+// ui /api/lifecycle 也复用同一校验，避免命令行与 UI 的参数契约分叉。
+export function parseGraceMsValue(raw) {
+  if (raw == null) return null;
+  const graceMs = Number(raw);
   if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 600000) {
     throw usageError('--grace 需要 0-600000 的毫秒数');
   }
   return graceMs;
+}
+
+function parseGraceMs(opts) {
+  if (!opts.has('--grace')) return null;
+  return parseGraceMsValue(opts.get('--grace'));
 }
 
 export function cmdStop(ctx, ref) {
@@ -863,9 +869,14 @@ function probeManagerUi(port) {
 // 子进程退出码即 ManagerError exitCode（1-5），重构错误后 errorStatus 映射不变；
 // 180s 超时兜底（CLI 前端 150s abort 通常先到），超时强杀子进程——中断的
 // start/stop 按既有语义留下 STARTING/UNKNOWN 未结证据，不静默伪造结果。
-function runLifecycleSubprocess(home, op, ref, ack) {
+function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = null } = {}) {
   const args = [MANAGER_MJS, '--json', '--home', home, op, ref];
   if (ack) args.push('--ack-unresolved', ack);
+  // 仅 stop/restart 接受 --tree/--grace（调用方已校验，这里再按 op 防守一次）。
+  if (op === 'stop' || op === 'restart') {
+    if (tree) args.push('--tree');
+    if (graceMs != null) args.push('--grace', String(graceMs));
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -923,12 +934,24 @@ export async function cmdUi(ctx) {
         // 受管启停与移除：改由 manager.mjs 子进程执行（#82-B1）——start/stop/restart
         // 可能持锁等待与进程核验数十秒，同进程同步执行会冻结 ui 事件循环、
         // 期间全部轮询停摆。--json 输出保证数据契约与直调 cmd* 一致（同一实现）。
-        lifecycle: (ref, op, ack) => {
+        lifecycle: (ref, op, ack, treeRaw, graceRaw) => {
           if (!['start', 'stop', 'restart', 'remove'].includes(op)) throw usageError(`不支持的操作：${op}（仅 start|stop|restart|remove）`);
           // --ack-unresolved 只在支持它的操作上生效；对 stop/restart 明确拒绝而非静默丢弃，
           // 避免调用方误以为未结记录已被确认。
           if (ack && op !== 'start' && op !== 'remove') throw usageError(`${op} 不支持 ack 参数（仅 start/remove 接受 --ack-unresolved）`);
-          return runLifecycleSubprocess(ctx.home, op, ref, ack);
+          // tree/grace 是 stop/restart 的专属参数；其他操作携带一律 400，避免静默丢弃。
+          const stopLike = op === 'stop' || op === 'restart';
+          if (!stopLike && (treeRaw != null || graceRaw != null)) {
+            throw usageError(`${op} 不支持 tree/grace 参数（仅 stop/restart 接受）`);
+          }
+          let tree = false;
+          if (treeRaw != null) {
+            const raw = String(treeRaw);
+            if (!['1', 'true', '0', 'false'].includes(raw)) throw usageError('tree 需要 1/true/0/false');
+            tree = raw === '1' || raw === 'true';
+          }
+          const graceMs = parseGraceMsValue(graceRaw);
+          return runLifecycleSubprocess(ctx.home, op, ref, ack, { tree, graceMs });
         },
       },
     });
