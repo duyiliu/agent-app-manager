@@ -696,7 +696,7 @@ function renderApps() {
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const rank = { RUNNING: 0, STARTING: 1, UNKNOWN: 2, STOPPED: 3 };
   const filtered = appsCache
-    .filter(a => !q || [a.alias, a.displayName, a.mode, a.root, a.status, a.expectedPort].some(v => String(v ?? '').toLowerCase().includes(q)))
+    .filter(a => !q || [a.alias, a.displayName, a.mode, a.root, a.status, a.expectedPort, ...(a.tags ?? [])].some(v => String(v ?? '').toLowerCase().includes(q)))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
   $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
   const previousScroll = list.scrollTop;
@@ -722,6 +722,7 @@ function renderApps() {
     card.appendChild(head);
     const meta = el('div', 'app-meta');
     meta.append(el('span', null, a.mode ?? '?'));
+    if (a.tags?.length) meta.appendChild(el('span', null, a.tags.map(t => '#' + t).join(' ')));
     if (a.pid != null) meta.appendChild(el('span', null, 'pid ' + a.pid));
     if (a.expectedPort != null) {
       if (a.status === 'RUNNING') {
@@ -926,6 +927,7 @@ function renderDetail(d) {
   const grid = el('div', 'kv');
   kvRow(grid, '仓库', d.root);
   kvRow(grid, '入口', d.entry);
+  kvRow(grid, 'tags', d.tags?.length ? d.tags.join(', ') : null, 'dim');
   if (d.expectedPort != null) {
     grid.appendChild(el('div', 'k', '预期端口'));
     const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));

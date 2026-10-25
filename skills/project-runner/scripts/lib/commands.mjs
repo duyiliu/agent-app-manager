@@ -134,11 +134,13 @@ export function cmdRecordUnmanaged(ctx) {
       existing.expectedImage = null;
       existing.discoverTimeoutMs = null;
       existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
+      existing.tags = d.tags ?? [];
       existing.updatedAt = now;
     } else {
       reg.apps[appId] = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
+        tags: d.tags ?? [],
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
         envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
@@ -304,13 +306,14 @@ export function cmdList(ctx) {
       if (cached instanceof Error) throw cached;
       ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
     } catch (e) {
-      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
+      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root, tags: app.tags ?? [] };
     }
     return {
       alias: app.alias, appId: app.appId, mode: app.mode,
       status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
       pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
+      tags: app.tags ?? [],
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
     };
   });
@@ -396,6 +399,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
+    tags: app.tags ?? [],
     env: displayEnv(app.env ?? {}),
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
@@ -691,6 +695,70 @@ export async function cmdRestart(ctx, ref) {
       note: '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
     };
   });
+}
+
+// ---------- tags 分组批量启停 ----------
+
+// 标签匹配大小写不敏感；一个应用可属于多个标签，--tag 多值按并集去重。
+// 返回顺序沿用注册表插入顺序，便于多次批量操作结果稳定。
+function selectAppsByTags(home, tags) {
+  const wanted = new Set(tags.map((t) => String(t).toLowerCase()));
+  const reg = readRegistry(home);
+  return Object.values(reg.apps).filter((app) => Array.isArray(app.tags)
+    && app.tags.some((t) => wanted.has(String(t).toLowerCase())));
+}
+
+// 批量语义固定为「逐条执行、失败继续、不回滚」：stop 场景尽量清理其余应用，
+// start/restart 场景保留已成功部分并回报，绝不静默中断。
+async function runBatch(command, tags, apps, op) {
+  const results = [];
+  for (const app of apps) {
+    try {
+      const data = await op(app);
+      results.push({ ok: true, ...(data ?? {}) });
+    } catch (e) {
+      results.push({
+        ok: false, alias: app.alias, appId: app.appId,
+        error: { code: e.code ?? 'INTERNAL', message: e.message, ...(e.detail !== undefined ? { detail: e.detail } : {}) },
+      });
+    }
+  }
+  const succeeded = results.filter((r) => r.ok).length;
+  const failed = results.length - succeeded;
+  return {
+    batch: true, command, tags, matched: apps.length, succeeded, failed, partialFailure: failed > 0, results,
+    note: '按标签逐条执行：单条失败不中断后续、不回滚已完成的应用；每条结果以 results[].ok 为准',
+  };
+}
+
+function batchAppsOrNotFound(home, tags) {
+  const apps = selectAppsByTags(home, tags);
+  if (!apps.length) throw notFoundError(`没有应用带有标签：${tags.join(', ')}（可用 list 查看 tags）`);
+  return apps;
+}
+
+export async function cmdStartByTags(ctx, tags, cleanArgs = []) {
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('start', tags, apps, (app) => cmdStart({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+}
+
+export function cmdStopByTags(ctx, tags, cleanArgs = []) {
+  const parsed = parseNamed(cleanArgs, { '--tree': 'flag', '--grace': 'value' });
+  parseGraceMs(parsed); // 批量前先校验一次，避免逐条重复失败
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('stop', tags, apps, (app) => cmdStop({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+}
+
+export async function cmdRestartByTags(ctx, tags, cleanArgs = []) {
+  const parsed = parseNamed(cleanArgs, { '--force': 'flag', '--tree': 'flag', '--grace': 'value' });
+  parseGraceMs(parsed);
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('restart', tags, apps, (app) => cmdRestart({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+}
+
+export async function cmdStatusByTags(ctx, tags, probeRequested = false, readyRequested = false) {
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('status', tags, apps, (app) => cmdStatus(ctx, app.alias, probeRequested, readyRequested));
 }
 
 // Bounded log tail implementation lives in scripts/lib/logs.mjs.

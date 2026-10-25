@@ -176,7 +176,26 @@ try {
     });
   }
 
-  // ---------- 生命周期（依赖进程探针） ----------
+  check('--tag 参数校验：与 ref 互斥、无匹配 NOT_FOUND', () => {
+    const both = run(['status', 'ghost', '--tag', 'no-such-tag']);
+    assert.equal(both.code, 1);
+    assert.equal(both.json?.error?.code, 'USAGE');
+    const none = run(['status', '--tag', 'no-such-tag']);
+    assert.equal(none.code, 2);
+    assert.equal(none.json?.error?.code, 'NOT_FOUND');
+  });
+
+  check('desc tags 非法（类型/重复/字符）在启动前拒绝（USAGE）', () => {
+    const f = path.join(base, 'desc-invalid-tags.json');
+    for (const tags of ['backend', ['backend', 'Backend'], ['bad tag']]) {
+      fs.writeFileSync(f, JSON.stringify({ alias: 'bad-tags', root: proj, mode: 'proc', exe: process.execPath, tags }));
+      const r = run(['start-new', '--desc', f]);
+      assert.equal(r.code, 1, `tags=${JSON.stringify(tags)} 应退出 1：${r.stdout}${r.stderr}`);
+      assert.equal(r.json?.error?.code, 'USAGE');
+      assert(r.json.error.message.includes('tags'), r.json.error.message);
+    }
+  });
+
   const descFile = path.join(base, 'desc.json');
   fs.writeFileSync(descFile, JSON.stringify({
     alias: 'smoke', root: proj, entry: 'default', mode: 'java',
@@ -375,6 +394,82 @@ try {
     expectOk(run(['stop', 'conc-b']));
   });
 
+  // ---------- tags 分组批量启停（#110） ----------
+  const groupDescs = [
+    { alias: 'tag-a', tags: ['Integration', 'backend'] },
+    { alias: 'tag-b', tags: ['integration', 'frontend'] },
+  ].map(({ alias, tags }) => {
+    const f = path.join(base, `desc-${alias}.json`);
+    fs.writeFileSync(f, JSON.stringify({
+      alias, root: proj, entry: alias, mode: 'java', tags,
+      exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'], envRefs: [],
+    }));
+    return f;
+  });
+
+  lifecycle('tags：start-new 透传 tags，list/status 展示', () => {
+    for (const f of groupDescs) expectOk(run(['start-new', '--desc', f]));
+    const list = expectOk(run(['list']));
+    const a = list.data.apps.find((x) => x.alias === 'tag-a');
+    assert.deepEqual(a.tags, ['Integration', 'backend'], `list tags 丢失：${JSON.stringify(a)}`);
+    const text = run(['list'], { json: false });
+    assert(text.stdout.includes('Integration'), `list 文本未展示 tags：${text.stdout.split('\n')[0]}`);
+    const st = expectOk(run(['status', 'tag-a']));
+    assert.deepEqual(st.data.tags, ['Integration', 'backend']);
+  });
+
+  lifecycle('status --tag → 批量查询（大小写不敏感）', () => {
+    const j = expectOk(run(['status', '--tag', 'INTEGRATION']));
+    assert.equal(j.data.batch, true);
+    assert.equal(j.data.matched, 2);
+    assert.equal(j.data.failed, 0);
+    assert.deepEqual(new Set(j.data.results.map((r) => r.alias)), new Set(['tag-a', 'tag-b']));
+    assert(j.data.results.every((r) => r.ok && r.status === 'RUNNING' && r.run.runId), JSON.stringify(j.data.results));
+  });
+
+  lifecycle('start --tag 部分失败：失败继续、不回滚已完成部分', () => {
+    expectOk(run(['stop', 'tag-a']));
+    const j = expectOk(run(['start', '--tag', 'integration']));
+    assert.equal(j.data.matched, 2);
+    assert.equal(j.data.succeeded, 1, JSON.stringify(j.data.results));
+    assert.equal(j.data.failed, 1, JSON.stringify(j.data.results));
+    assert.equal(j.data.partialFailure, true);
+    const a = j.data.results.find((r) => r.alias === 'tag-a');
+    const b = j.data.results.find((r) => r.alias === 'tag-b');
+    assert(a?.ok && a.status === 'RUNNING', `tag-a 应继续启动：${JSON.stringify(a)}`);
+    assert.equal(b?.ok, false);
+    assert.equal(b.error.code, 'ALREADY_RUNNING');
+    const st = expectOk(run(['status', '--tag', 'integration']));
+    assert(st.data.results.every((r) => r.status === 'RUNNING'), JSON.stringify(st.data.results));
+  });
+
+  lifecycle('restart --tag：--tree/--grace 逐条透传并起新 runId', () => {
+    const before = expectOk(run(['status', '--tag', 'integration']));
+    const beforeRuns = new Map(before.data.results.map((r) => [r.alias, r.run.runId]));
+    const j = expectOk(run(['restart', '--tag', 'integration', '--tree', '--grace', '3000']));
+    assert.equal(j.data.succeeded, 2, JSON.stringify(j.data.results));
+    for (const r of j.data.results) {
+      assert(r.ok, JSON.stringify(r));
+      assert.equal(r.stop.result, 'stopped', `${r.alias} 停旧实例结果：${JSON.stringify(r.stop)}`);
+      assert(Array.isArray(r.stop.treeKilled), `${r.alias} 未透传 --tree：${JSON.stringify(r.stop)}`);
+      assert.equal(r.start.status, 'RUNNING');
+      assert.notEqual(r.start.runId, beforeRuns.get(r.alias), `${r.alias} 未产生新 runId`);
+    }
+  });
+
+  lifecycle('stop --tag：--tree 逐条透传并全部停止', () => {
+    const j = expectOk(run(['stop', '--tag', 'integration', '--tree']));
+    assert.equal(j.data.matched, 2);
+    assert.equal(j.data.failed, 0, JSON.stringify(j.data.results));
+    for (const r of j.data.results) {
+      assert(r.ok, JSON.stringify(r));
+      assert.equal(r.result, 'stopped');
+      assert(Array.isArray(r.treeKilled), `${r.alias} 未透传 --tree`);
+    }
+    const st = expectOk(run(['status', '--tag', 'integration']));
+    assert(st.data.results.every((r) => r.status === 'STOPPED'), JSON.stringify(st.data.results));
+  });
+
   // ---------- stop --tree / --grace（#39 后代连带终止 + 优雅退出） ----------
   const treeProj = path.join(base, 'tree-proj');
   fs.mkdirSync(treeProj, { recursive: true });
@@ -471,6 +566,7 @@ try {
     assert(r.stdout.includes('18080'), r.stdout);
   });
 } finally {
+  try { run(['stop', '--tag', 'integration', '--tree']); } catch { /* 测试中途失败时尽力清理组内进程 */ }
   try { if (currentPid) process.kill(currentPid, 'SIGKILL'); } catch { /* 已退出 */ }
   fs.rmSync(base, { recursive: true, force: true });
 }

@@ -1,6 +1,6 @@
 ---
 name: project-runner
-description: Agent 驱动的本地项目启动助手：识别并启动 Java/Spring Boot（含 standalone JRebel）、Python、Vue/React/Vite 等 Node 前端与其他主流栈项目，启动、查看日志并验证热更新。用户要求启动本地服务/项目、配置或排查 JRebel、查看运行日志、打开本地 Web 管理台（manager ui，默认固定 http://127.0.0.1:8199）时使用；跨项目运行管理与只读管理台（manager.mjs list/status/start/stop/restart/remove/prune/logs/ui）已实现，用法见第 8 章（详见 references/manager.md）。
+description: Agent 驱动的本地项目启动助手：识别并启动 Java/Spring Boot（含 standalone JRebel）、Python、Vue/React/Vite 等 Node 前端与其他主流栈项目，启动、查看日志并验证热更新。用户要求启动本地服务/项目、配置或排查 JRebel、查看运行日志、打开本地 Web 管理台（manager ui，默认固定 http://127.0.0.1:8199）时使用；跨项目运行管理与只读管理台（manager.mjs list/status/start/stop/restart/remove/prune/logs/ui，start/stop/restart/status 支持 --tag 分组批量）已实现，用法见第 8 章（详见 references/manager.md）。
 ---
 
 # Project Runner · 多语言项目启动 / Standalone JRebel 流程
@@ -159,4 +159,4 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ## 8. 跨项目管理（manager.mjs，多项目/跨会话）
 
-跨项目管理的命令、数据、安全与恢复规程按需阅读 [manager 参考](references/manager.md)。常用启动路径：先识别项目并完成授权/安全检查，首次登记前先调用只读的 `manager.mjs detect --root <仓库根目录>` 取启动描述候选（只输出草案，不登记不启动），复核确认后再用 `manager.mjs start-new` 登记；之后 `list/status/start/stop/restart/logs` 管理已登记应用，网页观察入口为 `manager ui`。只操作本 Skill 启动并登记的应用，不接管 IDEA/手工进程；UNKNOWN/STARTING 未结记录不得绕过或删除。
+跨项目管理的命令、数据、安全与恢复规程按需阅读 [manager 参考](references/manager.md)。常用启动路径：先识别项目并完成授权/安全检查，首次登记前先调用只读的 `manager.mjs detect --root <仓库根目录>` 取启动描述候选（只输出草案，不登记不启动），复核确认后再用 `manager.mjs start-new` 登记；之后 `list/status/start/stop/restart/logs` 管理已登记应用，网页观察入口为 `manager ui`。前后端联调等需要一套应用一起启停时，在 desc 写 `tags`，再用 `start/stop/restart/status --tag <t>`：逐条执行、单条失败不中断后续也不回滚，必须检查结果里的 `results[].ok`；`--tree/--grace/--force` 逐条透传。只操作本 Skill 启动并登记的应用，不接管 IDEA/手工进程；UNKNOWN/STARTING 未结记录不得绕过或删除。
