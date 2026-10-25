@@ -132,7 +132,9 @@ try {
     assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS', r.text);
     const candidates = detail.candidates ?? [];
     assert(candidates.length >= 2, `歧义候选不足：${JSON.stringify(candidates)}`);
+    const allowedKeys = new Set(['pid', 'image', 'comm', 'creationFileTime', 'cmdHash', 'cmdLength']);
     for (const c of candidates) {
+      assert(Object.keys(c).every((k) => allowedKeys.has(k)), `候选含非白名单字段：${Object.keys(c).join(',')}`);
       assert.equal(c.cmd, undefined, 'CLI 候选仍携带原始 cmd');
       assert.equal(typeof c.cmdLength, 'number', '候选缺少 cmdLength 证据');
       assert.match(c.cmdHash, /^[0-9a-f]{16}$/, '候选缺少 cmdHash 证据');
