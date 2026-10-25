@@ -8,8 +8,9 @@ import { usageError, notFoundError, conflictError } from './errors.mjs';
 
 export const PREV_RUNS_KEEP = 20;
 // 未结记录（STARTING、启动中断、pid 未采集、UNKNOWN、进程与记录状态可能并存）
-// 以及任何无法识别的 phase：一律禁止自动重试，只有 RUNNING/STOPPED 才可再次启动/移除
-const RESUMABLE_PHASES = new Set(['RUNNING', 'STOPPED']);
+// 以及任何无法识别的 phase：一律禁止自动重试，只有明确无存活进程的 RUNNING/STOPPED/
+// BACKOFF/DEAD 才可再次启动/移除（BACKOFF/DEAD 由 log-writer 监督策略产生）。
+const RESUMABLE_PHASES = new Set(['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD']);
 
 export function appContext(home, ref) {
   if (!ref) throw usageError('需要 <alias|appId>');
@@ -39,6 +40,10 @@ export function archiveCurrent(rt, opts = {}) {
       runId: cur.runId, phase: cur.phase, managed: cur.managed, kind: cur.kind ?? 'direct',
       startedAt: cur.startedAt, endedAt: cur.endedAt ?? null,
       lastError: cur.lastError ?? null, archivedAt: new Date().toISOString(),
+      restartPolicy: cur.restartPolicy ?? null,
+      restartCount: cur.restartCount ?? 0,
+      restartState: cur.restartState ?? null,
+      lastExit: cur.lastExit ?? null,
     };
     if (opts.reason) {
       // 显式 ack 放弃的未结记录：保留完整身份与日志证据，注明归档原因
@@ -167,6 +172,20 @@ export function computeStatus(home, appId, rt, prefetched = null) {
     return {
       status: 'UNKNOWN', managed: true, runId: cur.runId,
       note: `启动中断（${why}，intentAt=${cur.intentAt}）；证据保留，需 --ack-unresolved 恢复`,
+    };
+  }
+  if (cur.phase === 'BACKOFF') {
+    const next = cur.nextRestartAt ? `，下一次尝试不早于 ${cur.nextRestartAt}` : '';
+    const count = cur.restartCount ?? 0;
+    return {
+      status: 'BACKOFF', managed: true, runId: cur.runId,
+      note: `自动重启等待中（第 ${count} 次已排程${next}）；日志与退出证据保留`, restartState: 'BACKOFF',
+    };
+  }
+  if (cur.phase === 'DEAD') {
+    return {
+      status: 'DEAD', managed: true, runId: cur.runId, pid: cur.pid ?? null,
+      note: cur.exitNote ?? '自动重启次数已耗尽，不再重启；请人工核验后 start/restart', restartState: 'DEAD',
     };
   }
   if (cur.phase === 'STOPPED') {

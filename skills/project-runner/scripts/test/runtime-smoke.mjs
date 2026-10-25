@@ -21,7 +21,9 @@ const projUm = path.join(base, 'um-app');
 const projCmd = path.join(base, 'cmd-app');
 const projAmb = path.join(base, 'amb-app');
 const projNpm = path.join(base, 'npm-app');
-for (const d of [projNode, projPy, projUm, projCmd, projAmb, projNpm]) fs.mkdirSync(d, { recursive: true });
+const projRestart = path.join(base, 'restart-app');
+const projCmdRestart = path.join(base, 'cmd-restart-app');
+for (const d of [projNode, projPy, projUm, projCmd, projAmb, projNpm, projRestart, projCmdRestart]) fs.mkdirSync(d, { recursive: true });
 
 fs.writeFileSync(path.join(projNode, 'srv.js'),
   'console.log("node-ready PORT=" + (process.env.PORT ?? "<unset>"));\nsetInterval(() => {}, 1000);\n', 'utf8');
@@ -52,6 +54,17 @@ fs.writeFileSync(path.join(projNpm, 'srv.js'),
 // 端口诊断回归：受管 node 监听固定端口，port 命令应给出同一 pid 与完整身份
 fs.writeFileSync(path.join(projNpm, 'lsn.js'),
   'require("node:http").createServer((q, s) => s.end("ok")).listen(process.env.PORT || 18123, "127.0.0.1", () => console.log("lsn-ready"));\n', 'utf8');
+// restartPolicy 回归：直连/命令模式各自定时异常退出；stable 由人为 stop 终止；clean 正常退出。
+const crashBody = (tag) => `console.log("${tag}-start pid=" + process.pid);\n`
+  + `setTimeout(() => { console.log("${tag}-exit pid=" + process.pid); process.exit(7); }, 1200);\n`;
+fs.writeFileSync(path.join(projRestart, 'crash.js'), crashBody('crash'), 'utf8');
+fs.writeFileSync(path.join(projRestart, 'stable.js'),
+  'console.log("stable-start pid=" + process.pid);\nsetInterval(() => {}, 1000);\n', 'utf8');
+fs.writeFileSync(path.join(projRestart, 'clean.js'),
+  'console.log("clean-start pid=" + process.pid);\nsetTimeout(() => { console.log("clean-exit"); process.exit(0); }, 1200);\n', 'utf8');
+fs.writeFileSync(path.join(projCmdRestart, 'cmd-crash.js'),
+  'console.log("cmd-crash-start pid=" + process.pid);\n'
+  + 'setTimeout(() => { console.log("cmd-crash-exit pid=" + process.pid); process.exit(7); }, 6000);\n', 'utf8');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const cli = (...args) => {
@@ -82,6 +95,18 @@ const waitChildPid = async (file) => {
     await wait(500);
   }
   return null;
+};
+const waitStatus = async (ref, predicate, attempts = 100) => {
+  let last = null;
+  for (let i = 0; i < attempts; i++) {
+    const r = cli('status', ref);
+    if (r.code === 0) {
+      last = r.json.data;
+      if (predicate(last)) return last;
+    }
+    await wait(250);
+  }
+  return last;
 };
 
 let failed = 0;
@@ -319,6 +344,94 @@ try {
     assert.equal(stopR.code, 0, stopR.text);
     assert.equal(cli('status', 'npmdev').json.data.status, 'STOPPED');
   });
+  // ---------- restartPolicy：受管监督重启 ----------
+  await check('restartPolicy 校验：非法值/限界错配/范围外拒绝（USAGE）', () => {
+    const cases = [
+      { alias: 'rpbad1', restartPolicy: 'always' },
+      { alias: 'rpbad2', restartPolicy: 'never', maxRestarts: 1 },
+      { alias: 'rpbad3', restartPolicy: 'on-failure', maxRestarts: -1 },
+      { alias: 'rpbad4', restartPolicy: 'on-failure', backoffMs: 1.5 },
+    ];
+    for (const c of cases) {
+      const r = cli('start-new', '--desc', descFile({
+        root: projNode, mode: 'node', exe: 'node', args: ['srv.js'], ...c,
+      }));
+      assert.equal(r.code, 1, `${c.alias}: ${r.text}`);
+    }
+  });
+  await check('restartPolicy=on-failure：直连进程崩溃自动重启，达上限进入 DEAD', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'restartapp', root: projRestart, mode: 'node', exe: 'node', args: ['crash.js'],
+      restartPolicy: 'on-failure', maxRestarts: 2, backoffMs: 100,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const firstPid = r.json.data.pid;
+    const mid = await waitStatus('restartapp', (d) => (d.run?.restartCount ?? 0) >= 1 && d.run?.pid !== firstPid);
+    assert(mid, '未观察到自动重启后的新 pid');
+    assert.notEqual(mid.run.pid, firstPid, '自动重启后 pid 未变化');
+    assert.equal(mid.run.restartPolicy, 'on-failure');
+    assert.equal(mid.run.maxRestarts, 2);
+    const dead = await waitStatus('restartapp', (d) => d.status === 'DEAD');
+    assert(dead, '连续崩溃未进入 DEAD');
+    assert.equal(dead.status, 'DEAD');
+    assert.equal(dead.run.restartCount, 2, `restartCount 异常：${dead.run.restartCount}`);
+    assert(dead.run.restartEvents?.some((e) => e.type === 'dead'), 'restartEvents 缺少 dead 事件');
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${dead.appId}.json`), 'utf8'));
+    assert.equal(rt.current.phase, 'DEAD');
+    const list = cli('list');
+    assert(list.json.data.apps.find((a) => a.alias === 'restartapp')?.status === 'DEAD', 'list 未显示 DEAD');
+  });
+  await check('restartPolicy=on-failure：人为 stop 不触发自动重启', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'restartstop', root: projRestart, mode: 'node', exe: 'node', args: ['stable.js'],
+      restartPolicy: 'on-failure', maxRestarts: 3, backoffMs: 100,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const stopped = cli('stop', 'restartstop');
+    assert.equal(stopped.code, 0, stopped.text);
+    await wait(1200);
+    const st = cli('status', 'restartstop');
+    assert.equal(st.code, 0, st.text);
+    assert.equal(st.json.data.status, 'STOPPED');
+    assert.equal(st.json.data.run.restartCount, 0, '人为 stop 后不应发生自动重启');
+  });
+  await check('restartPolicy=on-failure：正常 code=0 退出不自动重启', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'restartclean', root: projRestart, mode: 'node', exe: 'node', args: ['clean.js'],
+      restartPolicy: 'on-failure', maxRestarts: 3, backoffMs: 100,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const st = await waitStatus('restartclean', (d) => d.status === 'STOPPED' && /restartPolicy=on-failure/.test(d.run?.exitNote ?? ''));
+    assert(st, '正常退出后未落 STOPPED');
+    assert.equal(st.status, 'STOPPED');
+    assert.equal(st.run.restartCount, 0, '正常退出不应触发自动重启');
+    assert.match(st.run.exitNote ?? '', /restartPolicy=on-failure/, `exitNote 缺少策略说明：${st.run.exitNote}`);
+  });
+  await check('restartPolicy=on-failure：命令模式 wrapper 监督重启后代并进入 DEAD', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmdrestart', root: projCmdRestart, mode: 'node',
+      command: 'node cmd-crash.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
+      restartPolicy: 'on-failure', maxRestarts: 1, backoffMs: 100,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    assert.equal(r.code, 0, r.text);
+    const firstPid = r.json.data.pid;
+    const firstWrapper = r.json.data.wrapperPid;
+    const dead = await waitStatus('cmdrestart', (d) => d.status === 'DEAD', 160);
+    assert(dead, '命令模式连续崩溃未进入 DEAD');
+    assert.equal(dead.run.restartCount, 1, `restartCount 异常：${dead.run.restartCount}`);
+    assert.notEqual(dead.run.pid, firstPid, '命令模式重启后目标 pid 未变化');
+    assert.notEqual(dead.run.wrapperPid, firstWrapper, '命令模式重启后 wrapper pid 未变化');
+    assert(dead.run.restartEvents?.some((e) => e.type === 'restarted'), 'restartEvents 缺少 restarted 事件');
+    assert(dead.run.restartEvents?.some((e) => e.type === 'dead'), 'restartEvents 缺少 dead 事件');
+  });
   // ---------- stop --tree：命令模式 node 目标 + node 后代（#39） ----------
   await check('默认 stop 不触碰目标后代（存活留证）', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
@@ -477,7 +590,7 @@ try {
   });
 } finally {
   // 兜底：按当时仍在的后代 PID 清理，不只依赖 wrapper PID（wrapper 可能先死，#46）
-  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail']) {
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail', 'restartapp', 'restartstop', 'restartclean', 'cmdrestart']) {
     try { cli('stop', a, '--tree'); } catch { /* 忽略 */ }
   }
   const cleanupFailures = [];
@@ -498,7 +611,7 @@ try {
   // 回归断言：本轮启动的临时进程都已退出（kill 后进程退出需要一点时间，轮询等待）
   let leftover = [];
   for (let i = 0; i < 20; i++) {
-    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|lsn\\.js|npm-cli\\.js run dev|setInterval|sleep 30').filter((pid) => pid !== process.pid);
+    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|lsn\\.js|crash\\.js|stable\\.js|clean\\.js|cmd-crash\\.js|npm-cli\\.js run dev|setInterval|sleep 30').filter((pid) => pid !== process.pid);
     if (!leftover.length) break;
     await wait(250);
   }

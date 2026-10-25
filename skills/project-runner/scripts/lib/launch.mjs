@@ -8,6 +8,7 @@ import { SCHEMA_VERSION } from './constants.mjs';
 import { runtimePath, readRuntimeStrict } from './store.mjs';
 import { psProc, COMMAND_DISCOVER_TIMEOUT_MS } from './probe.mjs';
 import { resolveExe, newRunId, RUN_LOG_MAX_BYTES } from './desc.mjs';
+import { effectiveRestartSettings } from './restart.mjs';
 import { archiveCurrent, writeRuntime, isUnresolvedPhase } from './runtime.mjs';
 import { readStderrTailSafe } from './logs.mjs';
 import { conflictError } from './errors.mjs';
@@ -67,6 +68,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
   }
 
   const isCommand = !!app.command;
+  const restart = effectiveRestartSettings(app);
   rt.current = {
     runId, phase: 'STARTING', managed: true, mode: app.mode,
     kind: isCommand ? 'command' : 'direct',
@@ -75,6 +77,9 @@ export async function launchManaged(home, appId, app, opts = {}) {
     wrapperPid: null, wrapperCreationFileTime: null, wrapperImage: null, loggerPid: null,
     envResolved: (app.envRefs ?? []).filter((n) => n in process.env),
     logPaths: { stdout: outPath, stderr: errPath },
+    restartPolicy: restart.restartPolicy, maxRestarts: restart.maxRestarts, backoffMs: restart.backoffMs,
+    restartCount: 0, restartState: null, nextRestartAt: null, lastExit: null, restartEvents: [],
+    stopRequested: false,
     lastError: null, endedAt: null, exitNote: null,
   };
   writeRuntime(home, appId, rt);
@@ -96,6 +101,8 @@ export async function launchManaged(home, appId, app, opts = {}) {
       cwd: app.cwd, outPath, errPath,
       home, appId, runtimeFile: runtimePath(home, appId), runId,
       limit: app.logMaxBytes ?? RUN_LOG_MAX_BYTES, pidFile,
+      isCommand, expectedImage: app.expectedImage ?? null, discoverTimeoutMs: app.discoverTimeoutMs ?? null,
+      restartPolicy: restart.restartPolicy, maxRestarts: restart.maxRestarts, backoffMs: restart.backoffMs,
     }));
     // The detached logger owns both output descriptors and launches the application
     // with pipes, allowing safe stdout rotation without touching a live app fd.

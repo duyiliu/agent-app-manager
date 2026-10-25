@@ -167,6 +167,7 @@ ui [--port N] [--open]                      # 本地 Web 管理台（127.0.0.1 �
 | AC07 | 不改业务项目；普通 Java 模式无需 JRebel 配置；PR #5 单项目启动、JRebel 验证、只读日志查看（v2.2 起为 `manager ui`）、原 `.tmp` 日志继续可用 |
 | AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）与项目文件（路径白名单、拒绝穿越与符号链接），启停仅 POST `/api/lifecycle`（与 CLI 同一实现）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
 | AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；安全停止使用 pidfd 锚定进程身份，pidfd 不可用时明确拒绝；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
+| AC10 | `restartPolicy=never`（默认）行为不变；`on-failure` 下异常退出由 detached log-writer 在 `maxRestarts`/`backoffMs` 内有界重启并写回同一 run 记录，连续失败进入 `DEAD`（`BACKOFF`/`DEAD` 在 list/status/UI 可见）；人为 `stop`、正常 `code=0` 退出、`remove` 或换新 run 不触发重启；命令模式重启后重新发现并记录新目标身份 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
 
@@ -212,3 +213,5 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 - **follow 轮转重置**：`logs --follow` 检测到 `size < pos`（log-writer 已 rename 旧文件并重建同名新文件）时重置到新文件起始继续跟随并提示；旧尾部可用 `--src run:<runId>.<stream>.1` 查看。
 - **ui 渲染窗口有界**：过滤激活时旧逻辑按「DOM 行数−缓存行数」修剪永不触发，长会话 DOM 无界增长；改为计数式上限（MAX_LINES），不再每 tick 全量 `querySelectorAll`。
 - 其他：仓库根新增 `package.json`（engines + `npm test`/`npm run check` 聚合冒烟）；`decodeCmdOutput` 在无 GBK 解码器的 Node 上回退 lossy UTF-8。
+
+**v2.9（2026-10-25，restartPolicy 监督重启）**：desc 新增可选 `restartPolicy`（`never` 默认 / `on-failure`），`on-failure` 可配 `maxRestarts`（0–100，默认 3）与 `backoffMs`（0–600000，默认 1000）。manager 仍无常驻服务：命令模式与直连模式的 detached `log-writer` 同时承担看门狗——观察目标/Wrapper 退出、按退出码与信号判断是否异常、在同一 `runId` 的 runtime 记录中写入 `restartCount`/`restartState`/`nextRestartAt`/`lastExit`/`restartEvents`，等待 backoff 后按原启动描述重新拉起并重新采集目标身份（命令模式重新 discover）。异常退出后等待期 phase=`BACKOFF`，连续重启达到 `maxRestarts` 后 phase=`DEAD` 并停止监督；两者在 `list`/`status`/UI 可见。正常 `code=0` 退出、人为 `stop`/`remove`（写 `stopRequested`）以及运行记录被新 run 替换均不触发重启。`BACKOFF` 可被 `stop` 取消，`DEAD` 无存活进程可直接 `start`/`restart` 重新计数；监督失败仍保留证据，不伪造 RUNNING。回归：`runtime-smoke` 覆盖直连/命令模式自动重启、达上限 DEAD、人为 stop 与正常退出不重启，以及 desc 校验。

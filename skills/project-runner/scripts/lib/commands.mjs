@@ -17,6 +17,7 @@ import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
 import { readTailLines, MAX_LOG_LINES } from './logs.mjs';
 import { planPrune, applyPrune } from './prune.mjs';
+import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from './restart.mjs';
 import { bootId } from './proc-linux.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
@@ -133,6 +134,9 @@ export function cmdRecordUnmanaged(ctx) {
       existing.command = null;
       existing.expectedImage = null;
       existing.discoverTimeoutMs = null;
+      existing.restartPolicy = 'never';
+      existing.maxRestarts = null;
+      existing.backoffMs = null;
       existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
       existing.updatedAt = now;
     } else {
@@ -140,6 +144,7 @@ export function cmdRecordUnmanaged(ctx) {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
+        restartPolicy: 'never', maxRestarts: null, backoffMs: null,
         envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
@@ -311,6 +316,9 @@ export function cmdList(ctx) {
       status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
       pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
+      restartPolicy: app.restartPolicy ?? 'never',
+      restartState: rt?.current?.restartState ?? st.restartState ?? null,
+      restartCount: rt?.current?.restartCount ?? 0,
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
     };
   });
@@ -415,6 +423,14 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       logRotated: cur.logRotated ?? false, logRotatedStreams: cur.logRotatedStreams ?? [],
       logRotateFailedStreams: cur.logRotateFailedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
+      restartPolicy: cur.restartPolicy ?? app.restartPolicy ?? 'never',
+      maxRestarts: cur.maxRestarts ?? app.maxRestarts ?? DEFAULT_MAX_RESTARTS,
+      backoffMs: cur.backoffMs ?? app.backoffMs ?? DEFAULT_BACKOFF_MS,
+      restartCount: cur.restartCount ?? 0,
+      restartState: cur.restartState ?? null,
+      nextRestartAt: cur.nextRestartAt ?? null,
+      lastExit: cur.lastExit ?? null,
+      restartEvents: cur.restartEvents ?? [],
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),
@@ -509,7 +525,28 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供停止`);
   if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
   if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
-  if (cur.phase === 'STOPPED') return { result: 'alreadyStopped', runId: cur.runId };
+  if (cur.phase === 'BACKOFF') {
+    // 自动重启等待中：没有存活目标。落 STOPPED 即取消监督重启（timer/attempt 会复核 phase）。
+    cur.phase = 'STOPPED';
+    cur.stopRequested = true;
+    cur.endedAt = new Date().toISOString();
+    cur.exitNote = '人为 stop：已取消 BACKOFF 中的自动重启';
+    cur.restartState = null;
+    cur.nextRestartAt = null;
+    writeRuntime(home, appId, rt);
+    return { result: 'stopped', runId: cur.runId, pid: cur.pid ?? null, restartCancelled: true };
+  }
+  if (cur.phase === 'DEAD') {
+    return { result: 'alreadyStopped', runId: cur.runId, pid: cur.pid ?? null, note: '重启策略已耗尽（DEAD），无自动重启进程' };
+  }
+  if (cur.phase === 'STOPPED') {
+    // status 查询可能先把崩溃落成 STOPPED；人为 stop 仍要显式压制待处理的自动重启。
+    if (!cur.stopRequested) {
+      cur.stopRequested = true;
+      writeRuntime(home, appId, rt);
+    }
+    return { result: 'alreadyStopped', runId: cur.runId };
+  }
   // --tree 必须在终止目标前快照后代（Linux 目标退出后会 reparent）。先核验目标身份再枚举，
   // 避免 PID 复用后把无关进程的后代当成目标后代；目标后续核验失败时不会触碰快照。
   let treeSnapshot = null;
@@ -520,6 +557,7 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   }
   const markStopped = (note, extra = {}, killTree = false) => {
     cur.phase = 'STOPPED';
+    cur.stopRequested = true;
     cur.endedAt = new Date().toISOString();
     cur.exitNote = note;
     invalidateVerifyCache(cur.pid); // 终止后立即作废缓存存活结论，避免 stop→start 竞态读到旧值
@@ -712,12 +750,28 @@ export function cmdRemove(ctx, ref) {
     if (rt && rt.current && rt.current.managed) {
       const st = computeStatus(ctx.home, appId, rt);
       if (st.writeback && rt.current) writeRuntime(ctx.home, appId, rt); // RUNNING→STOPPED 按 OS 事实落账（已在应用锁内）
+      if (st.status === 'BACKOFF') {
+        // 移除登记前先取消监督重启，避免 registry 删除后 timer 又把进程拉起。
+        rt.current.phase = 'STOPPED';
+        rt.current.stopRequested = true;
+        rt.current.endedAt = new Date().toISOString();
+        rt.current.exitNote = '人为 remove：已取消 BACKOFF 中的自动重启';
+        rt.current.restartState = null;
+        rt.current.nextRestartAt = null;
+        writeRuntime(ctx.home, appId, rt);
+      } else if (st.status === 'STOPPED' || st.status === 'DEAD') {
+        // 即使是 status 刚写回的 STOPPED，也显式压制可能尚未处理的监督重启。
+        if (!rt.current.stopRequested) {
+          rt.current.stopRequested = true;
+          writeRuntime(ctx.home, appId, rt);
+        }
+      }
       if (st.status === 'RUNNING') {
         throw conflictError('INSTANCE_RUNNING',
           `${app.alias} 有受管实例在运行（pid=${st.pid ?? rt.current.pid}），拒绝移除；先 stop 确认退出后再 remove`,
           { runId: rt.current.runId, pid: st.pid ?? rt.current.pid });
       }
-      if (st.status !== 'STOPPED') {
+      if (st.status !== 'STOPPED' && st.status !== 'DEAD' && st.status !== 'BACKOFF') {
         // STARTING/UNKNOWN/无法识别的 phase：未结记录，默认拒绝；显式 ack 且复核通过才归档旧账
         const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
         if (abandon) {
@@ -726,7 +780,7 @@ export function cmdRemove(ctx, ref) {
           abandonedRunId = abandon.runId;
         }
       } else if (ackRunId) {
-        // 已确认 STOPPED 的记录没有可 ack 的未结旧账：与 start 同一 ACK_MISMATCH 语义
+        // 已确认 STOPPED/DEAD（或刚取消 BACKOFF）的记录没有可 ack 的未结旧账
         throw conflictError('ACK_MISMATCH',
           `当前没有 STARTING/UNKNOWN 未结记录，--ack-unresolved=${ackRunId} 不适用；请去掉该参数`,
           { ackRunId, current: { runId: rt.current.runId, phase: rt.current.phase, managed: rt.current.managed } });
