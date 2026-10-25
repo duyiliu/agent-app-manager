@@ -209,6 +209,16 @@ try {
   assert(up, 'manager ui 未在 10s 内就绪');
 
   await poll('appsCache.length', (v) => v >= 2);
+  const cardAppIds = () => [...elFor('appList').querySelectorAll('.app-card')].map((c) => c.dataset.appId).sort();
+  const searchApps = (q) => { elFor('appSearch').value = q; run('renderApps()'); return cardAppIds(); };
+  await check('应用搜索命中显示名（HIS/报表）与应用 ID（arep）', () => {
+    assert.deepEqual(searchApps('HIS'), ['ahis']);
+    assert.deepEqual(searchApps('报表'), ['arep']);
+    assert.deepEqual(searchApps('arep'), ['arep']);
+    elFor('appSearch').value = '';
+    run('renderApps()');
+  });
+
   run(`selectApp('his')`);
   await poll('logSrc', (v) => v !== null);
 

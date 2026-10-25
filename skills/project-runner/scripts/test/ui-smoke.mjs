@@ -144,6 +144,10 @@ try {
 
   const apps = (await get('/api/apps')).json.data.apps;
   await check('应用列表（4 个登记应用）', () => assert.equal(apps.length, 4));
+  await check('应用列表含 displayName（按显示名搜索的数据基础）', () => {
+    assert.equal(apps.find((a) => a.alias === 'his').displayName, 'HIS');
+    assert.equal(apps.find((a) => a.alias === 'report').displayName, '报表');
+  });
   await check('受管 STOPPED 状态', () => assert.equal(apps.find((a) => a.alias === 'his').status, 'STOPPED'));
   await check('非受管 managed=false', () => assert.equal(apps.find((a) => a.alias === 'report').managed, false));
   await check('缺失目录应用 ghost 仍列出', () => assert(apps.some((a) => a.alias === 'ghost')));
