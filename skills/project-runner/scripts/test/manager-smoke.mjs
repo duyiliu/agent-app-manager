@@ -485,6 +485,32 @@ try {
 
   // ---------- 退出码/信号证据展示（#102；纯读，不依赖进程探针） ----------
   check('status/list 展示退出码与信号，旧记录无 exit 仍可读', () => {
+    // 生命周期测试在没有进程探针的主机上会跳过；为纯读展示断言提供独立的
+    // STOPPED fixture，避免依赖前面的 start-new 是否执行。
+    if (!appId) {
+      appId = 'asmoke';
+      const runtimeDir = path.join(home, 'runtime');
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      const regFile = path.join(home, 'registry.json');
+      const reg = fs.existsSync(regFile)
+        ? JSON.parse(fs.readFileSync(regFile, 'utf8'))
+        : { schemaVersion: 1, apps: {} };
+      reg.apps[appId] = {
+        appId, alias: 'smoke', displayName: 'smoke', root: proj, entry: 'default',
+        cwd: proj, mode: 'java', exe: process.execPath, args: [], envRefs: [], env: {},
+        expectedPort: 18080, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(regFile, JSON.stringify(reg, null, 2));
+      fs.writeFileSync(path.join(runtimeDir, `${appId}.json`), JSON.stringify({
+        schemaVersion: 1, appId,
+        current: {
+          runId: 'r-smoke-exit-evidence', phase: 'STOPPED', managed: true, mode: 'java',
+          pid: null, startedAt: null, endedAt: new Date().toISOString(),
+          exitNote: '进程已退出', logPaths: { stdout: null, stderr: null },
+        },
+        prevRuns: [],
+      }, null, 2));
+    }
     const file = path.join(home, 'runtime', `${appId}.json`);
     const saved = fs.readFileSync(file, 'utf8');
     const writeExit = (exit) => {
