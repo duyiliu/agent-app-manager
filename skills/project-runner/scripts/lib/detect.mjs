@@ -367,13 +367,16 @@ export function detectProjects(root) {
     if (!web && !exe) continue;
     const assembly = /<AssemblyName>\s*([^<\s]+)\s*<\/AssemblyName>/i.exec(text)?.[1]
       || path.posix.basename(rel, path.posix.extname(rel));
+    // UseAppHost=false 时 dotnet run 由 dotnet host 执行程序集，目标映像不是 AssemblyName。
+    const useAppHost = !/<UseAppHost>\s*false\s*<\/UseAppHost>/i.test(text);
+    const expectedImage = useAppHost ? `${assembly}${exeSuffix}` : `dotnet${exeSuffix}`;
     const projectRoot = path.resolve(absoluteRoot, path.dirname(rel));
     const port = inferPort(projectRoot);
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: 'dotnet run', expectedImage: `${assembly}${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: 'dotnet run', expectedImage, ...(port ? { expectedPort: port.expectedPort } : {}) },
       confidence: web ? 'medium' : 'low',
-      evidence: { file: rel, rule: `dotnet-csproj:${web ? 'web' : 'exe'}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` },
+      evidence: { file: rel, rule: `dotnet-csproj:${web ? 'web' : 'exe'}${useAppHost ? '' : '; apphost:false'}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` },
     });
   }
   // Rust：只有唯一可运行 bin 时才生成候选；多个 [[bin]] 或自动 bin 歧义时只给提示。

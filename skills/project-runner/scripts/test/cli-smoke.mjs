@@ -207,6 +207,7 @@ const uvRoot = path.join(detectMoreRoot, 'uv-app');
 const venvRoot = path.join(detectMoreRoot, 'venv-app');
 const goRoot = path.join(detectMoreRoot, 'go-app');
 const dotnetRoot = path.join(detectMoreRoot, 'dotnet-app');
+const dotnetNoApphostRoot = path.join(detectMoreRoot, 'dotnet-no-apphost-app');
 const springProfileRoot = path.join(detectMoreRoot, 'spring-profile-app');
 const pipfileRoot = path.join(detectMoreRoot, 'pipfile-app');
 const setupPyRoot = path.join(detectMoreRoot, 'setup-py-app');
@@ -227,7 +228,7 @@ const frameworkFixtures = [
   ['svelte-app', '@sveltejs/kit', 'dev'],
   ['astro-app', 'astro', 'dev'],
 ];
-for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...invalidEnvPortRoots, ...invalidSpringPortRoots, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
+for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, dotnetNoApphostRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...invalidEnvPortRoots, ...invalidSpringPortRoots, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
 
 // pnpm + dev:*：脚本只在没有 dev/start/serve 时回退识别；.env.local 提供端口。
 w(path.join(devStarRoot, 'package.json'), JSON.stringify({ scripts: { 'dev:web': 'vite' }, devDependencies: { vite: '^6' }, packageManager: 'pnpm@9.0.0' }));
@@ -267,8 +268,9 @@ w(path.join(goNestedRoot, 'main.go'), 'package main\n\nfunc main() {}\n');
 fs.mkdirSync(path.join(goNestedRoot, 'nested'), { recursive: true });
 w(path.join(goNestedRoot, 'nested/go.mod'), 'module example.com/nested\n\ngo 1.22\n');
 w(path.join(goNestedRoot, 'nested/main.go'), 'package main\n\nfunc main() {}\n');
-// .NET：Web SDK 项目 → dotnet run。
+// .NET：Web SDK 项目 → dotnet run；UseAppHost=false 时目标影像是 dotnet host。
 w(path.join(dotnetRoot, 'DotnetApp.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>DotnetApp</AssemblyName></PropertyGroup></Project>\n');
+w(path.join(dotnetNoApphostRoot, 'DotnetNoApphost.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>DotnetNoApphost</AssemblyName><UseAppHost>false</UseAppHost></PropertyGroup></Project>\n');
 // Spring profile 端口：只有显式激活 profile 时才采用 profile 配置的端口。
 w(path.join(springProfileRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
 fs.mkdirSync(path.join(springProfileRoot, 'src/main/resources'), { recursive: true });
@@ -382,6 +384,12 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.equal(dotnet[0].desc.mode, 'proc');
   assert.equal(dotnet[0].desc.expectedImage, `DotnetApp${isWindows ? '.exe' : ''}`);
   assert.match(dotnet[0].evidence.rule, /^dotnet-csproj:web/);
+
+  const dotnetNoApphost = inRoot(dotnetNoApphostRoot);
+  assert.equal(dotnetNoApphost.length, 1);
+  assert.equal(dotnetNoApphost[0].desc.command, 'dotnet run');
+  assert.equal(dotnetNoApphost[0].desc.expectedImage, `dotnet${isWindows ? '.exe' : ''}`, 'UseAppHost=false 时目标映像是 dotnet host');
+  assert.match(dotnetNoApphost[0].evidence.rule, /^dotnet-csproj:web; apphost:false/);
 
   const springProfile = inRoot(springProfileRoot);
   assert.equal(springProfile.length, 1);
