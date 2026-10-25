@@ -19,6 +19,8 @@ jobs:
           node-version: 22
       - name: Syntax checks
         run: npm run check
+      - name: Docs consistency test
+        run: node skills/project-runner/scripts/test/docs-consistency.mjs
       # 与 npm test 同一组冒烟；逐步骤列出便于在 CI 页面直接定位失败项
       - name: Log rotation test
         run: node skills/project-runner/scripts/test/log-rotation.mjs
