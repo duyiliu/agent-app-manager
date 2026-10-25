@@ -212,16 +212,26 @@ const pipfileRoot = path.join(detectMoreRoot, 'pipfile-app');
 const setupPyRoot = path.join(detectMoreRoot, 'setup-py-app');
 const cargoRoot = path.join(detectMoreRoot, 'cargo-app');
 const composerRoot = path.join(detectMoreRoot, 'composer-app');
+const unsafeDevRoot = path.join(detectMoreRoot, 'dev-unsafe-app');
+const goNestedRoot = path.join(detectMoreRoot, 'go-nested-app');
+const cargoCustomRoot = path.join(detectMoreRoot, 'cargo-custom-bin-app');
+const cargoMultiRoot = path.join(detectMoreRoot, 'cargo-multi-bin-app');
+const phpNoPortRoot = path.join(detectMoreRoot, 'php-no-port-app');
+const phpPortRoot = path.join(detectMoreRoot, 'php-port-app');
+const springInactiveProfileRoot = path.join(detectMoreRoot, 'spring-inactive-profile-app');
+const springProfileOnlyRoot = path.join(detectMoreRoot, 'spring-profile-only-app');
 const frameworkFixtures = [
   ['react-app', 'react-scripts', 'start'],
   ['svelte-app', '@sveltejs/kit', 'dev'],
   ['astro-app', 'astro', 'dev'],
 ];
-for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
+for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
 
 // pnpm + dev:*：脚本只在没有 dev/start/serve 时回退识别；.env.local 提供端口。
 w(path.join(devStarRoot, 'package.json'), JSON.stringify({ scripts: { 'dev:web': 'vite' }, devDependencies: { vite: '^6' }, packageManager: 'pnpm@9.0.0' }));
 w(path.join(devStarRoot, '.env.local'), 'PORT=4321\n');
+// 含 shell 元字符的脚本名必须被拒绝，不得拼进 command。
+w(path.join(unsafeDevRoot, 'package.json'), JSON.stringify({ scripts: { 'dev:web; echo pwned': 'vite' }, devDependencies: { vite: '^6' } }));
 for (const [name, dep, script] of frameworkFixtures) {
   const dir = path.join(detectMoreRoot, name);
   w(path.join(dir, 'package.json'), JSON.stringify({ scripts: { [script]: `${dep} ${script}` }, dependencies: { [dep]: '1.0.0' } }));
@@ -240,31 +250,57 @@ w(path.join(venvRoot, 'app.py'), 'app = None\n');
 const venvPython = isWindows ? path.join('.venv', 'Scripts', 'python.exe') : path.join('.venv', 'bin', 'python');
 fs.mkdirSync(path.dirname(path.join(venvRoot, venvPython)), { recursive: true });
 w(path.join(venvRoot, venvPython), '');
-// Go：go.mod + package main/func main 才给候选。
+// Go：go.mod + package main/func main 才给候选；嵌套 go.mod 归属内层模块。
 w(path.join(goRoot, 'go.mod'), 'module example.com/goapp\n\ngo 1.22\n');
 w(path.join(goRoot, 'main.go'), 'package main\n\nfunc main() {}\n');
+w(path.join(goNestedRoot, 'go.mod'), 'module example.com/outer\n\ngo 1.22\n');
+w(path.join(goNestedRoot, 'main.go'), 'package main\n\nfunc main() {}\n');
+fs.mkdirSync(path.join(goNestedRoot, 'nested'), { recursive: true });
+w(path.join(goNestedRoot, 'nested/go.mod'), 'module example.com/nested\n\ngo 1.22\n');
+w(path.join(goNestedRoot, 'nested/main.go'), 'package main\n\nfunc main() {}\n');
 // .NET：Web SDK 项目 → dotnet run。
 w(path.join(dotnetRoot, 'DotnetApp.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>DotnetApp</AssemblyName></PropertyGroup></Project>\n');
-// Spring profile 端口：application-*.yml 也应作为端口证据。
+// Spring profile 端口：只有显式激活 profile 时才采用 profile 配置的端口。
 w(path.join(springProfileRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
 fs.mkdirSync(path.join(springProfileRoot, 'src/main/resources'), { recursive: true });
+w(path.join(springProfileRoot, 'src/main/resources/application.properties'), 'spring.profiles.active=dev\n');
 w(path.join(springProfileRoot, 'src/main/resources/application-dev.yml'), 'server:\n  port: 9091\n');
+// 未声明激活 profile：多个 profile 文件端口都不得覆盖基础配置。
+w(path.join(springInactiveProfileRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
+fs.mkdirSync(path.join(springInactiveProfileRoot, 'src/main/resources'), { recursive: true });
+w(path.join(springInactiveProfileRoot, 'src/main/resources/application.yml'), 'server:\n  port: 8080\n');
+w(path.join(springInactiveProfileRoot, 'src/main/resources/application-dev.yml'), 'server:\n  port: 9091\n');
+w(path.join(springInactiveProfileRoot, 'src/main/resources/application-prod.yml'), 'server:\n  port: 9092\n');
+// 只有 profile 文件、没有激活声明时不得选中该端口。
+w(path.join(springProfileOnlyRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
+fs.mkdirSync(path.join(springProfileOnlyRoot, 'src/main/resources'), { recursive: true });
+w(path.join(springProfileOnlyRoot, 'src/main/resources/application-dev.yml'), 'server:\n  port: 9091\n');
 // Pipfile / setup.py 也是 Python 依赖证据。
 w(path.join(pipfileRoot, 'Pipfile'), '[packages]\ndjango = "*"\n');
 w(path.join(pipfileRoot, 'manage.py'), 'import django\n');
 w(path.join(setupPyRoot, 'setup.py'), 'from setuptools import setup\nsetup(name="setup-py-app", install_requires=["fastapi"])\n');
 w(path.join(setupPyRoot, 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n');
-// Rust / PHP：有真实入口的 Cargo 包与 Laravel artisan。
+// Rust / PHP：默认 main、自定义/多 bin、Laravel artisan 与纯 PHP 入口。
 w(path.join(cargoRoot, 'Cargo.toml'), '[package]\nname = "cargo-app"\nversion = "0.1.0"\n');
 fs.mkdirSync(path.join(cargoRoot, 'src'), { recursive: true });
 w(path.join(cargoRoot, 'src/main.rs'), 'fn main() {}\n');
+w(path.join(cargoCustomRoot, 'Cargo.toml'), '[package]\nname = "custom-pkg"\nversion = "0.1.0"\n\n[[bin]]\nname = "custom-server"\npath = "src/custom.rs"\n');
+w(path.join(cargoMultiRoot, 'Cargo.toml'), '[package]\nname = "multi-pkg"\nversion = "0.1.0"\n\n[[bin]]\nname = "one"\npath = "src/one.rs"\n\n[[bin]]\nname = "two"\npath = "src/two.rs"\n');
 w(path.join(composerRoot, 'composer.json'), JSON.stringify({ require: { 'laravel/framework': '^10' } }));
 w(path.join(composerRoot, 'artisan'), '#!/usr/bin/env php\n');
+w(path.join(phpNoPortRoot, 'composer.json'), JSON.stringify({ require: { 'slim/slim': '^4' } }));
+fs.mkdirSync(path.join(phpNoPortRoot, 'public'), { recursive: true });
+w(path.join(phpNoPortRoot, 'public/index.php'), '<?php echo "ok";\n');
+w(path.join(phpPortRoot, 'composer.json'), JSON.stringify({ require: { 'slim/slim': '^4' } }));
+fs.mkdirSync(path.join(phpPortRoot, 'public'), { recursive: true });
+w(path.join(phpPortRoot, 'public/index.php'), '<?php echo "ok";\n');
+w(path.join(phpPortRoot, '.env.local'), 'PORT=8088\n');
 
 await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、Go、.NET 与 profile 端口', async () => {
   const r = await run(['detect', '--root', detectMoreRoot, '--json']);
   assert.equal(r.code, 0, r.text);
   const rows = r.json.data.candidates;
+  const notes = r.json.data.notes;
   const inRoot = (dir) => rows.filter((x) => x.desc.root === dir);
 
   const devStar = inRoot(devStarRoot);
@@ -275,6 +311,9 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.match(devStar[0].evidence.rule, /pm:pnpm/);
   assert.equal(devStar[0].desc.expectedPort, 4321);
   assert.match(devStar[0].evidence.rule, /port:4321\(\.env\.local:PORT\)/);
+
+  assert.equal(inRoot(unsafeDevRoot).length, 0, '含 shell 元字符的 dev:* 不得生成候选');
+  assert(notes.some((n) => n.file.endsWith('dev-unsafe-app/package.json') && /shell 元字符/.test(n.suggestion)), '应提示脚本名不安全');
 
   for (const [name, dep] of frameworkFixtures) {
     const dir = path.join(detectMoreRoot, name);
@@ -289,24 +328,36 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.match(poetry[0].evidence.rule, /^django-manage\.py/);
   assert.match(poetry[0].evidence.rule, /deps:poetry\.lock/);
   assert.equal(poetry[0].desc.command, isWindows ? 'python manage.py runserver' : 'python3 manage.py runserver');
+  assert.equal(poetry[0].desc.expectedImage, isWindows ? 'python.exe' : 'python3');
 
   const uv = inRoot(uvRoot);
   assert.equal(uv.length, 1, `uv 不应因 pyproject + uv.lock 生成重复候选：${uv.length}`);
   assert.match(uv[0].evidence.rule, /^fastapi-uvicorn:main:app/);
   assert.match(uv[0].evidence.rule, /deps:uv\.lock/);
   assert.equal(uv[0].desc.command, isWindows ? 'python -m uvicorn main:app' : 'python3 -m uvicorn main:app');
+  assert.equal(uv[0].desc.expectedImage, isWindows ? 'python.exe' : 'python3');
 
   const venv = inRoot(venvRoot);
   assert.equal(venv.length, 1);
   assert.equal(venv[0].desc.command, `${venvPython} -m flask --app app run`);
+  assert.equal(venv[0].desc.expectedImage, path.basename(venvPython));
   assert(venv[0].evidence.rule.includes('interpreter:venv(.venv'));
 
   const go = inRoot(goRoot);
   assert.equal(go.length, 1);
-  assert.equal(go[0].desc.command, 'go run .');
+  assert(go[0].desc.command.includes('go build -o '), `Go 候选应显式构建产物：${go[0].desc.command}`);
+  assert(go[0].desc.command.includes('goapp'), '构建产物名应含模块名');
   assert.equal(go[0].desc.mode, 'proc');
-  assert.equal(go[0].desc.expectedImage, `go-app${isWindows ? '.exe' : ''}`);
-  assert.match(go[0].evidence.rule, /^go-module:\.$/);
+  assert.equal(go[0].desc.expectedImage, `goapp${isWindows ? '.exe' : ''}`);
+  assert.match(go[0].evidence.rule, /^go-module:\.; build:goapp/);
+
+  const outerGo = inRoot(goNestedRoot);
+  assert.equal(outerGo.length, 1, `外层 Go 模块不得纳入嵌套模块入口：${outerGo.length}`);
+  assert.match(outerGo[0].evidence.rule, /^go-module:\.; build:outer/);
+  assert(!outerGo[0].desc.command.includes('nested'), '外层候选不得执行嵌套模块');
+  const nestedGo = inRoot(path.join(goNestedRoot, 'nested'));
+  assert.equal(nestedGo.length, 1, `嵌套 Go 模块应独立产出候选：${nestedGo.length}`);
+  assert.match(nestedGo[0].evidence.rule, /^go-module:\.; build:nested/);
 
   const dotnet = inRoot(dotnetRoot);
   assert.equal(dotnet.length, 1);
@@ -319,6 +370,16 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.equal(springProfile.length, 1);
   assert.equal(springProfile[0].desc.expectedPort, 9091);
   assert.match(springProfile[0].evidence.rule, /application-dev\.yml:server\.port/);
+
+  const springInactive = inRoot(springInactiveProfileRoot);
+  assert.equal(springInactive.length, 1);
+  assert.equal(springInactive[0].desc.expectedPort, 8080, '未激活 profile 时不得采用 profile 端口');
+  assert.match(springInactive[0].evidence.rule, /application\.yml:server\.port/);
+
+  const springProfileOnly = inRoot(springProfileOnlyRoot);
+  assert.equal(springProfileOnly.length, 1);
+  assert.equal(springProfileOnly[0].desc.expectedPort, undefined, '仅有未激活 profile 时不得报告端口');
+  assert(!springProfileOnly[0].evidence.rule.includes('application-dev.yml'), '未激活 profile 不得进入端口证据');
 
   const pipfile = inRoot(pipfileRoot);
   assert.equal(pipfile.length, 1);
@@ -336,6 +397,23 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.equal(cargo[0].desc.mode, 'proc');
   assert.equal(cargo[0].desc.expectedImage, `cargo-app${isWindows ? '.exe' : ''}`);
   assert.match(cargo[0].evidence.rule, /^cargo-package:cargo-app$/);
+
+  const cargoCustom = inRoot(cargoCustomRoot);
+  assert.equal(cargoCustom.length, 1);
+  assert.equal(cargoCustom[0].desc.command, 'cargo run --bin custom-server');
+  assert.equal(cargoCustom[0].desc.expectedImage, `custom-server${isWindows ? '.exe' : ''}`);
+  assert.match(cargoCustom[0].evidence.rule, /^cargo-bin:custom-server$/);
+
+  assert.equal(inRoot(cargoMultiRoot).length, 0, '多个 [[bin]] 不得生成无法唯一启动的候选');
+  assert(notes.some((n) => n.file.endsWith('cargo-multi-bin-app/Cargo.toml') && /多个 \[\[bin\]\]/.test(n.suggestion)), '应提示 Cargo 多 bin 歧义');
+
+  assert.equal(inRoot(phpNoPortRoot).length, 0, '无端口证据的 PHP 入口不得默认绑定 8000');
+  assert(notes.some((n) => n.file.endsWith('php-no-port-app/composer.json') && /未发现端口证据/.test(n.suggestion)), '应提示 PHP 入口缺端口证据');
+  const phpPort = inRoot(phpPortRoot);
+  assert.equal(phpPort.length, 1);
+  assert.equal(phpPort[0].desc.command, 'php -S 127.0.0.1:8088 -t public');
+  assert.equal(phpPort[0].desc.expectedPort, 8088);
+  assert.match(phpPort[0].evidence.rule, /port:8088\(\.env\.local:PORT\)/);
 
   const composer = inRoot(composerRoot);
   assert.equal(composer.length, 1);

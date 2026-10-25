@@ -1,7 +1,9 @@
 // Read-only project detection: scan a repo for common launch evidence and emit
 // start-desc candidates (detect command). Never writes registry or project files.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { usageError } from './errors.mjs';
 
 // 只作为“启动脚本存在且有明显框架依赖”时的置信度证据，不据此推断端口或命令。
@@ -46,7 +48,16 @@ export function detectProjects(root) {
   const pythonExec = process.platform === 'win32' ? 'python' : 'python3';
   const aliasBase = path.basename(absoluteRoot).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 24) || 'project';
   const nextAlias = () => `${aliasBase}-${candidates.length + 1}`.slice(0, 32);
-  const quoteArg = (value) => (/\s/.test(value) ? `"${value}"` : value);
+  // 只把能直接作为单个 shell 参数的安全 token 拼入 command；脚本名/bin 名含
+  // 空白、&、;、$ 等元字符时拒绝候选并留提示，避免候选启动时执行额外命令。
+  const SAFE_COMMAND_TOKEN = /^[A-Za-z0-9._:@/-]+$/;
+  const isSafeCommandToken = (value) => typeof value === 'string' && SAFE_COMMAND_TOKEN.test(value);
+  const shellArg = (value) => {
+    const text = String(value);
+    if (/^[A-Za-z0-9._:/\\-]+$/.test(text)) return text;
+    return process.platform === 'win32' ? `"${text.replace(/"/g, '""')}"` : `'${text.replace(/'/g, `'\\''`)}'`;
+  };
+  const quoteArg = (value) => (/^[A-Za-z0-9._:/\\-]+$/.test(value) ? value : shellArg(value));
 
   // 项目内解释器优先（SKILL 1A Python 第 2 条）：只在文件真实存在时采用，
   // 不把缺失 venv 当作已就绪；venv 目录本身被 walk 忽略，这里直接检查固定路径。
@@ -69,14 +80,18 @@ export function detectProjects(root) {
       ? { command: quoteArg(venv.rel), venv }
       : { command: pythonExec, venv: null };
   };
+  const pythonExpectedImage = (venv) => (venv
+    ? path.basename(venv.rel)
+    : `${pythonExec}${process.platform === 'win32' ? exeSuffix : ''}`);
   const projectRootFor = (dir) => path.resolve(absoluteRoot, dir === '.' ? '' : dir);
 
   // expectedPort 推断：从常见配置文件读端口，并标注证据出处（不猜端口）。
   const inferPort = (dir) => {
     const read = (name) => { try { return fs.readFileSync(path.join(dir, name), 'utf8'); } catch { return ''; } };
+    const envNames = ['.env.local', '.env.development', '.env.dev', '.env'];
+    const envTexts = envNames.map((name) => ({ name, text: read(name) }));
     // .env.local 通常覆盖 .env；再退到常见开发环境文件，仍只在有显式 PORT 时采用。
-    for (const name of ['.env.local', '.env.development', '.env.dev', '.env']) {
-      const text = read(name);
+    for (const { name, text } of envTexts) {
       const m = /^(?:export\s+)?(?:PORT|SERVER_PORT)\s*=\s*["']?(\d{2,5})["']?\s*$/m.exec(text);
       if (m) return { expectedPort: Number(m[1]), source: `${name}:PORT` };
     }
@@ -91,7 +106,8 @@ export function detectProjects(root) {
     }
 
     // Spring：application.properties / application-<profile>.properties / yml/yaml，
-    // 覆盖仓库根与 src/main/resources。基础文件优先，profile 文件按名称排序。
+    // 覆盖仓库根与 src/main/resources。profile 端口只有在配置明确声明激活 profile 时才采用；
+    // 否则按“未激活不采信”忽略 profile 文件，避免把 application-dev.yml 等冒充实际端口。
     const subDirs = ['src/main/resources', ''];
     const appFiles = [];
     for (const sub of subDirs) {
@@ -110,17 +126,50 @@ export function detectProjects(root) {
         });
       }
     }
-    const baseFirst = (a, b) => {
-      if (!a.profile !== !b.profile) return a.profile ? 1 : -1;
-      return a.name.localeCompare(b.name);
+    const baseFiles = appFiles.filter((f) => !f.profile);
+    const extOrder = ['properties', 'yml', 'yaml'];
+    const activeProfiles = [];
+    const addProfiles = (value) => {
+      for (const raw of String(value).split(',')) {
+        const profile = raw.trim().replace(/^["']|["']$/g, '');
+        if (profile && !activeProfiles.includes(profile)) activeProfiles.push(profile);
+      }
     };
-    for (const ext of ['properties', 'yml', 'yaml']) {
-      for (const item of appFiles.filter((f) => f.ext === ext).sort(baseFirst)) {
+    for (const { text } of envTexts) {
+      const m = /^(?:export\s+)?SPRING_PROFILES_ACTIVE\s*=\s*(.+?)\s*$/m.exec(text);
+      if (m) { addProfiles(m[1]); break; }
+    }
+    if (!activeProfiles.length) {
+      for (const item of baseFiles) {
         const text = read(item.rel);
-        const m = ext === 'properties'
-          ? /^\s*server\.port\s*=\s*(\d{2,5})\s*$/m.exec(text)
-          : /server\s*:[\s\S]{0,200}?port\s*:\s*(\d{2,5})/.exec(text);
-        if (m) return { expectedPort: Number(m[1]), source: `${item.rel}:server.port` };
+        const m = item.ext === 'properties'
+          ? /^\s*spring\.profiles\.active\s*=\s*(.+?)\s*$/m.exec(text)
+          : (/^\s*spring\.profiles\.active\s*:\s*([^\s#]+)\s*$/m.exec(text)
+            ?? /^\s*spring\s*:\s*$[\s\S]{0,300}?^\s+profiles\s*:\s*$[\s\S]{0,300}?^\s+active\s*:\s*([^\s#]+)\s*$/m.exec(text));
+        if (m) { addProfiles(m[1]); break; }
+      }
+    }
+    const portOf = (item) => {
+      const text = read(item.rel);
+      const m = item.ext === 'properties'
+        ? /^\s*server\.port\s*=\s*(\d{2,5})\s*$/m.exec(text)
+        : /server\s*:[\s\S]{0,200}?port\s*:\s*(\d{2,5})/.exec(text);
+      return m ? { expectedPort: Number(m[1]), source: `${item.rel}:server.port` } : null;
+    };
+    // Spring 中后激活的 profile 覆盖先激活的；只查明确激活的 profile。
+    for (let i = activeProfiles.length - 1; i >= 0; i--) {
+      const profile = activeProfiles[i];
+      for (const ext of extOrder) {
+        for (const item of appFiles.filter((f) => f.profile === profile && f.ext === ext)) {
+          const found = portOf(item);
+          if (found) return found;
+        }
+      }
+    }
+    for (const ext of extOrder) {
+      for (const item of baseFiles.filter((f) => f.ext === ext)) {
+        const found = portOf(item);
+        if (found) return found;
       }
     }
     return null;
@@ -151,6 +200,10 @@ export function detectProjects(root) {
       if (pkg.bin || pkg.main) {
         notes.push({ file: rel, suggestion: 'package.json 无 dev/start/serve/dev:* 脚本；可核对 bin/main 字段或 README 的启动方式后手工拟定 desc。' });
       }
+      continue;
+    }
+    if (!isSafeCommandToken(script)) {
+      notes.push({ file: rel, suggestion: `package.json 脚本名 ${JSON.stringify(script)} 含 shell 元字符，detect 不生成候选；请改用安全的脚本名后重试。` });
       continue;
     }
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
@@ -243,20 +296,26 @@ export function detectProjects(root) {
       ...(port ? [`port:${port.expectedPort}(${port.source})`] : []),
     ];
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'python', command, expectedImage: `python${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'python', command, expectedImage: pythonExpectedImage(venv), ...(port ? { expectedPort: port.expectedPort } : {}) },
       confidence: 'medium',
       evidence: { file: primary.rel, rule: evidenceParts.join('; ') },
     });
   }
-  // Go：go.mod + package main/func main → go run <包目录>。找不到 main 时只给提示。
-  for (const rel of files.filter((f) => path.basename(f) === 'go.mod')) {
+  // Go：go.mod + package main/func main → 显式构建到临时目录再直连产物。
+  // go run 的临时二进制名不受模块/目录名保证，显式 -o 才能让 expectedImage 确定。
+  // 嵌套 go.mod 的文件归属内层模块，外层不得生成跨模块候选。
+  const goModuleRels = files.filter((f) => path.basename(f) === 'go.mod');
+  const goModuleDirs = goModuleRels.map((f) => path.posix.dirname(f));
+  for (const rel of goModuleRels) {
     const moduleDir = path.posix.dirname(rel);
     const prefix = moduleDir === '.' ? '' : `${moduleDir}/`;
+    const nestedDirs = goModuleDirs.filter((d) => d !== moduleDir && (moduleDir === '.' ? d !== '.' : d.startsWith(`${moduleDir}/`)));
     const modulePath = /^\s*module\s+(\S+)/m.exec(readRel(rel))?.[1] ?? '';
     const moduleBase = modulePath.split('/').filter(Boolean).pop() || path.posix.basename(moduleDir) || 'app';
     const mainDirs = new Set();
     for (const file of files) {
       if (!file.startsWith(prefix) || !file.endsWith('.go')) continue;
+      if (nestedDirs.some((d) => file.startsWith(`${d}/`))) continue;
       const code = readRel(file);
       if (!/^\s*package\s+main\b/m.test(code) || !/func\s+main\s*\(/.test(code)) continue;
       mainDirs.add(path.posix.dirname(file));
@@ -269,14 +328,21 @@ export function detectProjects(root) {
     for (const mainDir of dirs) {
       const relMain = path.posix.relative(moduleDir === '.' ? '' : moduleDir, mainDir) || '.';
       const pkgArg = relMain === '.' ? '.' : `./${relMain}`;
-      const binaryDir = path.posix.basename(mainDir);
-      const binaryBase = binaryDir && binaryDir !== '.' ? binaryDir : moduleBase;
+      const binaryRaw = mainDir === moduleDir ? moduleBase : path.posix.basename(mainDir);
+      const binaryBase = binaryRaw.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'app';
       const projectRoot = projectRootFor(moduleDir);
+      const hash = crypto.createHash('sha1').update(`${projectRoot}\0${moduleDir}\0${mainDir}`).digest('hex').slice(0, 8);
+      const binDir = path.join(os.tmpdir(), `project-runner-go-${hash}`);
+      const binAbs = path.join(binDir, `${binaryBase}${exeSuffix}`);
+      const prepare = process.platform === 'win32'
+        ? `if not exist ${shellArg(binDir)} mkdir ${shellArg(binDir)}`
+        : `mkdir -p ${shellArg(binDir)}`;
+      const command = `${prepare} && go build -o ${shellArg(binAbs)} ${quoteArg(pkgArg)} && ${shellArg(binAbs)}`;
       const alias = nextAlias();
       candidates.push({
-        desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: `go run ${pkgArg}`, expectedImage: `${binaryBase}${exeSuffix}` },
+        desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command, expectedImage: `${binaryBase}${exeSuffix}` },
         confidence: dirs.length === 1 ? 'medium' : 'low',
-        evidence: { file: rel, rule: `go-module:${pkgArg}` },
+        evidence: { file: rel, rule: `go-module:${pkgArg}; build:${binaryBase}${exeSuffix}` },
       });
     }
   }
@@ -297,41 +363,98 @@ export function detectProjects(root) {
       evidence: { file: rel, rule: `dotnet-csproj:${web ? 'web' : 'exe'}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` },
     });
   }
-  // Rust：有 src/main.rs 或 [[bin]] 的 Cargo 包 → cargo run。
+  // Rust：只有唯一可运行 bin 时才生成候选；多个 [[bin]] 或自动 bin 歧义时只给提示。
   for (const rel of files.filter((f) => path.basename(f) === 'Cargo.toml')) {
     const dir = path.posix.dirname(rel);
     const text = readRel(rel);
     const local = (name) => files.includes(path.posix.join(dir, name));
-    if (!local('src/main.rs') && !/^\s*\[\[bin\]\]/m.test(text)) continue;
-    const pkgName = /^\s*name\s*=\s*"([^"]+)"/m.exec(text)?.[1] || path.posix.basename(dir) || 'app';
+    const packageName = /^\[package\][\s\S]*?^\s*name\s*=\s*"([^"]+)"/m.exec(text)?.[1]
+      || /^\s*name\s*=\s*"([^"]+)"/m.exec(text)?.[1]
+      || path.posix.basename(dir) || 'app';
+    const manifestBins = [];
+    let inBin = false;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (/^\[\[bin\]\]$/.test(line)) { manifestBins.push({}); inBin = true; continue; }
+      if (/^\[.*\]$/.test(line)) { inBin = false; continue; }
+      if (!inBin) continue;
+      const name = /^name\s*=\s*"([^"]+)"/.exec(line)?.[1];
+      if (name && !manifestBins[manifestBins.length - 1].name) manifestBins[manifestBins.length - 1].name = name;
+    }
+    const autoBins = [];
+    const binPrefix = dir === '.' ? 'src/bin/' : `${dir}/src/bin/`;
+    for (const file of files) {
+      if (!file.startsWith(binPrefix)) continue;
+      const rest = file.slice(binPrefix.length);
+      if (!rest.endsWith('.rs') || rest.includes('/')) continue;
+      autoBins.push(path.posix.basename(rest, '.rs'));
+    }
+    const hasMain = local('src/main.rs');
+    let binName = null;
+    let explicit = false;
+    let binRule = null;
+    if (manifestBins.length > 1) {
+      notes.push({ file: rel, suggestion: `Cargo.toml 定义多个 [[bin]]（${manifestBins.map((b) => b.name ?? '(未命名)').join(', ')}），detect 不生成无法唯一启动的候选；请选择 --bin 后手工拟定 desc。` });
+      continue;
+    }
+    if (manifestBins.length === 1) {
+      binName = manifestBins[0].name;
+      explicit = true;
+      binRule = `cargo-bin:${binName ?? '(未命名)'}`;
+      if (!binName) {
+        notes.push({ file: rel, suggestion: 'Cargo.toml 的单个 [[bin]] 未声明 name；detect 不生成无法确定目标映像的候选。' });
+        continue;
+      }
+    } else {
+      const autoChoices = [...autoBins, ...(hasMain ? [packageName] : [])];
+      const uniqueChoices = [...new Set(autoChoices)];
+      if (!uniqueChoices.length) continue;
+      if (uniqueChoices.length > 1) {
+        notes.push({ file: rel, suggestion: `Cargo 自动发现多个可运行 bin（${uniqueChoices.join(', ')}），detect 不生成无法唯一启动的候选；请选择 --bin 后手工拟定 desc。` });
+        continue;
+      }
+      binName = uniqueChoices[0];
+      explicit = autoBins.length > 0;
+      binRule = explicit ? `cargo-bin:${binName}` : `cargo-package:${packageName}`;
+    }
+    if (!isSafeCommandToken(binName)) {
+      notes.push({ file: rel, suggestion: `Cargo bin 名 ${JSON.stringify(binName)} 含 shell 元字符，detect 不生成候选。` });
+      continue;
+    }
     const projectRoot = projectRootFor(dir);
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: 'cargo run', expectedImage: `${pkgName}${exeSuffix}` },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: `cargo run${explicit ? ` --bin ${binName}` : ''}`, expectedImage: `${binName}${exeSuffix}` },
       confidence: 'medium',
-      evidence: { file: rel, rule: `cargo-package:${pkgName}` },
+      evidence: { file: rel, rule: binRule },
     });
   }
-  // PHP：Laravel artisan / public/index.php → 真实 php 解释器命令模式。
+  // PHP：Laravel artisan / public/index.php。后者必须从项目证据取得端口，不默认绑定 8000。
   for (const rel of files.filter((f) => path.basename(f) === 'composer.json')) {
     const pkg = readJson(rel);
     if (!pkg) continue;
     const dir = path.posix.dirname(rel);
     const local = (name) => files.includes(path.posix.join(dir, name));
+    const projectRoot = projectRootFor(dir);
     let command = null;
     let rule = null;
+    let port = null;
     if (local('artisan')) {
       command = 'php artisan serve';
       rule = 'composer-laravel:artisan';
     } else if (local('public/index.php')) {
-      command = 'php -S 127.0.0.1:8000 -t public';
-      rule = 'composer-php:public/index.php';
+      port = inferPort(projectRoot);
+      if (!port) {
+        notes.push({ file: rel, suggestion: '检测到 PHP public/index.php 但未发现端口证据；请确认监听端口（如 .env PORT）后手工拟定 `php -S 127.0.0.1:<port> -t public`，detect 不默认绑定 8000。' });
+        continue;
+      }
+      command = `php -S 127.0.0.1:${port.expectedPort} -t public`;
+      rule = `composer-php:public/index.php; port:${port.expectedPort}(${port.source})`;
     }
     if (!command) continue;
-    const projectRoot = projectRootFor(dir);
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command, expectedImage: `php${exeSuffix}` },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command, expectedImage: `php${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) },
       confidence: 'medium',
       evidence: { file: rel, rule },
     });
@@ -351,7 +474,7 @@ export function detectProjects(root) {
       desc: {
         alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: isPy ? 'python' : 'node',
         command: `${isPy ? py.command : 'node'} ${base}`,
-        expectedImage: isPy ? `python${exeSuffix}` : `node${exeSuffix}`,
+        expectedImage: isPy ? pythonExpectedImage(py.venv) : `node${exeSuffix}`,
       },
       confidence: 'low',
       evidence: { file: rel, rule: `entry-file:${base}${isPy && py.venv ? `; interpreter:venv(${py.venv.display})` : ''}` },
