@@ -472,7 +472,14 @@ try {
   });
 } finally {
   try { if (currentPid) process.kill(currentPid, 'SIGKILL'); } catch { /* 已退出 */ }
-  fs.rmSync(base, { recursive: true, force: true });
+  // Windows 上被杀进程的句柄释放有延迟，单次 rmSync 会 EBUSY 拖垮整个套件；轮询重试。
+  for (let i = 0; i < 20; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); break; }
+    catch (e) {
+      if (i === 19) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }
 if (skipped.length) console.log(`\n${skipped.length} 项跳过（缺 pwsh 7）`);
