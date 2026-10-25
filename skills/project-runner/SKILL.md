@@ -159,4 +159,4 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ## 8. 跨项目管理（manager.mjs，多项目/跨会话）
 
-跨项目管理的命令、数据、安全与恢复规程按需阅读 [manager 参考](references/manager.md)。常用启动路径：先识别项目并完成授权/安全检查，首次登记前先调用只读的 `manager.mjs detect --root <仓库根目录>` 取启动描述候选（只输出草案，不登记不启动），复核确认后再用 `manager.mjs start-new` 登记；之后 `list/status/start/stop/restart/logs` 管理已登记应用，网页观察入口为 `manager ui`。只操作本 Skill 启动并登记的应用，不接管 IDEA/手工进程；UNKNOWN/STARTING 未结记录不得绕过或删除。
+跨项目管理的命令、数据、安全与恢复规程按需阅读 [manager 参考](references/manager.md)。常用启动路径：先识别项目并完成授权/安全检查，首次登记前先调用只读的 `manager.mjs detect --root <仓库根目录>` 取启动描述候选（只输出草案，不登记不启动），复核确认后再用 `manager.mjs start-new` 登记；之后 `list/status/start/stop/restart/logs` 管理已登记应用（`start`/`restart` 可加 `--dry-run` 先预览解析计划，不取锁/不写数据/不启动），网页观察入口为 `manager ui`。只操作本 Skill 启动并登记的应用，不接管 IDEA/手工进程；UNKNOWN/STARTING 未结记录不得绕过或删除。

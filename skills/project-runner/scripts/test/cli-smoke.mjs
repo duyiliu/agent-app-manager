@@ -78,6 +78,20 @@ const regApp = (appId, alias, mode = 'java') => ({
   configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 });
 const registryApps = { aok: regApp('aok', 'ok'), astuck: regApp('astuck', 'stuck'), aun: regApp('aun', 'unman') };
+// dry-run 预览：直连/命令模式/非法 cwd 三个只读样本（不启动进程）
+registryApps.adry = {
+  ...regApp('adry', 'dry', 'proc'),
+  exe: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'],
+  envRefs: ['PR_DRY_SECRET', 'PR_DRY_MISSING'],
+};
+registryApps.adrycmd = {
+  ...regApp('adrycmd', 'drycmd', 'node'),
+  command: 'node server.js', expectedImage: isWindows ? 'node.exe' : 'node',
+};
+registryApps.abad = {
+  ...regApp('abad', 'badcwd', 'proc'),
+  cwd: path.join(base, 'missing-cwd'), exe: process.execPath,
+};
 
 const probeOk = hasProcessProbe();
 if (probeOk) {
@@ -106,6 +120,18 @@ rt('aun', {
   pid: null, creationFileTime: null, image: null, envResolved: [], logPaths: null,
   logHints: [hintFile], lastError: null, endedAt: null, note: '非受管',
 });
+rt('adry', {
+  runId: 'rdry1', phase: 'STOPPED', managed: true, mode: 'proc', intentAt: now, startedAt: now,
+  pid: null, creationFileTime: null, image: null, envResolved: [],
+  logPaths: { stdout: path.join(home, 'logs', 'adry', 'rdry1.stdout.log'), stderr: path.join(home, 'logs', 'adry', 'rdry1.stderr.log') },
+  lastError: null, endedAt: now, exitNote: 'smoke',
+});
+
+// dry-run 零写入快照：整个 home 的文件内容/目录清单都不应变化
+const homeSnapshot = () => fs.readdirSync(home, { recursive: true }).map((rel) => {
+  const p = path.join(home, String(rel));
+  return fs.statSync(p).isFile() ? `${rel}:${fs.readFileSync(p).toString('base64')}` : `${rel}/`;
+}).sort();
 
 // 直接 import manager 数据层：验证 CLI --src 与 ui（同一 resolveSource）读到相同内容
 const mgr = await import(pathToFileURL(MANAGER).href);
@@ -198,6 +224,57 @@ await check('detect 空目录返回空数组和建议，不报错', async () => 
 await check('detect 缺 root 使用参数错误契约', async () => {
   assert.equal((await run(['detect', '--json'])).code, 1);
 });
+
+// ---------- start/restart --dry-run：只读启动计划 ----------
+await check('start --dry-run 输出解析计划且 home 零写入；envRefs 只报命中不回显值', async () => {
+  const secret = 'pr-cli-dry-secret-113';
+  process.env.PR_DRY_SECRET = secret;
+  const before = homeSnapshot();
+  const r = await run(['start', 'dry', '--dry-run', '--json']);
+  assert.equal(r.code, 0, r.text);
+  assert.equal(r.json.data.dryRun, true);
+  assert.equal(r.json.data.appId, 'adry');
+  assert.equal(r.json.data.cwd, root);
+  const expectedExe = isWindows ? path.resolve(process.execPath) : fs.realpathSync.native(process.execPath);
+  assert.equal(r.json.data.exe, expectedExe);
+  assert.deepEqual(r.json.data.envRefs, [
+    { name: 'PR_DRY_SECRET', present: true },
+    { name: 'PR_DRY_MISSING', present: false },
+  ]);
+  assert(!r.text.includes(secret), 'dry-run 不得回显 envRefs 值');
+  assert.deepEqual(homeSnapshot(), before, 'dry-run 不得写 registry/runtime/locks/logs');
+});
+await check('start --dry-run command 模式输出命令形态但只显示不落盘', async () => {
+  const before = homeSnapshot();
+  const r = await run(['start', 'drycmd', '--dry-run', '--json']);
+  assert.equal(r.code, 0, r.text);
+  assert.equal(r.json.data.kind, 'command');
+  assert.equal(r.json.data.command, 'node server.js');
+  assert.equal(r.json.data.expectedImage, isWindows ? 'node.exe' : 'node');
+  assert.equal(r.json.data.exe, null);
+  assert.deepEqual(homeSnapshot(), before, 'command dry-run 不得落盘命令或运行记录');
+});
+await check('restart --dry-run 输出停止+启动计划且 home 零写入', async () => {
+  const before = homeSnapshot();
+  const r = await run(['restart', 'dry', '--dry-run', '--json']);
+  assert.equal(r.code, 0, r.text);
+  assert.equal(r.json.data.dryRun, true);
+  assert.equal(r.json.data.stop.expected, 'alreadyStopped');
+  assert.equal(r.json.data.stop.runId, 'rdry1');
+  assert.equal(r.json.data.start.alias, 'dry');
+  assert.deepEqual(homeSnapshot(), before, 'restart dry-run 不得停止旧实例或写数据目录');
+});
+if (probeOk) {
+  await check('start --dry-run 对非法 cwd 与正常 start 同口径（CONFIG_INVALID）', async () => {
+    const dry = await run(['start', 'badcwd', '--dry-run', '--json']);
+    const real = await run(['start', 'badcwd', '--json']);
+    assert.equal(dry.code, 3, dry.text);
+    assert.equal(real.code, 3, real.text);
+    assert.equal(dry.json.error.code, 'CONFIG_INVALID');
+    assert.equal(real.json.error.code, 'CONFIG_INVALID');
+    assert.equal(dry.json.error.message, real.json.error.message);
+  });
+}
 
 // ---------- logs 统一日志源 ----------
 

@@ -50,6 +50,28 @@ const runAt = (targetHome, args, { json = true } = {}) => {
   try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON */ }
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
 };
+// dry-run 零写入断言：比较 registry/runtime 内容、locks 目录与 logs 文件清单。
+const walkNames = (dir) => {
+  const out = [];
+  const walk = (d) => {
+    if (!fs.existsSync(d)) return;
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      out.push(`${e.isDirectory() ? 'd' : 'f'}:${path.relative(home, p)}`);
+      if (e.isDirectory()) walk(p);
+    }
+  };
+  walk(dir);
+  return out.sort();
+};
+const snapshotLaunchState = () => ({
+  registry: fs.existsSync(path.join(home, 'registry.json')) ? fs.readFileSync(path.join(home, 'registry.json'), 'utf8') : null,
+  runtime: walkNames(path.join(home, 'runtime')).map((x) => (x.startsWith('f:')
+    ? `${x}:${fs.readFileSync(path.join(home, x.slice(2))).toString('base64')}`
+    : x)),
+  locks: walkNames(path.join(home, 'locks')),
+  logs: walkNames(path.join(home, 'logs')),
+});
 const isPsMissing = (r) => r.code === 4
   && (r.json?.error?.code === 'PWSH_MISSING' || r.stdout.includes('PWSH_MISSING') || r.stderr.includes('PWSH_MISSING'));
 
@@ -124,7 +146,9 @@ try {
     assert.equal(runAt(emptyHome, ['logs', 'ghost']).code, 2);
     assert.equal(runAt(emptyHome, ['prune']).code, 0);
     assert.equal(runAt(emptyHome, ['version']).code, 0);
-    assert.equal(fs.existsSync(emptyHome), false, '只读命令不应创建 home');
+    assert.equal(runAt(emptyHome, ['start', 'ghost', '--dry-run']).code, 2);
+    assert.equal(runAt(emptyHome, ['restart', 'ghost', '--dry-run']).code, 2);
+    assert.equal(fs.existsSync(emptyHome), false, '只读命令与 dry-run 不应创建 home');
   });
 
   check('version/--version/-v 输出版本号（与 MANAGER_VERSION 一致）', () => {
@@ -181,7 +205,7 @@ try {
   fs.writeFileSync(descFile, JSON.stringify({
     alias: 'smoke', root: proj, entry: 'default', mode: 'java',
     exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'],
-    envRefs: [], expectedPort: 18080,
+    envRefs: ['SMOKE_SECRET', 'SMOKE_MISSING_113'], expectedPort: 18080,
   }, null, 2));
   let appId = null;
   let firstRunId = null;
@@ -229,6 +253,24 @@ try {
     assert.equal(j.data.readinessUntested, true);
   });
 
+  const secretValue = 'pr-smoke-secret-113';
+  process.env.SMOKE_SECRET = secretValue;
+  lifecycle('restart --dry-run 输出停止+启动计划且零写入', () => {
+    const before = snapshotLaunchState();
+    const r = run(['restart', 'smoke', '--dry-run']);
+    const j = expectOk(r);
+    assert.equal(j.data.dryRun, true);
+    assert.equal(j.data.stop.expected, 'stopped');
+    assert.equal(j.data.stop.runId, firstRunId);
+    assert.equal(j.data.start.alias, 'smoke');
+    assert.equal(j.data.start.kind, 'direct');
+    assert.deepEqual(j.data.start.envRefs, [
+      { name: 'SMOKE_SECRET', present: true },
+      { name: 'SMOKE_MISSING_113', present: false },
+    ]);
+    assert.deepEqual(snapshotLaunchState(), before, 'restart dry-run 不得停止旧实例或写 registry/runtime');
+  });
+
   lifecycle('重复 start → ALREADY_RUNNING（退出码 3）', () => {
     const j = expectFail(run(['start', 'smoke']), 3, 'ALREADY_RUNNING');
     assert(j.error.message.includes('已有受管实例在运行'));
@@ -243,6 +285,28 @@ try {
   lifecycle('重复 stop → alreadyStopped', () => {
     const j = expectOk(run(['stop', 'smoke']));
     assert.equal(j.data.result, 'alreadyStopped');
+  });
+
+  lifecycle('start --dry-run 输出解析计划且零写入；envRefs 只报命中不回显值', () => {
+    const before = snapshotLaunchState();
+    const r = run(['start', 'smoke', '--dry-run']);
+    const j = expectOk(r);
+    assert.equal(j.data.dryRun, true);
+    assert.equal(j.data.appId, appId);
+    assert.equal(j.data.cwd, fs.realpathSync.native(proj));
+    const expectedExe = isWindows ? path.resolve(process.execPath) : fs.realpathSync.native(process.execPath);
+    assert.equal(j.data.exe, expectedExe);
+    assert.deepEqual(j.data.envRefs, [
+      { name: 'SMOKE_SECRET', present: true },
+      { name: 'SMOKE_MISSING_113', present: false },
+    ]);
+    assert.deepEqual(j.data.envNames, []);
+    assert.equal(j.data.expectedPort, 18080);
+    assert.equal(j.data.port.checked, true);
+    assert.equal(j.data.port.conflict, false);
+    assert(!r.stdout.includes(secretValue) && !r.stderr.includes(secretValue), 'dry-run 不得回显 envRefs 值');
+    assert.match(j.data.note, /dry-run/);
+    assert.deepEqual(snapshotLaunchState(), before, 'dry-run 不得写 registry/runtime/locks/logs');
   });
 
   let secondRunId = null;

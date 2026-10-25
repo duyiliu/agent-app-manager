@@ -126,6 +126,7 @@ function renderHuman(command, data) {
       ].filter(Boolean).join('\n');
     case 'start-new':
     case 'start':
+      if (data.dryRun) return renderLaunchPlan(data);
       return [
         `已启动（受管）${data.alias} (${data.appId})`,
         `run=${data.runId} pid=${data.pid} status=${data.status}`,
@@ -167,6 +168,7 @@ function renderHuman(command, data) {
       return lines.join('\n');
     }
     case 'restart':
+      if (data.dryRun) return renderLaunchPlan(data);
       return [
         `restart ${data.alias}: stop=${data.stop.result} → start run=${data.start.runId} pid=${data.start.pid} status=${data.start.status}`,
         `stdout=${data.start.logPaths.stdout}`,
@@ -192,6 +194,33 @@ function renderHuman(command, data) {
   }
 }
 
+function renderLaunchPlan(data) {
+  const plan = data.start ?? data;
+  const lines = [
+    `dry-run ${data.start ? '重启' : '启动'}计划（未取锁/未写 registry/runtime/未 spawn）：${data.alias} (${data.appId})`,
+  ];
+  if (data.currentRun) {
+    lines.push(`当前实例: run=${data.currentRun.runId} phase=${data.currentRun.phase} pid=${data.currentRun.pid ?? '-'}`);
+  }
+  if (data.stop) {
+    lines.push(`停止计划: ${data.stop.expected}（run=${data.stop.runId}）${data.stop.tree ? '；--tree 连带后代' : ''}${data.stop.graceMs != null ? `；--grace ${data.stop.graceMs}ms` : ''}`);
+  }
+  lines.push(`kind=${plan.kind} mode=${plan.mode} source=${plan.source}`);
+  lines.push(`cwd=${plan.cwd}`);
+  if (plan.exe) lines.push(`exe=${plan.exe}`);
+  if (plan.command) {
+    lines.push(`command=${plan.command}`);
+    lines.push(`expectedImage=${plan.expectedImage ?? '-'}${plan.discoverTimeoutMs != null ? ` discoverTimeoutMs=${plan.discoverTimeoutMs}` : ''}`);
+  }
+  if (plan.args?.length) lines.push(`args=${JSON.stringify(plan.args)}`);
+  lines.push(`envRefs=${plan.envRefs.length ? plan.envRefs.map((e) => `${e.name}:${e.present ? '命中' : '缺失'}`).join(', ') : '（无）'}`);
+  if (plan.envNames.length) lines.push(`env=${plan.envNames.join(', ')}（仅名称，值不回显）`);
+  lines.push(`expectedPort=${plan.expectedPort ?? '-'}${plan.port.conflict ? `（冲突：${plan.port.occupants?.length ?? 0} 个占用者${plan.port.forced ? '，--force 已允许继续' : ''}）` : ''}`);
+  if (plan.abandonRunId) lines.push(`将显式放弃未结记录 run=${plan.abandonRunId}（dry-run 不归档）`);
+  lines.push(data.note ?? plan.note ?? '');
+  return lines.filter(Boolean).join('\n');
+}
+
 function usageText() {
   return [
     '用法：node manager.mjs [--home <绝对路径>] [--json] <命令> [参数]',
@@ -204,13 +233,14 @@ function usageText() {
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
     '  doctor [--json]                    只读自检（不修复）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
-    '  start <alias|appId> [--force] [--ack-unresolved <runId>] 用已保存配置启动（任意目录可用）',
+    '  start <alias|appId> [--force] [--ack-unresolved <runId>] [--dry-run] 用已保存配置启动（任意目录可用；',
+    '       --dry-run 只解析并打印启动计划，不取锁/不写 registry/runtime/不 spawn）',
     '  stop <alias|appId> [--tree] [--grace <ms>]   停止受管实例：默认有界强制终止；',
     '       --tree 连带终止全部后代进程（#39）；--grace 先发优雅信号（Linux SIGTERM /',
     '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止；restart 的 --tree/--grace',
     '       作用于停旧实例这一步',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
-    '  restart <alias|appId> [--force] [--tree] [--grace <ms>]   确认退出后重启（仅受管实例；--tree/--grace 作用于停旧实例这一步）',
+    '  restart <alias|appId> [--force] [--tree] [--grace <ms>] [--dry-run]   确认退出后重启（仅受管实例；--tree/--grace 作用于停旧实例这一步；--dry-run 只打印停止+启动计划，不执行）',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
@@ -253,7 +283,10 @@ async function main() {
   try {
     ctx = parseArgv(process.argv.slice(2));
     command = ctx.command;
-    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command));
+    // start/restart --dry-run 必须连 home 目录都不创建：命令本身不是只读命令，
+    // 但该分支不取锁/不写 registry/runtime，因此按只读方式解析 home。
+    const dryRunReadOnly = (command === 'start' || command === 'restart') && ctx.rest.includes('--dry-run');
+    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command) || dryRunReadOnly);
   } catch (e) {
     const c = command ?? 'cli';
     if (e instanceof ManagerError) { emitErr({ json: false }, c, e); return; }
