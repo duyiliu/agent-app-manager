@@ -178,7 +178,7 @@ const ctx = vm.createContext({
   window: {},
   CSS: { escape: (s) => String(s) },
   Option: Opt,
-  fetch, URL, URLSearchParams, TextDecoder, AbortController, Blob, crypto,
+  fetch, URL, URLSearchParams, TextDecoder, AbortController, Blob, crypto, atob,
   setInterval, setTimeout, clearInterval, clearTimeout,
   console, alert: () => {},
 });
@@ -248,6 +248,59 @@ try {
   run('logSrc = null; logSrcWasCurrent = false;');
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
+
+  // 合并源：同一批次 stdout/stderr 双流、双 offset/decoder；stderr 行加 [err] 前缀，
+  // 过滤/只看错误/下载共用同一 lines 缓存；顺序明确标注为近似。
+  run('pollTimers.forEach(clearInterval)');
+  pickSrc('merge:rtest8');
+  await run('pollTail()');
+  await check('合并源同时显示 stdout 与带 [err] 前缀的 stderr', () => {
+    assert.equal(run('logMerged'), true);
+    const texts = run('lines.map(l => l.text)');
+    assert(texts.includes('rtest8 stdout'));
+    assert(texts.includes('[err] rtest8 stderr'));
+    assert(elFor('logMeta').textContent.includes('近似顺序'));
+  });
+  fs.appendFileSync(path.join(home, 'logs', 'ahis', 'rtest8.stdout.log'), 'rtest8 later out\n');
+  fs.appendFileSync(path.join(home, 'logs', 'ahis', 'rtest8.stderr.log'), 'rtest8 later err\n');
+  await run('pollTail()');
+  await check('合并源双 offset 增量跟随（不重复旧内容）', () => {
+    const texts = run('lines.map(l => l.text)');
+    assert(texts.includes('rtest8 later out'));
+    assert(texts.includes('[err] rtest8 later err'));
+    assert.equal(texts.filter((t) => t === 'rtest8 stdout').length, 1);
+  });
+  await check('合并源行参与只看错误与过滤（[err] 前缀可见）', () => {
+    run('errorsOnly = true');
+    assert.equal(run("lineVisible('[err] plain stderr')"), true);
+    assert.equal(run("lineVisible('plain stdout')"), false);
+    run('errorsOnly = false; filterRe = /later/');
+    assert.equal(run("lineVisible('[err] rtest8 later err')"), true);
+    assert.equal(run("lineVisible('rtest8 stdout')"), false);
+    run('filterRe = null');
+  });
+
+  await restartAndSync('rtest9');
+  await check('合并源跟随新当前批次（保留 both 流偏好）', () => assert.equal(run('logSrc'), 'merge:rtest9'));
+  await run('pollTail()');
+  fs.writeFileSync(path.join(home, 'logs', 'ahis', 'rtest9.stderr.log'), 'after rotate\n');
+  await run('pollTail()');
+  await check('合并源单侧轮转/截断后清空缓存并从新文件继续', () => {
+    const boundary = run('boundary');
+    assert(boundary.includes('stderr'));
+    assert(boundary.includes('轮转') || boundary.includes('截断'));
+    const texts = run('lines.map(l => l.text)');
+    assert(texts.includes('[err] after rotate'));
+  });
+  const stderr9 = path.join(home, 'logs', 'ahis', 'rtest9.stderr.log');
+  fs.renameSync(stderr9, `${stderr9}.1`);
+  fs.writeFileSync(stderr9, 'after rename rotation with more bytes\n');
+  await run('pollTail()');
+  await check('合并源识别 rename+重建轮转（新文件更大也不漏读开头）', () => {
+    assert(run('boundary').includes('stderr'));
+    const texts = run('lines.map(l => l.text)');
+    assert(texts.includes('[err] after rename rotation with more bytes'));
+  });
 
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
