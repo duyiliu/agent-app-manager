@@ -360,15 +360,70 @@ export function detectProjects(root) {
     }
   }
   // .NET：Web SDK / Exe 的 csproj → dotnet run；库项目不生成启动候选。
+  // MSBuild 属性可能来自 Directory.Build.props/targets 或 Import；按导入顺序合并文本，
+  // 以最后一次 UseAppHost/AssemblyName/OutputType 定义为准，与 MSBuild 覆盖语义一致。
+  const lastMsBuildTag = (text, tag) => {
+    const re = new RegExp(`<${tag}>\\s*([^<\\s]+)\\s*<\\/${tag}>`, 'gi');
+    let match;
+    let value = null;
+    while ((match = re.exec(text))) value = match[1];
+    return value;
+  };
+  const msBuildTextFor = (projectRel) => {
+    const projectDir = path.join(absoluteRoot, path.dirname(projectRel));
+    const chunks = [];
+    const seen = new Set();
+    const appendFile = (abs) => {
+      let real;
+      try { real = fs.realpathSync.native(abs); } catch { return; }
+      const rel = path.relative(absoluteRoot, real);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || seen.has(real)) return;
+      let text;
+      try { text = fs.readFileSync(real, 'utf8'); } catch { return; }
+      seen.add(real);
+      const importRe = /<Import\b[^>]*\bProject\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*\/?>/gi;
+      let last = 0;
+      let match;
+      while ((match = importRe.exec(text))) {
+        chunks.push(text.slice(last, match.index));
+        const raw = match[1] ?? match[2];
+        const imported = raw
+          .replace(/\$\(MSBuildThisFileDirectory\)/gi, `${path.dirname(real)}${path.sep}`)
+          .replace(/\$\(MSBuildProjectDirectory\)/gi, projectDir);
+        appendFile(path.resolve(path.dirname(real), imported));
+        last = match.index + match[0].length;
+      }
+      chunks.push(text.slice(last));
+    };
+    const findUp = (name) => {
+      let dir = projectDir;
+      for (;;) {
+        const candidate = path.join(dir, name);
+        try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* 继续向上 */ }
+        if (path.resolve(dir) === path.resolve(absoluteRoot)) return null;
+        const parent = path.dirname(dir);
+        if (parent === dir) return null;
+        dir = parent;
+      }
+    };
+    const props = findUp('Directory.Build.props');
+    if (props) appendFile(props);
+    appendFile(path.join(absoluteRoot, projectRel));
+    const targets = findUp('Directory.Build.targets');
+    if (targets) appendFile(targets);
+    return chunks.join('\n');
+  };
+
   for (const rel of files.filter((f) => /\.csproj$/i.test(path.basename(f)))) {
-    const text = readRel(rel);
+    const text = msBuildTextFor(rel);
     const web = /Microsoft\.NET\.Sdk\.Web|Microsoft\.AspNetCore/i.test(text);
-    const exe = /<OutputType>\s*Exe\s*<\/OutputType>/i.test(text);
+    const exe = /^exe$/i.test(lastMsBuildTag(text, 'OutputType') ?? '');
     if (!web && !exe) continue;
-    const assembly = /<AssemblyName>\s*([^<\s]+)\s*<\/AssemblyName>/i.exec(text)?.[1]
+    const assembly = lastMsBuildTag(text, 'AssemblyName')
       || path.posix.basename(rel, path.posix.extname(rel));
-    // UseAppHost=false 时 dotnet run 由 dotnet host 执行程序集，目标映像不是 AssemblyName。
-    const useAppHost = !/<UseAppHost>\s*false\s*<\/UseAppHost>/i.test(text);
+    // UseAppHost=false（含 Directory.Build.props/Import 继承）时 dotnet run 由 dotnet host
+    // 执行程序集，目标映像不是 AssemblyName。
+    const useAppHost = !/^false$/i.test(lastMsBuildTag(text, 'UseAppHost') ?? '');
     const expectedImage = useAppHost ? `${assembly}${exeSuffix}` : `dotnet${exeSuffix}`;
     const projectRoot = path.resolve(absoluteRoot, path.dirname(rel));
     const port = inferPort(projectRoot);
@@ -383,7 +438,6 @@ export function detectProjects(root) {
   for (const rel of files.filter((f) => path.basename(f) === 'Cargo.toml')) {
     const dir = path.posix.dirname(rel);
     const text = readRel(rel);
-    const local = (name) => files.includes(path.posix.join(dir, name));
     const packageName = /^\[package\][\s\S]*?^\s*name\s*=\s*"([^"]+)"/m.exec(text)?.[1]
       || /^\s*name\s*=\s*"([^"]+)"/m.exec(text)?.[1]
       || path.posix.basename(dir) || 'app';
@@ -398,14 +452,25 @@ export function detectProjects(root) {
       if (name && !manifestBins[manifestBins.length - 1].name) manifestBins[manifestBins.length - 1].name = name;
     }
     const autoBins = [];
-    const binPrefix = dir === '.' ? 'src/bin/' : `${dir}/src/bin/`;
-    for (const file of files) {
-      if (!file.startsWith(binPrefix)) continue;
-      const rest = file.slice(binPrefix.length);
-      if (!rest.endsWith('.rs') || rest.includes('/')) continue;
-      autoBins.push(path.posix.basename(rest, '.rs'));
+    const projectRoot = projectRootFor(dir);
+    const binDirAbs = path.join(projectRoot, 'src', 'bin');
+    let binEntries = [];
+    try { binEntries = fs.readdirSync(binDirAbs, { withFileTypes: true }); } catch { /* 无 src/bin */ }
+    for (const entry of binEntries) {
+      if (entry.name.startsWith('.')) continue;
+      if (entry.isFile() && entry.name.endsWith('.rs')) {
+        autoBins.push(path.basename(entry.name, '.rs'));
+        continue;
+      }
+      // Cargo 也自动发现 src/bin/<name>/main.rs；嵌套 main.rs 必须计入 bin 歧义。
+      if (entry.isDirectory()) {
+        try {
+          if (fs.statSync(path.join(binDirAbs, entry.name, 'main.rs')).isFile()) autoBins.push(entry.name);
+        } catch { /* 该目录没有 main.rs */ }
+      }
     }
-    const hasMain = local('src/main.rs');
+    let hasMain = false;
+    try { hasMain = fs.statSync(path.join(projectRoot, 'src', 'main.rs')).isFile(); } catch { /* 无默认 main */ }
     let binName = null;
     let explicit = false;
     let binRule = null;
@@ -437,7 +502,6 @@ export function detectProjects(root) {
       notes.push({ file: rel, suggestion: `Cargo bin 名 ${JSON.stringify(binName)} 含 shell 元字符，detect 不生成候选。` });
       continue;
     }
-    const projectRoot = projectRootFor(dir);
     const alias = nextAlias();
     candidates.push({
       desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: `cargo run${explicit ? ` --bin ${binName}` : ''}`, expectedImage: `${binName}${exeSuffix}` },

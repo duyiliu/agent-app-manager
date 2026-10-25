@@ -324,7 +324,7 @@ if ($Action -eq 'discover') {
           $cur2 = $parentOf[$cur2]
         }
       }
-      $launcherRe = 'npm-cli\.js|yarn\.js|pnpm(\.cjs|\.js)?|[\\/]\.pnpm[\\/]|plexus[.\-]classworlds|org\.gradle\.wrapper|gradle-launcher|GradleMain|^\s*(npm|npx|pnpm|yarn|bun)([ /]|$)|dotnet(?:\.exe)?["]?\s+run(?:\s|$)'
+      $launcherRe = 'npm-cli\.js|yarn\.js|pnpm(\.cjs|\.js)?|[\\/]\.pnpm[\\/]|plexus[.\-]classworlds|org\.gradle\.wrapper|gradle-launcher|GradleMain|^\s*(npm|npx|pnpm|yarn|bun)([ /]|$)|dotnet(?:\.exe)?["]?\s+run(?:\s|$)|php(?:\.exe)?["]?\s+artisan\s+serve(?:\s|$)'
       $leaves = @($found | Where-Object {
         -not ($ancestorSet.ContainsKey([int64]$_.pid) -and ([string]$_.cmd) -match $launcherRe)
       })

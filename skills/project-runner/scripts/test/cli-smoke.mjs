@@ -208,6 +208,8 @@ const venvRoot = path.join(detectMoreRoot, 'venv-app');
 const goRoot = path.join(detectMoreRoot, 'go-app');
 const dotnetRoot = path.join(detectMoreRoot, 'dotnet-app');
 const dotnetNoApphostRoot = path.join(detectMoreRoot, 'dotnet-no-apphost-app');
+const dotnetPropsApphostRoot = path.join(detectMoreRoot, 'dotnet-props-apphost-app');
+const dotnetImportApphostRoot = path.join(detectMoreRoot, 'dotnet-import-apphost-app');
 const springProfileRoot = path.join(detectMoreRoot, 'spring-profile-app');
 const pipfileRoot = path.join(detectMoreRoot, 'pipfile-app');
 const setupPyRoot = path.join(detectMoreRoot, 'setup-py-app');
@@ -217,6 +219,7 @@ const unsafeDevRoot = path.join(detectMoreRoot, 'dev-unsafe-app');
 const goNestedRoot = path.join(detectMoreRoot, 'go-nested-app');
 const cargoCustomRoot = path.join(detectMoreRoot, 'cargo-custom-bin-app');
 const cargoMultiRoot = path.join(detectMoreRoot, 'cargo-multi-bin-app');
+const cargoNestedAutoRoot = path.join(detectMoreRoot, 'cargo-nested-auto-bin-app');
 const phpNoPortRoot = path.join(detectMoreRoot, 'php-no-port-app');
 const phpPortRoot = path.join(detectMoreRoot, 'php-port-app');
 const springInactiveProfileRoot = path.join(detectMoreRoot, 'spring-inactive-profile-app');
@@ -228,7 +231,7 @@ const frameworkFixtures = [
   ['svelte-app', '@sveltejs/kit', 'dev'],
   ['astro-app', 'astro', 'dev'],
 ];
-for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, dotnetNoApphostRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...invalidEnvPortRoots, ...invalidSpringPortRoots, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
+for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, dotnetNoApphostRoot, dotnetPropsApphostRoot, dotnetImportApphostRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, unsafeDevRoot, goNestedRoot, cargoCustomRoot, cargoMultiRoot, cargoNestedAutoRoot, phpNoPortRoot, phpPortRoot, springInactiveProfileRoot, springProfileOnlyRoot, ...invalidEnvPortRoots, ...invalidSpringPortRoots, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
 
 // pnpm + dev:*：脚本只在没有 dev/start/serve 时回退识别；.env.local 提供端口。
 w(path.join(devStarRoot, 'package.json'), JSON.stringify({ scripts: { 'dev:web': 'vite' }, devDependencies: { vite: '^6' }, packageManager: 'pnpm@9.0.0' }));
@@ -271,6 +274,12 @@ w(path.join(goNestedRoot, 'nested/main.go'), 'package main\n\nfunc main() {}\n')
 // .NET：Web SDK 项目 → dotnet run；UseAppHost=false 时目标影像是 dotnet host。
 w(path.join(dotnetRoot, 'DotnetApp.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>DotnetApp</AssemblyName></PropertyGroup></Project>\n');
 w(path.join(dotnetNoApphostRoot, 'DotnetNoApphost.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>DotnetNoApphost</AssemblyName><UseAppHost>false</UseAppHost></PropertyGroup></Project>\n');
+// UseAppHost 也可能来自 Directory.Build.props 或显式 Import，而不是 csproj 本身。
+w(path.join(dotnetPropsApphostRoot, 'Directory.Build.props'), '<Project><PropertyGroup><UseAppHost>false</UseAppHost></PropertyGroup></Project>\n');
+w(path.join(dotnetPropsApphostRoot, 'PropsApp.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>PropsApp</AssemblyName></PropertyGroup></Project>\n');
+fs.mkdirSync(path.join(dotnetImportApphostRoot, 'build'), { recursive: true });
+w(path.join(dotnetImportApphostRoot, 'build/common.props'), '<Project><PropertyGroup><UseAppHost>false</UseAppHost></PropertyGroup></Project>\n');
+w(path.join(dotnetImportApphostRoot, 'ImportApp.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><Import Project="build/common.props" /><PropertyGroup><AssemblyName>ImportApp</AssemblyName></PropertyGroup></Project>\n');
 // Spring profile 端口：只有显式激活 profile 时才采用 profile 配置的端口。
 w(path.join(springProfileRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
 fs.mkdirSync(path.join(springProfileRoot, 'src/main/resources'), { recursive: true });
@@ -305,6 +314,11 @@ fs.mkdirSync(path.join(cargoRoot, 'src'), { recursive: true });
 w(path.join(cargoRoot, 'src/main.rs'), 'fn main() {}\n');
 w(path.join(cargoCustomRoot, 'Cargo.toml'), '[package]\nname = "custom-pkg"\nversion = "0.1.0"\n\n[[bin]]\nname = "custom-server"\npath = "src/custom.rs"\n');
 w(path.join(cargoMultiRoot, 'Cargo.toml'), '[package]\nname = "multi-pkg"\nversion = "0.1.0"\n\n[[bin]]\nname = "one"\npath = "src/one.rs"\n\n[[bin]]\nname = "two"\npath = "src/two.rs"\n');
+w(path.join(cargoNestedAutoRoot, 'Cargo.toml'), '[package]\nname = "nested-cargo"\nversion = "0.1.0"\n');
+fs.mkdirSync(path.join(cargoNestedAutoRoot, 'src'), { recursive: true });
+w(path.join(cargoNestedAutoRoot, 'src/main.rs'), 'fn main() {}\n');
+fs.mkdirSync(path.join(cargoNestedAutoRoot, 'src/bin/server'), { recursive: true });
+w(path.join(cargoNestedAutoRoot, 'src/bin/server/main.rs'), 'fn main() {}\n');
 w(path.join(composerRoot, 'composer.json'), JSON.stringify({ require: { 'laravel/framework': '^10' } }));
 w(path.join(composerRoot, 'artisan'), '#!/usr/bin/env php\n');
 w(path.join(phpNoPortRoot, 'composer.json'), JSON.stringify({ require: { 'slim/slim': '^4' } }));
@@ -391,6 +405,16 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
   assert.equal(dotnetNoApphost[0].desc.expectedImage, `dotnet${isWindows ? '.exe' : ''}`, 'UseAppHost=false 时目标映像是 dotnet host');
   assert.match(dotnetNoApphost[0].evidence.rule, /^dotnet-csproj:web; apphost:false/);
 
+  const dotnetPropsApphost = inRoot(dotnetPropsApphostRoot);
+  assert.equal(dotnetPropsApphost.length, 1);
+  assert.equal(dotnetPropsApphost[0].desc.expectedImage, `dotnet${isWindows ? '.exe' : ''}`, 'Directory.Build.props 的 UseAppHost=false 也必须生效');
+  assert.match(dotnetPropsApphost[0].evidence.rule, /^dotnet-csproj:web; apphost:false/);
+
+  const dotnetImportApphost = inRoot(dotnetImportApphostRoot);
+  assert.equal(dotnetImportApphost.length, 1);
+  assert.equal(dotnetImportApphost[0].desc.expectedImage, `dotnet${isWindows ? '.exe' : ''}`, 'Import 文件的 UseAppHost=false 也必须生效');
+  assert.match(dotnetImportApphost[0].evidence.rule, /^dotnet-csproj:web; apphost:false/);
+
   const springProfile = inRoot(springProfileRoot);
   assert.equal(springProfile.length, 1);
   assert.equal(springProfile[0].desc.expectedPort, 9091);
@@ -444,6 +468,9 @@ await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、G
 
   assert.equal(inRoot(cargoMultiRoot).length, 0, '多个 [[bin]] 不得生成无法唯一启动的候选');
   assert(notes.some((n) => n.file.endsWith('cargo-multi-bin-app/Cargo.toml') && /多个 \[\[bin\]\]/.test(n.suggestion)), '应提示 Cargo 多 bin 歧义');
+
+  assert.equal(inRoot(cargoNestedAutoRoot).length, 0, 'src/bin/<name>/main.rs 也必须计入 Cargo bin 歧义');
+  assert(notes.some((n) => n.file.endsWith('cargo-nested-auto-bin-app/Cargo.toml') && /多个可运行 bin/.test(n.suggestion) && /server/.test(n.suggestion)), '应提示嵌套自动 bin 歧义');
 
   assert.equal(inRoot(phpNoPortRoot).length, 0, '无端口证据的 PHP 入口不得默认绑定 8000');
   assert(notes.some((n) => n.file.endsWith('php-no-port-app/composer.json') && /未发现端口证据/.test(n.suggestion)), '应提示 PHP 入口缺端口证据');
