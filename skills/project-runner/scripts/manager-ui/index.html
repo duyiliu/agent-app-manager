@@ -733,6 +733,12 @@ function renderApps() {
         meta.appendChild(link);
       } else meta.appendChild(el('span', null, ':' + a.expectedPort));
     }
+    // 内存列：list 的单点采样（命令模式已聚合后代）；采样不可用时不显示，避免伪造 0。
+    if (a.memoryBytes != null) {
+      const mem = el('span', 'app-mem', '内存 ' + fmtSize(a.memoryBytes));
+      mem.title = a.resourcesScope === 'tree' ? 'RSS 单点采样（含受管目标后代聚合）' : 'RSS 单点采样';
+      meta.appendChild(mem);
+    }
     if (a.error) meta.appendChild(el('span', 'v bad', a.error));
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
@@ -938,6 +944,15 @@ function renderDetail(d) {
     grid.appendChild(pv);
   }
   kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
+  // 内存列来自 /api/apps 的同一次单点采样（命令模式含后代聚合），不在 status 轮询中重复采样。
+  const listRow = appsCache.find(a => a.alias === d.alias);
+  if (listRow?.memoryBytes != null) {
+    const cpu = listRow.cpuPercent != null ? ` · CPU ${Number(listRow.cpuPercent).toFixed(1)}%` : '';
+    const scope = listRow.resourcesScope === 'tree' ? '（含后代聚合）' : '';
+    kvRow(grid, '内存（RSS）', fmtSize(listRow.memoryBytes) + cpu + scope, 'dim');
+  } else if (listRow?.resourcesNote) {
+    kvRow(grid, '内存（RSS）', '不可用：' + listRow.resourcesNote, 'dim');
+  }
   kvRow(grid, 'runId', run?.runId);
   kvRow(grid, 'phase', run?.phase);
   kvRow(grid, '启动时间', fmtTime(run?.startedAt));

@@ -111,7 +111,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ~~~text
 list [--json]
-status <alias|appId> [--probe] [--ready] [--json]  # --probe 附加本机 TCP 监听探测；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据
+status <alias|appId> [--probe] [--ready] [--resources] [--json]  # --probe 附加本机 TCP 监听探测；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；--resources 单次 RSS/CPU 采样（命令模式聚合目标后代）
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
 doctor [--json]                          # 只读自检（不修复）
 start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
@@ -127,7 +127,7 @@ ui [--port N] [--open]                      # 本地 Web 管理台（127.0.0.1 �
 
 `list/status` 读取注册表，实时核验受管 JVM 身份；区分 RUNNING、STOPPED、STARTING、UNKNOWN，以及独立的 `managed` 状态。未注册项目不在列表；历史 Unmanaged 记录不得凭端口扫描宣称 STOPPED 或 RUNNING。输出项目别名、来源、状态、PID/端口（有证据才填写）、托管能力、日志位置。
 
-输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
+输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。资源用量为可选的单次快照：`status --resources` 与 `list` 的 `memoryBytes` 列、ui 应用表内存列均只做一次有界采样（Windows `GetProcessMemoryInfo`+`GetProcessTimes`，Linux `/proc/<pid>/status|stat`），不引入趋势图或常驻轮询；命令模式按目标+后代聚合，采样失败不影响状态与退出码。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
 
 ## 5. 最小可靠性要求
 
@@ -212,3 +212,5 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 - **follow 轮转重置**：`logs --follow` 检测到 `size < pos`（log-writer 已 rename 旧文件并重建同名新文件）时重置到新文件起始继续跟随并提示；旧尾部可用 `--src run:<runId>.<stream>.1` 查看。
 - **ui 渲染窗口有界**：过滤激活时旧逻辑按「DOM 行数−缓存行数」修剪永不触发，长会话 DOM 无界增长；改为计数式上限（MAX_LINES），不再每 tick 全量 `querySelectorAll`。
 - 其他：仓库根新增 `package.json`（engines + `npm test`/`npm run check` 聚合冒烟）；`decodeCmdOutput` 在无 GBK 解码器的 Node 上回退 lossy UTF-8。
+
+**v2.9（2026-10-25，资源用量可见性）**：新增受管进程 RSS/CPU 单次采样，回应“内存膨胀只能自己开任务管理器对照 pid”的可观测性缺口。平台层：Windows 在 `ps/proc.ps1` 用 `GetProcessMemoryInfo` 取 WorkingSet/PagefileUsage、`GetProcessTimes` 两次计数算 CPU 利用率；Linux 读 `/proc/<pid>/status` 的 `VmRSS` 与 `/proc/<pid>/stat` 的 utime/stime，CLK_TCK 由 `getconf` 解析并缓存。接口层：`status <ref> --resources` 输出单次 `resources` 快照（scope=process|tree、rssBytes、privateBytes、cpuPercent、cpuTimeMs、逐进程明细）；`list` 新增 `memoryBytes`（另有 `cpuPercent`/`resourcesScope`），ui 应用表与详情卡展示内存列。命令模式（`kind=command`）按受管目标 + PPID 后代聚合，复用平台侧一次进程树快照，进程数上限 64；一次调用完成全部 pid 采样（Windows 仍只 1 次 pwsh）。边界：非 RUNNING 不采样；采样失败只降级为 `available:false`/`resourcesNote`，不改变状态、退出码，也不引入常驻轮询或趋势存储。

@@ -32,10 +32,15 @@ function psProcOnce(action, params) {
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
   if (params.image != null) args.push('-Image', params.image);
   if (action === 'terminate' || action === 'terminate-tree' || action === 'grace' || action === 'discover') args.push('-WaitMs', String(params.waitMs ?? (action === 'discover' ? COMMAND_DISCOVER_TIMEOUT_MS : TERMINATE_WAIT_MS)));
+  if (action === 'resources') {
+    if (params.json != null) args.push('-Json', params.json);
+    args.push('-IntervalMs', String(params.intervalMs ?? 200));
+  }
   // discover 在单个 pwsh 进程内轮询等待目标出现，超时上限 = 发现窗口 + 启动余量
   // grace 内部要轮询 waitMs 才能给出 stillAlive，pwsh 超时需覆盖
   const timeout = action === 'discover' ? (params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS) + 15000
-    : action === 'grace' ? (params.waitMs ?? TERMINATE_WAIT_MS) + 15000 : 30000;
+    : action === 'grace' ? (params.waitMs ?? TERMINATE_WAIT_MS) + 15000
+    : action === 'resources' ? (params.intervalMs ?? 200) + 15000 : 30000;
   const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
@@ -257,4 +262,52 @@ export function tcpListening(port) {
     socket.once('timeout', () => { socket.destroy(); resolve(false); });
     socket.connect(port, '127.0.0.1');
   });
+}
+
+// ---------- 资源用量单次采样（RSS / CPU） ----------
+// items: [{ id, tree }]。tree=true 时平台侧按 PPID 树聚合该 pid + 后代（命令模式）。
+// 返回 { result, intervalMs, items:[{id,pids,truncated}], processes:[{pid,result,rssBytes,privateBytes,cpuPercent,cpuTimeMs}] }。
+// 一次调用完成所有 pid 的两次 CPU 计数，不做常驻轮询；Windows 为 1 次 pwsh，Linux 直接读 /proc。
+export const RESOURCE_SAMPLE_INTERVAL_MS = 200;
+
+export function normalizeResourceSample(raw, intervalMs = RESOURCE_SAMPLE_INTERVAL_MS) {
+  const obj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const asArray = (v) => (Array.isArray(v) ? v : v != null ? [v] : []);
+  const numOrNull = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+  return {
+    result: typeof obj.result === 'string' ? obj.result : 'error',
+    ...(obj.code ? { code: String(obj.code) } : {}),
+    ...(obj.message ? { message: String(obj.message) } : {}),
+    intervalMs: numOrNull(obj.intervalMs) ?? intervalMs,
+    items: asArray(obj.items).filter(Boolean).map((it) => ({
+      id: Number(it.id),
+      pids: asArray(it.pids).map((p) => Number(p)).filter((p) => Number.isInteger(p) && p > 0),
+      truncated: !!it.truncated,
+    })),
+    processes: asArray(obj.processes).filter(Boolean).map((p) => ({
+      pid: Number(p.pid),
+      result: typeof p.result === 'string' ? p.result : 'ok',
+      rssBytes: numOrNull(p.rssBytes),
+      privateBytes: numOrNull(p.privateBytes),
+      cpuPercent: numOrNull(p.cpuPercent),
+      cpuTimeMs: numOrNull(p.cpuTimeMs),
+      ...(p.code ? { code: String(p.code) } : {}),
+    })),
+  };
+}
+
+export function sampleResources(items, opts = {}) {
+  ensureSupported();
+  const norm = [];
+  for (const it of items ?? []) {
+    const id = Number(it?.id ?? it);
+    if (!Number.isInteger(id) || id <= 0) continue;
+    norm.push({ id, tree: !!it?.tree });
+  }
+  const intervalMs = Number.isInteger(opts.intervalMs) && opts.intervalMs > 0
+    ? Math.min(opts.intervalMs, 5000) : RESOURCE_SAMPLE_INTERVAL_MS;
+  if (!norm.length) return { result: 'ok', intervalMs, items: [], processes: [] };
+  if (IS_LINUX) return normalizeResourceSample(linuxProc.resources(norm, intervalMs), intervalMs);
+  const payload = Buffer.from(JSON.stringify(norm), 'utf8').toString('base64');
+  return retryProcessProbe('resources', () => normalizeResourceSample(psProcOnce('resources', { json: payload, intervalMs }), intervalMs));
 }

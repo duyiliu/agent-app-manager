@@ -18,6 +18,7 @@ import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readPro
 import { readTailLines, MAX_LOG_LINES } from './logs.mjs';
 import { planPrune, applyPrune } from './prune.mjs';
 import { bootId } from './proc-linux.mjs';
+import { sampleRunResources } from './resources.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 
@@ -304,7 +305,7 @@ export function cmdList(ctx) {
       if (cached instanceof Error) throw cached;
       ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
     } catch (e) {
-      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
+      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root, memoryBytes: null };
     }
     return {
       alias: app.alias, appId: app.appId, mode: app.mode,
@@ -312,8 +313,33 @@ export function cmdList(ctx) {
       pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
       log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
+      // 单点采样（无趋势）：RUNNING 受管应用带 RSS；采样失败/未运行时保持 null。
+      memoryBytes: null,
     };
   });
+  // list 的内存列：所有 RUNNING 受管应用共用一次平台采样（Windows 1 次 pwsh，Linux 直读 /proc）。
+  // 命令模式按目标 + 后代聚合（tree=true）；失败只降级为 memoryBytes=null，不影响 list 结果。
+  const candidates = [];
+  rows.forEach((row, index) => {
+    if (row.status !== 'RUNNING' || !Number.isInteger(row.pid) || row.managed === false) return;
+    const cached = runtimes.get(row.appId);
+    const cur = cached instanceof Error ? null : cached?.current;
+    if (!cur || !cur.managed) return;
+    candidates.push({ index, pid: row.pid, kind: cur.kind ?? 'direct', verified: true, creationFileTime: cur.creationFileTime, image: cur.image });
+  });
+  if (candidates.length) {
+    const samples = sampleRunResources(candidates.map(({ pid, kind }) => ({ pid, kind, verified: true })));
+    candidates.forEach((c, i) => {
+      const s = samples[i];
+      if (s?.available) {
+        rows[c.index].memoryBytes = s.rssBytes ?? null;
+        rows[c.index].cpuPercent = s.cpuPercent ?? null;
+        rows[c.index].resourcesScope = s.scope;
+      } else {
+        rows[c.index].resourcesNote = s?.reason ?? '资源采样不可用';
+      }
+    });
+  }
   if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };
 }
@@ -381,7 +407,18 @@ async function readinessCheck(home, app, cur) {
   return { state, configured, evidence };
 }
 
-export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false) {
+// status --resources：只对 RUNNING 受管实例做一次有界采样；非 RUNNING 明确说明不采样，
+// 绝不因采样失败改变状态或退出码。
+function statusResources(st, cur) {
+  const pid = st.status === 'RUNNING' ? (st.pid ?? cur?.pid) : null;
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { available: false, reason: `非 RUNNING（${st.status}），不采样资源用量` };
+  }
+  const [result] = sampleRunResources([{ pid, kind: cur?.kind ?? 'direct', verified: true, creationFileTime: cur?.creationFileTime, image: cur?.image }]);
+  return result ?? { available: false, reason: '资源采样不可用' };
+}
+
+export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, resourcesRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -393,6 +430,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
+  const resources = resourcesRequested ? statusResources(st, cur) : null;
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
@@ -418,6 +456,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),
+    ...(resources ? { resources } : {}),
     readinessUntested: st.status === 'RUNNING' && readiness?.state !== 'READY',
     note: st.note ?? null,
     loggerNote: st.loggerNote ?? null,
