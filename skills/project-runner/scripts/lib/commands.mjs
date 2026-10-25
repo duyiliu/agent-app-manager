@@ -169,11 +169,14 @@ export function cmdRecordUnmanaged(ctx) {
   });
 }
 
-export function cmdPort(ctx, value) {
-  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
-  const port = Number(value);
+export function portDiagnosis(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw usageError('port 需要 1-65535 的整数');
   return { port, occupants: portOccupants(port), note: '外部进程仅诊断，不接管、不停止' };
+}
+
+export function cmdPort(ctx, value) {
+  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
+  return portDiagnosis(Number(value));
 }
 
 export function cmdDoctor(ctx) {
@@ -920,6 +923,9 @@ export async function cmdUi(ctx) {
         listTree: (ref, p) => listTree(ctx.home, ref, p),
         readFile: (ref, p, offset) => readProjectFile(ctx.home, ref, p, offset),
         doctor: () => cmdDoctor(ctx),
+        // 端口诊断复用 CLI 同一只读实现；HTTP 层再按白名单裁剪字段（server.mjs），
+        // 避免 commandLine 等敏感内容进入页面。
+        port: (port) => portDiagnosis(port),
         // 受管启停与移除：改由 manager.mjs 子进程执行（#82-B1）——start/stop/restart
         // 可能持锁等待与进程核验数十秒，同进程同步执行会冻结 ui 事件循环、
         // 期间全部轮询停摆。--json 输出保证数据契约与直调 cmd* 一致（同一实现）。

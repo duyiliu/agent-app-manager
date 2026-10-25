@@ -12,8 +12,100 @@ import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.m
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
+const MANAGER_SCRIPT = path.resolve(SCRIPT_DIR, '..', 'manager.mjs');
 const TAIL_CHUNK = 256 * 1024;
-const fail = (status, message) => Object.assign(new Error(message), { status });
+const fail = (status, message, code) => Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
+
+// ---- HTTP 出口白名单 -------------------------------------------------------
+// 端口/进程诊断只回传定位所需字段，绝不透传 commandLine（可能含密码、token、
+// 完整启动参数）。错误 detail 也走同一套白名单，避免 manager 内部证据把命令行
+// 或任意对象带进浏览器。
+const DETAIL_KEYS = new Set([
+  'port', 'forced', 'note', 'runId', 'pid', 'wrapperPid', 'alias', 'appId', 'phase',
+  'expectedPort', 'expectedImage', 'result', 'code', 'message', 'reason', 'cause',
+  'creationFileTime', 'image', 'comm', 'startedAt', 'processName', 'executablePath',
+  'localAddress', 'localPort', 'stdout', 'stderr', 'file', 'runtimeFile', 'logsDir',
+  'logPaths', 'evidence', 'occupants', 'candidates', 'capture', 'detail', 'stderrTail',
+  'listening', 'accepted', 'managed', 'status',
+]);
+const SAFE_TEXT_MAX = 4000;
+
+function safeScalar(value) {
+  if (typeof value === 'string') return value.length > SAFE_TEXT_MAX ? `${value.slice(0, SAFE_TEXT_MAX)}…` : value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'boolean' || value === null) return value;
+  return undefined;
+}
+
+function sanitizeIdentity(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out = {};
+  for (const key of ['result', 'code', 'creationFileTime', 'image', 'comm']) {
+    const v = safeScalar(value[key]);
+    if (v !== undefined) out[key] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizeProcessInfo(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out = {};
+  for (const key of ['pid', 'processName', 'executablePath', 'startedAt', 'localAddress', 'localPort', 'source', 'note', 'creationFileTime', 'image', 'comm', 'result', 'code']) {
+    const v = safeScalar(value[key]);
+    if (v !== undefined) out[key] = v;
+  }
+  const identity = sanitizeIdentity(value.identity);
+  if (identity) out.identity = identity;
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizeDetailValue(value, depth = 0) {
+  if (depth > 4) return undefined;
+  const scalar = safeScalar(value);
+  if (scalar !== undefined || value === null) return scalar;
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => sanitizeDetailValue(item, depth + 1)).filter((item) => item !== undefined);
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value)) {
+      if (!DETAIL_KEYS.has(key)) continue;
+      const v = key === 'occupants' || key === 'candidates'
+        ? (Array.isArray(value[key]) ? value[key].slice(0, 50).map(sanitizeProcessInfo).filter(Boolean) : undefined)
+        : sanitizeDetailValue(value[key], depth + 1);
+      if (v !== undefined) out[key] = v;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  return undefined;
+}
+
+function sanitizeErrorDetail(detail) {
+  if (!detail || typeof detail !== 'object') return undefined;
+  return sanitizeDetailValue(detail);
+}
+
+function quoteShellPath(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+function sanitizePortData(data, home) {
+  const port = Number.isInteger(data?.port) ? data.port : null;
+  const out = {
+    port,
+    occupants: Array.isArray(data?.occupants) ? data.occupants.slice(0, 100).map(sanitizeProcessInfo).filter(Boolean) : [],
+  };
+  if (typeof data?.note === 'string') out.note = data.note;
+  if (port != null) out.cliCommand = `node ${quoteShellPath(MANAGER_SCRIPT)} --home ${quoteShellPath(home)} port ${port}`;
+  return out;
+}
+
+function errorPayload(error, message) {
+  const payload = { code: error?.code ?? 'INTERNAL', message };
+  const detail = sanitizeErrorDetail(error?.detail);
+  if (detail !== undefined) payload.detail = detail;
+  return { schemaVersion: SCHEMA_VERSION, ok: false, error: payload };
+}
 
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -60,6 +152,15 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       // 否则 GET /api/lifecycle?op=stop 会被 <img>/导航等跨站请求触达（CSRF）。
       if (method !== 'POST') throw fail(405, '启停/移除仅接受 POST');
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null) });
+    }
+    if (u.pathname === '/api/port') {
+      // 只读端口诊断：与 CLI `port <N>` 同一实现；输出在 HTTP 层按白名单裁剪。
+      const raw = u.searchParams.get('port');
+      const port = Number(raw);
+      if (raw == null || !/^\d+$/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw fail(400, 'port 需要 1-65535 的整数', 'USAGE');
+      }
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: sanitizePortData(await api.port(port), home) });
     }
     if (u.pathname === '/api/doctor') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.doctor() });
@@ -152,14 +253,14 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
         }
       }
     } catch (e) {
-      return sendJson(res, errorStatus(e), { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: e.message } });
+      return sendJson(res, errorStatus(e), errorPayload(e, e.message));
     }
     route(res, u, req.method).catch((e) => {
       const status = errorStatus(e);
       if (status >= 500) console.error(e?.stack ?? e);
       // ManagerError 业务原因（包括依赖/冲突）原样透出；未知内部错误仍使用通用文案。
       const known = Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 5;
-      sendJson(res, status, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: e.code ?? 'INTERNAL', message: known || status < 500 ? e.message : '读取失败，请刷新重试' } });
+      sendJson(res, status, errorPayload(e, known || status < 500 ? e.message : '读取失败，请刷新重试'));
     });
   }
 

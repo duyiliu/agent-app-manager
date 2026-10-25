@@ -394,6 +394,41 @@ aside {
   font-size:11px;
   color:var(--text-faint);
   line-height:1.6}
+.diag-btn { margin-left:8px; height:22px; padding:0 8px; font-size:10.5px; vertical-align:1px }
+.diag-panel {
+  margin:0 13px 11px;
+  padding:9px 12px;
+  border:1px solid var(--line-strong);
+  border-radius:9px;
+  background:rgba(148,163,184,.04);
+  font-size:11.5px;
+  line-height:1.65;
+  overflow-wrap:anywhere}
+.diag-panel.diag-error { color:#ffe0a1; background:var(--warn-soft); border-color:rgba(251,191,36,.35) }
+.diag-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:4px }
+.diag-head strong { color:var(--text); font-size:11.5px }
+.diag-code { padding:0 6px; border-radius:999px; border:1px solid var(--line-strong); color:var(--text-faint); font:10px/1.6 var(--mono-font) }
+.diag-close { margin-left:auto; width:22px; height:22px; padding:0; font-size:11px }
+.diag-msg { color:#ffe0a1; overflow-wrap:anywhere }
+.diag-note { margin-top:4px; color:var(--text-faint) }
+.diag-loading { color:var(--text-faint) }
+.diag-occ { margin-top:7px; padding-top:7px; border-top:1px solid var(--line-soft); font:11px/1.65 var(--mono-font); color:var(--text-dim) }
+.diag-occ .dim { color:var(--text-faint) }
+.diag-path { color:#a9c6df; word-break:break-all }
+.diag-json {
+  max-height:190px;
+  margin:4px 0 0;
+  padding:7px 9px;
+  overflow:auto;
+  border:1px solid var(--line-soft);
+  border-radius:7px;
+  background:rgba(0,0,0,.16);
+  color:var(--text-dim);
+  font:10.5px/1.55 var(--mono-font);
+  white-space:pre-wrap;
+  word-break:break-all}
+.diag-cmd { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:10.5px; color:var(--text-faint) }
+.diag-cmd code { padding:1px 5px; border-radius:4px; background:rgba(148,163,184,.10); color:var(--text); font:10.5px/1.7 var(--mono-font); word-break:break-all }
 .kv {
   display:grid;
   grid-template-columns:118px minmax(0,1fr);
@@ -633,6 +668,9 @@ const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : nu
 
 let selected = null;          // 当前选中的 alias
 let appsCache = [];
+let currentDetail = null;     // 最近一次 /api/status 结果，用于诊断结果异步返回后原地重绘
+let portDiag = null;          // { alias, port, loading, auto, data?, error? }
+let lastLifecycleError = null; // { alias, op, code, message, detail? }：启停失败的可见详情（仅当前选择展示）
 let paused = false, manualRefresh = false;
 let previousStatuses = new Map();
 let notifiedRuns;
@@ -649,6 +687,8 @@ async function api(path, signal, method = 'GET') {
   if (!r.ok) {
     const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
     e.code = j?.error?.code; e.status = r.status;
+    // 服务端已按白名单裁剪 detail；页面只展示该副本，不自行猜测/回捞敏感字段。
+    if (j?.error?.detail !== undefined) e.detail = j.error.detail;
     throw e;
   }
   return j.data;
@@ -826,7 +866,81 @@ function applyDetail(open) {
   $('#detail').hidden = !open;
   $('#detailBar').setAttribute('aria-expanded', String(open));
 }
+function rerenderDetail() {
+  if (currentDetail && selected && currentDetail.alias === selected) renderDetail(currentDetail);
+}
+function detailJson(detail) {
+  try { return JSON.stringify(detail, null, 2); }
+  catch { return String(detail); }
+}
+function appendLifecycleError(card, d) {
+  const err = lastLifecycleError;
+  if (!err || err.alias !== d.alias) return;
+  const panel = el('div', 'diag-panel diag-error');
+  const head = el('div', 'diag-head');
+  head.append(el('strong', null, `最近一次 ${err.op} 失败`), el('span', 'diag-code', err.code ?? 'ERROR'));
+  const close = el('button', 'diag-close', '✕');
+  close.type = 'button';
+  close.title = '关闭失败详情';
+  close.addEventListener('click', () => { lastLifecycleError = null; rerenderDetail(); });
+  head.appendChild(close);
+  panel.appendChild(head);
+  panel.appendChild(el('div', 'diag-msg', err.message));
+  if (err.detail !== undefined) {
+    panel.appendChild(el('div', 'diag-note', '详情（服务端白名单字段）：'));
+    panel.appendChild(el('pre', 'diag-json', detailJson(err.detail)));
+  }
+  card.appendChild(panel);
+}
+function appendPortDiagnosis(card, d) {
+  const st = portDiag;
+  if (!st || st.alias !== d.alias) return;
+  const panel = el('div', 'diag-panel');
+  const head = el('div', 'diag-head');
+  head.append(el('strong', null, `端口 ${st.port} 诊断`));
+  if (st.auto) head.appendChild(el('span', 'diag-code', '自动'));
+  const refresh = el('button', 'diag-btn', st.loading ? '诊断中…' : '重新诊断');
+  refresh.type = 'button';
+  refresh.disabled = st.loading;
+  refresh.addEventListener('click', () => diagnosePort(st.alias, st.port));
+  const close = el('button', 'diag-close', '✕');
+  close.type = 'button';
+  close.title = '关闭端口诊断';
+  close.addEventListener('click', () => { portDiag = null; rerenderDetail(); });
+  head.append(refresh, close);
+  panel.appendChild(head);
+  if (st.loading) {
+    panel.appendChild(el('div', 'diag-loading', '正在只读探测端口占用（约 1 秒）…'));
+  } else if (st.error) {
+    panel.appendChild(el('div', 'diag-msg', st.error.message));
+    if (st.error.detail !== undefined) panel.appendChild(el('pre', 'diag-json', detailJson(st.error.detail)));
+  } else {
+    const data = st.data ?? {};
+    const occupants = data.occupants ?? [];
+    if (data.note) panel.appendChild(el('div', 'diag-note', data.note));
+    if (!occupants.length) {
+      panel.appendChild(el('div', 'diag-note', '未发现监听该端口的进程。'));
+    } else {
+      for (const o of occupants) {
+        const row = el('div', 'diag-occ');
+        row.appendChild(el('div', null, `PID ${o.pid ?? '?'} · ${o.processName ?? '未知进程'}${o.localAddress != null ? ` · ${o.localAddress}:${o.localPort ?? st.port}` : ''}`));
+        if (o.startedAt) row.appendChild(el('div', 'dim', '启动时间 ' + o.startedAt));
+        if (o.executablePath) row.appendChild(el('div', 'diag-path', o.executablePath));
+        const id = o.identity;
+        row.appendChild(el('div', 'dim', id ? `身份 ${id.result ?? 'unknown'}${id.image ? ` · ${id.image}` : ''}${id.creationFileTime ? ` · ${id.creationFileTime}` : ''}` : '身份不可用（仅报告端口监听）'));
+        if (o.note) row.appendChild(el('div', 'dim', o.note));
+        panel.appendChild(row);
+      }
+    }
+    const cmd = data.cliCommand || `manager port ${st.port}`;
+    const cmdRow = el('div', 'diag-cmd');
+    cmdRow.append(el('span', null, '等效 CLI：'), el('code', null, cmd), copyButton(cmd));
+    panel.appendChild(cmdRow);
+  }
+  card.appendChild(panel);
+}
 function renderDetail(d) {
+  currentDetail = d;
   const box = $('#detail');
   const bar = $('#detailBar');
   box.replaceChildren();
@@ -935,6 +1049,12 @@ function renderDetail(d) {
       a.target = '_blank'; a.rel = 'noopener'; a.title = '新标签页打开该应用端口';
       pv.appendChild(a);
     } else pv.textContent = String(d.expectedPort);
+    const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '诊断');
+    diag.type = 'button';
+    diag.title = '只读诊断该端口占用（同 CLI port），不接管、不停止外部进程';
+    diag.disabled = !!portDiag?.loading && portDiag?.alias === d.alias;
+    diag.addEventListener('click', (e) => { e.stopPropagation(); diagnosePort(d.alias, d.expectedPort); });
+    pv.appendChild(diag);
     grid.appendChild(pv);
   }
   kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
@@ -954,6 +1074,8 @@ function renderDetail(d) {
   if (d.managed === false) kvRow(grid, '能力', '非受管登记：仅记录启动尝试与日志线索，不提供跨会话启停', 'dim');
   body.appendChild(grid);
   card.appendChild(body);
+  appendLifecycleError(card, d);
+  appendPortDiagnosis(card, d);
 
   if (d.prevRuns?.length) {
     card.appendChild(el('div', 'prev-title', '历史批次（prevRuns）'));
@@ -990,7 +1112,8 @@ function renderDetail(d) {
     el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'),
     el('span', 'db-info', bits));
   bar.hidden = false;
-  applyDetail(detailTouched ? detailOpen : needsAttention);
+  const hasDiagnostics = lastLifecycleError?.alias === d.alias || portDiag?.alias === d.alias;
+  applyDetail(detailTouched ? detailOpen : (needsAttention || hasDiagnostics));
 }
 let lifecycleBusy = false, lifecycleOpKey = null;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
@@ -1003,6 +1126,26 @@ function armOp(alias, op, extra = '') {
   loadStatus();
 }
 function disarmOp() { armedOp = null; if (armedTimer) { clearTimeout(armedTimer); armedTimer = null; } }
+async function diagnosePort(alias, port, auto = false) {
+  const n = Number(port);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    portDiag = { alias, port: n, loading: false, auto, error: { message: '端口无效：需要 1-65535 的整数' } };
+    rerenderDetail();
+    return;
+  }
+  const token = { alias, port: n, loading: true, auto };
+  portDiag = token;
+  rerenderDetail();
+  try {
+    const data = await api('/api/port?port=' + encodeURIComponent(n));
+    if (portDiag !== token) return; // 新一轮诊断已开始：丢弃过期响应
+    portDiag = { alias, port: n, loading: false, auto, data };
+  } catch (e) {
+    if (portDiag !== token) return;
+    portDiag = { alias, port: n, loading: false, auto, error: { code: e.code, status: e.status, message: e.message, detail: e.detail } };
+  }
+  if (selected === alias) rerenderDetail();
+}
 async function doLifecycle(alias, op, extra = '') {
   if (lifecycleBusy || !alias) return;
   lifecycleBusy = true;
@@ -1014,9 +1157,17 @@ async function doLifecycle(alias, op, extra = '') {
     // 启停可能耗时数十秒（命令模式 discover 上限 ~60s），加 150s 超时防永久挂起
     const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}${extra}`, AbortSignal.timeout(150_000), 'POST');
     const pid = r.pid ?? r.start?.pid;
+    if (lastLifecycleError?.alias === alias) lastLifecycleError = null;
+    if (portDiag?.alias === alias && portDiag.auto) portDiag = null;
     showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}`, false);
   } catch (e) {
-    showBanner(`${op} ${alias} 失败：${e.message}`, true);
+    lastLifecycleError = { alias, op, code: e.code, message: e.message, detail: e.detail };
+    showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true);
+    if (e.code === 'PORT_IN_USE') {
+      const app = appsCache.find((a) => a.alias === alias);
+      const target = Number(e.detail?.port ?? app?.expectedPort);
+      if (Number.isInteger(target)) diagnosePort(alias, target, true);
+    }
   }
   lifecycleBusy = false;
   lifecycleOpKey = null;
@@ -1045,6 +1196,9 @@ async function loadStatus() {
 function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
+  currentDetail = null;
+  portDiag = null;
+  lastLifecycleError = null;
   selectedHistoryRun = null; wantedHistoryRun = null;
   logSrcWasCurrent = false;
   detailOpen = false; detailTouched = false;
