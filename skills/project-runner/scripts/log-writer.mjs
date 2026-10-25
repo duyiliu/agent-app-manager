@@ -20,6 +20,7 @@ const rotatedStreams = new Set();
 const recordedStreams = new Set();
 const rotateFailedStreams = new Set();
 const recordedFailedStreams = new Set();
+const pendingRotationStreams = new Set();
 let rotationRetryTimer = null;
 let rotationRetryAttempts = 0;
 
@@ -29,8 +30,13 @@ function scheduleRotationRetry() {
   rotationRetryAttempts++;
   rotationRetryTimer = setTimeout(() => {
     rotationRetryTimer = null;
+    for (const stream of [...pendingRotationStreams]) {
+      try { rotateStream(stream); } catch { /* 保留 pending，下一轮再试 */ }
+    }
     persistRotationState();
+    if (pendingRotationStreams.size) scheduleRotationRetry();
   }, delay);
+  rotationRetryTimer.unref?.();
 }
 
 function persistRotationState() {
@@ -68,6 +74,47 @@ function markRotateFailed(stream) {
   persistRotationState();
 }
 
+// 轮转只有在 rename 成功后才允许创建新的空当前文件。rename 失败时当前文件
+// 仍是本批次唯一证据：以 append 重新打开续写（绝不 open('w') 截断），标记
+// logRotateFailedStreams 并由定时器稍后重试。
+function rotateStream(stream) {
+  const isOut = stream === 'stdout';
+  const filePath = isOut ? outPath : errPath;
+  const rotatePath = `${filePath}.1`;
+  try { fs.closeSync(isOut ? outFd : errFd); } catch { /* already closed */ }
+  try { fs.unlinkSync(rotatePath); } catch { /* absent or blocked */ }
+  try {
+    fs.renameSync(filePath, rotatePath);
+  } catch {
+    let recovered = null;
+    try { recovered = fs.openSync(filePath, 'a'); } catch { /* 转为懒重开 */ }
+    if (recovered == null) {
+      if (isOut) outFd = null; else errFd = null;
+    } else {
+      const size = (() => { try { return fs.statSync(filePath).size; } catch { return isOut ? outSize : errSize; } })();
+      if (isOut) { outFd = recovered; outSize = size; } else { errFd = recovered; errSize = size; }
+    }
+    pendingRotationStreams.add(stream);
+    markRotateFailed(stream);
+    scheduleRotationRetry();
+    return false;
+  }
+  try {
+    const fresh = fs.openSync(filePath, 'w');
+    if (isOut) { outFd = fresh; outSize = 0; } else { errFd = fresh; errSize = 0; }
+    pendingRotationStreams.delete(stream);
+    rotationRetryAttempts = 0;
+    markRotated(stream);
+    return true;
+  } catch {
+    // rename 已成功，旧内容安全保留在 .1；新文件留给懒重开（append）重建。
+    if (isOut) outFd = null; else errFd = null;
+    pendingRotationStreams.delete(stream);
+    markRotateFailed(stream);
+    return false;
+  }
+}
+
 const target = spawn(file, args, { cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 // pidFile 契约：spawn 同步拿到 pid 时立即写入；异步 error（ENOENT/EACCES 等）时写 0，
 // manager 据此快速落 SPAWN_FAILED（无进程产生，可直接重试），不再等窗口超时后
@@ -93,7 +140,7 @@ function writeChunk(stream, input) {
   const filePath = isOut ? outPath : errPath;
   if (chunk.length > limit) chunk = chunk.subarray(chunk.length - limit);
   if (fd == null) {
-    // 此前轮转 reopen 失败（标记过 rotateFailed）：懒重开——append 模式，
+    // 此前轮转失败/重开失败（标记过 rotateFailed）：懒重开——append 模式，
     // 若 rename 当时也失败则旧内容仍在，append 续写不覆盖；仍失败则丢本
     // chunk 等下次再试，日志管道故障绝不波及目标进程。
     try {
@@ -102,22 +149,11 @@ function writeChunk(stream, input) {
       if (isOut) { outFd = fd; outSize = size; } else { errFd = fd; errSize = size; }
     } catch { return; }
   }
-  if (size + chunk.length > limit) {
-    try { fs.closeSync(fd); } catch { /* already closed */ }
-    try { fs.unlinkSync(`${filePath}.1`); } catch { /* absent */ }
-    try { fs.renameSync(filePath, `${filePath}.1`); } catch { /* best effort */ }
-    try {
-      fd = fs.openSync(filePath, 'w');
-    } catch {
-      // reopen 失败：置空 fd 转为懒重开路径，并持久化 logRotateFailedStreams
-      // 供 status/UI 透出——不再静默丢后续全部日志。
-      if (isOut) outFd = null; else errFd = null;
-      markRotateFailed(stream);
-      return;
-    }
-    size = 0;
-    if (isOut) outFd = fd; else errFd = fd;
-    markRotated(stream);
+  if (size + chunk.length > limit && !pendingRotationStreams.has(stream)) {
+    rotateStream(stream);
+    fd = isOut ? outFd : errFd;
+    size = isOut ? outSize : errSize;
+    if (fd == null) return;
   }
   fs.writeSync(fd, chunk);
   size += chunk.length;
@@ -135,6 +171,11 @@ forward(target.stderr, false);
 // 'close' 在进程终止且 stdio 管道全部关闭后才触发：退出瞬间管道里残余的数据
 // 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出；'exit' 事件无此保证。
 target.on('close', (code, signal) => {
+  if (rotationRetryTimer) {
+    clearTimeout(rotationRetryTimer);
+    rotationRetryTimer = null;
+  }
+  pendingRotationStreams.clear();
   persistRotationState();
   try { fs.closeSync(outFd); } catch {}
   try { fs.closeSync(errFd); } catch {}

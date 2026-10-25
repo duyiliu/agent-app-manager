@@ -11,7 +11,7 @@ import { readTailLines } from '../lib/logs.mjs';
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'log-writer.mjs');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-log-rotation-'));
 
-function runLogger(name, limit, script, fileOverride) {
+function runLogger(name, limit, script, fileOverride, prepare) {
   const dir = path.join(temp, name);
   fs.mkdirSync(dir);
   const home = path.join(dir, 'home');
@@ -20,6 +20,7 @@ function runLogger(name, limit, script, fileOverride) {
   fs.mkdirSync(path.join(home, 'locks'));
   const outPath = path.join(dir, 'run.stdout.log');
   const errPath = path.join(dir, 'run.stderr.log');
+  prepare?.({ dir, outPath, errPath });
   const runtimeFile = path.join(home, 'runtime', `${appId}.json`);
   const pidFile = path.join(dir, 'target.pid');
   fs.writeFileSync(runtimeFile, JSON.stringify({ schemaVersion: 1, appId, current: { runId: 'run', phase: 'RUNNING' } }));
@@ -63,6 +64,39 @@ try {
   assert(fs.statSync(`${errRotated.errPath}.1`).size <= 1024, 'rotated stderr should be bounded');
   assert(fs.readFileSync(errRotated.errPath, 'utf8').includes('stderr-after-rotation'), 'stderr should continue after rotation');
   assert.deepEqual(JSON.parse(fs.readFileSync(errRotated.runtimeFile, 'utf8')).current.logRotatedStreams, ['stderr']);
+
+  // rename 失败（用目录占住 .1，unlink 与 rename 都失败）时不得 open('w')
+  // 截断当前批次日志；保留内容继续 append，并在 runtime 标记轮转失败。
+  const blockedRotate = await runLogger('rotate-blocked', 1024,
+    "process.stdout.write('a'.repeat(1200)); setTimeout(() => { process.stdout.write('after-blocked-rotation\\n'); process.exit(0); }, 100);",
+    undefined,
+    ({ outPath }) => fs.mkdirSync(`${outPath}.1`));
+  assert.equal(blockedRotate.code, 0, 'rename 失败不应影响目标进程退出码');
+  const blockedContent = fs.readFileSync(blockedRotate.outPath, 'utf8');
+  assert(blockedContent.startsWith('a'.repeat(1024)), 'rename 失败时当前日志不得被截断');
+  assert(blockedContent.includes('after-blocked-rotation'), 'rename 失败后仍应继续追加日志');
+  assert(fs.statSync(`${blockedRotate.outPath}.1`).isDirectory(), '占住 .1 的目录应保留');
+  assert.deepEqual(JSON.parse(fs.readFileSync(blockedRotate.runtimeFile, 'utf8')).current.logRotateFailedStreams,
+    ['stdout'], 'rename 失败应持久化 logRotateFailedStreams');
+
+  // 占位目录移除后，定时器应重试轮转并在下一次写入前完成，旧证据仍然保留。
+  const retryScript = [
+    "const fs = require('node:fs');",
+    "process.stdout.write('r'.repeat(1200));",
+    "setTimeout(() => { process.stdout.write('trigger-rotate\\n'); }, 20);",
+    "setTimeout(() => { try { fs.rmdirSync('run.stdout.log.1'); } catch {} }, 250);",
+    "setTimeout(() => { process.stdout.write('after-retry-rotation\\n'); process.exit(0); }, 1000);",
+  ].join('');
+  const retried = await runLogger('rotate-retry', 1024, retryScript, undefined,
+    ({ outPath }) => fs.mkdirSync(`${outPath}.1`));
+  assert.equal(retried.code, 0);
+  assert(fs.statSync(`${retried.outPath}.1`).isFile(), '占位目录移除后应重试轮转成功');
+  assert(fs.readFileSync(`${retried.outPath}.1`, 'utf8').includes('trigger-rotate'), '重试轮转应保留失败期间的日志');
+  assert(fs.readFileSync(retried.outPath, 'utf8').includes('after-retry-rotation'), '重试轮转后应继续写入当前日志');
+  const retriedRuntime = JSON.parse(fs.readFileSync(retried.runtimeFile, 'utf8')).current;
+  assert.deepEqual(retriedRuntime.logRotateFailedStreams, ['stdout'], '此前失败记录应保留以供诊断');
+  assert.equal(retriedRuntime.logRotated, true);
+  assert.deepEqual(retriedRuntime.logRotatedStreams, ['stdout']);
 
   const normal = await runLogger('normal', 1024, "process.stdout.write('small output\\n');");
   assert.equal(normal.code, 0);
