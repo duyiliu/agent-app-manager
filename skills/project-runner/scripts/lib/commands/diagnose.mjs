@@ -10,11 +10,14 @@ import { resolveAppId, statusWithFacts } from '../runtime.mjs';
 import { readTailLines, MAX_LOG_LINES } from '../logs.mjs';
 import { bootId } from '../proc-linux.mjs';
 
-export function cmdPort(ctx, value) {
-  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
-  const port = Number(value);
+export function portDiagnosis(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw usageError('port 需要 1-65535 的整数');
   return { port, occupants: portOccupants(port), note: '外部进程仅诊断，不接管、不停止' };
+}
+
+export function cmdPort(ctx, value) {
+  if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
+  return portDiagnosis(Number(value));
 }
 
 export function cmdDoctor(ctx) {

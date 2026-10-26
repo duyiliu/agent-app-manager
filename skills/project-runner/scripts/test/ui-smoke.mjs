@@ -131,6 +131,39 @@ try {
   await check('Host 不匹配返回 403', async () => assert.equal((await get('/api/apps', { host: 'evil.example' })).status, 403));
   await check('POST 拒绝（405）', async () => assert.equal((await get('/api/apps', { method: 'POST' })).status, 405));
 
+  await check('GET /api/port 参数校验与 Host 校验', async () => {
+    assert.equal((await get('/api/port?port=' + port, { host: 'evil.example' })).status, 403);
+    assert.equal((await get('/api/port?port=0')).status, 400);
+    assert.equal((await get('/api/port?port=not-a-port')).status, 400);
+    assert.equal((await get('/api/port')).status, 400);
+  });
+  await check('/api/port 只读返回白名单字段，不暴露命令行', async () => {
+    const r = await get('/api/port?port=' + port);
+    if (r.status === 503 && r.json?.error?.code === 'PWSH_MISSING') { console.log('  skip 端口探测（缺 pwsh 7）'); return; }
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.data.port, port);
+    assert(Array.isArray(r.json.data.occupants));
+    assert(r.json.data.occupants.length >= 1, '管理台自身监听应被识别');
+    assert(typeof r.json.data.cliCommand === 'string' && r.json.data.cliCommand.includes(`port ${port}`));
+    const forbidden = new Set(['commandLine', 'cmd', 'args', 'command']);
+    const allowedOccupant = new Set(['pid', 'processName', 'executablePath', 'startedAt', 'localAddress', 'localPort', 'source', 'note', 'identity']);
+    const allowedIdentity = new Set(['result', 'code', 'creationFileTime', 'image', 'comm']);
+    const walk = (value, trail) => {
+      if (Array.isArray(value)) return value.forEach((v, i) => walk(v, `${trail}[${i}]`));
+      if (!value || typeof value !== 'object') return;
+      for (const [k, v] of Object.entries(value)) {
+        assert(!forbidden.has(k), `${trail}.${k} 不应暴露`);
+        walk(v, `${trail}.${k}`);
+      }
+    };
+    walk(r.json.data, 'data');
+    for (const o of r.json.data.occupants) {
+      for (const k of Object.keys(o)) assert(allowedOccupant.has(k), `占用进程字段不在白名单：${k}`);
+      if (o.identity) for (const k of Object.keys(o.identity)) assert(allowedIdentity.has(k), `身份字段不在白名单：${k}`);
+    }
+  });
+
   // lifecycle 写操作防 CSRF：GET 必须被方法守卫挡在业务之外（405 而非业务错误码），
   // 跨站来源（Sec-Fetch-Site=cross-site 或异源 Origin）的 POST 一律 403。
   await check('GET /api/lifecycle 拒绝（405）', async () => {
@@ -258,6 +291,24 @@ try {
   });
 
   const spawnUi = (p, extra = []) => spawn(process.execPath, [MANAGER, '--home', home, 'ui', '--port', String(p), ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
+  await check('生命周期 PORT_IN_USE 回传白名单 detail（含端口占用证据）', async () => {
+    const regFile = path.join(home, 'registry.json');
+    const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+    reg.apps.ahis.expectedPort = port;
+    reg.apps.ahis.args = ['-e', 'process.exit(0)'];
+    fs.writeFileSync(regFile, JSON.stringify(reg, null, 2));
+    const r = await get('/api/lifecycle?app=his&op=start', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', Origin: `http://127.0.0.1:${port}` } });
+    if (r.status === 503 && r.json?.error?.code === 'PWSH_MISSING') { console.log('  skip 端口冲突 detail（缺 pwsh 7）'); return; }
+    assert.equal(r.status, 409, r.body);
+    assert.equal(r.json.error.code, 'PORT_IN_USE');
+    const detail = r.json.error.detail;
+    assert(detail && detail.port === port, `缺少端口 detail：${r.body}`);
+    assert(Array.isArray(detail.occupants) && detail.occupants.length >= 1, '缺少占用证据');
+    for (const o of detail.occupants) {
+      assert(!('commandLine' in o) && !('cmd' in o), 'detail 不应包含命令行');
+    }
+    assert(!/commandLine|"cmd"|"args"/i.test(JSON.stringify(detail)), 'detail 不应包含命令行字段');
+  });
   const dup = await exitInfo(spawnUi(port));
   await check('重复 ui 提示已有实例（退出码 3）', () => {
     assert.equal(dup.code, 3);

@@ -169,7 +169,7 @@ STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核�
 | AC05 | PID 复用、伪造 runId、外部 IDEA/手工进程、身份不明时不误停；停止后再重启才允许起新 JVM |
 | AC06 | 日志按运行批次可查询且有界；受管与非受管、存活与就绪、JRebel 是否验证分别展示，无虚假成功 |
 | AC07 | 不改业务项目；普通 Java 模式无需 JRebel 配置；PR #5 单项目启动、JRebel 验证、只读日志查看（v2.2 起为 `manager ui`）、原 `.tmp` 日志继续可用 |
-| AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）与项目文件（路径白名单、拒绝穿越与符号链接），启停与移除仅 POST `/api/lifecycle`（与 CLI 同一实现，页面显式二次确认，跨站写一律拒绝）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
+| AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）、项目文件（路径白名单、拒绝穿越与符号链接）与端口诊断（`GET /api/port`，字段白名单、不暴露命令行），启停与移除仅 POST `/api/lifecycle`（与 CLI 同一实现，页面显式二次确认，跨站写一律拒绝，错误 detail 经白名单回传）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
 | AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；安全停止使用 pidfd 锚定进程身份，pidfd 不可用时明确拒绝；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
