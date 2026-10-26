@@ -5,6 +5,7 @@ import { psProc, verifyRun, interpretVerifyResult } from './probe.mjs';
 import { withLock, lockState } from './locks.mjs';
 import { ID_RE } from './desc.mjs';
 import { usageError, notFoundError, conflictError } from './errors.mjs';
+import { resolveOnExit, notifyEnv, runNotifyCommand } from './notify.mjs';
 
 export const PREV_RUNS_KEEP = 20;
 // 未结记录（STARTING、启动中断、pid 未采集、UNKNOWN、进程与记录状态可能并存）
@@ -242,6 +243,7 @@ export function computeStatus(home, appId, rt, prefetched = null) {
 // 避免与并发启动/停止对运行记录的写入互相覆盖；锁忙或锁损坏时跳过（不阻塞只读命令）
 function settleStoppedWriteback(home, appId, marked) {
   try {
+    let notify = null;
     withLock(home, appId, 'status-refresh', () => {
       const rt2 = readRuntimeStrict(home, appId);
       if (rt2 && rt2.current && rt2.current.runId === marked.runId && rt2.current.phase === 'RUNNING') {
@@ -250,9 +252,29 @@ function settleStoppedWriteback(home, appId, marked) {
         // logger 可能已在本次核验与锁之间写入 exit：按最新记录重新生成说明，
         // 不把已有的 code/signal 覆盖成笼统的“进程已退出”。
         rt2.current.exitNote = stoppedNote(rt2.current, marked.exitNote);
+        // onExit 通知钩子（#135）：查询首次发现退出时在落账同一写入里认领一次
+        // （notifiedAt 存在即不再触发）；命令本体在锁外有界执行，结果再短锁补记。
+        // 人工 stop 走 markStopped 不经此路径，天然不触发。
+        const hook = resolveOnExit(home, appId);
+        if (hook && !rt2.current.notifiedAt) {
+          rt2.current.notifiedAt = new Date().toISOString();
+          notify = { command: hook.command, app: hook.app, cur: rt2.current };
+        }
         writeRuntime(home, appId, rt2);
       }
     });
+    if (notify) {
+      const result = runNotifyCommand(notify.command, notifyEnv(appId, notify.app, notify.cur), home);
+      try {
+        withLock(home, appId, 'exit-notify', () => {
+          const rt3 = readRuntimeStrict(home, appId);
+          if (rt3?.current?.runId === notify.cur.runId && rt3.current.notifiedAt === notify.cur.notifiedAt) {
+            rt3.current.notifyResult = result;
+            writeRuntime(home, appId, rt3);
+          }
+        });
+      } catch { /* 结果留证失败不影响通知本身与查询路径 */ }
+    }
   } catch {
     // 跳过落账，查询结果照常返回
   }

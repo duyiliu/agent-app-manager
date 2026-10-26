@@ -392,6 +392,7 @@ try {
     const rt = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
     assert.equal(rt.current.phase, 'STOPPED');
     assert(rt.current.endedAt, '缺少 endedAt 退出证据');
+    assert.equal(rt.current.notifiedAt ?? null, null, '未配置 onExit 时不应有通知留证');
   });
 
   lifecycle('list 与单条核验一致（进程已退出 → STOPPED）', () => {
@@ -662,6 +663,106 @@ try {
       assert.equal(exit?.code, 0, `grace 后目标退出码应为 0：${JSON.stringify(exit)}`);
       assert.equal(exit?.signal, null, `捕获 SIGTERM 后正常退出不应记 signal：${JSON.stringify(exit)}`);
     }
+  });
+
+  // ---------- onExit 退出通知钩子（#135）：查询首次发现退出触发一次，人工 stop 不触发 ----------
+  const notifyOut = path.join(base, 'notify-out.jsonl');
+  const notifySink = path.join(base, 'notify-sink.cjs');
+  fs.writeFileSync(notifySink,
+    `require('fs').appendFileSync(${JSON.stringify(notifyOut)}, JSON.stringify({`
+    + 'runId:process.env.PROJECT_RUNNER_RUN_ID,alias:process.env.PROJECT_RUNNER_ALIAS,'
+    + 'appId:process.env.PROJECT_RUNNER_APP_ID,pid:process.env.PROJECT_RUNNER_PID,'
+    + 'note:process.env.PROJECT_RUNNER_EXIT_NOTE,endedAt:process.env.PROJECT_RUNNER_ENDED_AT'
+    + `})+'\\n');\n`);
+  // 测试命令不含引号（测试路径无空格）：Node 在 Windows 会对含空格的参数再包引号并转义
+  // 内部引号，与 cmd /s /c 的首尾剥引号叠加会拆坏命令——用户侧回调同理应避免依赖嵌套引号。
+  const notifyCmd = `${process.execPath} ${notifySink}`;
+  const readNotifies = () => (fs.existsSync(notifyOut)
+    ? fs.readFileSync(notifyOut, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    : []);
+  const notiDesc = path.join(base, 'desc-noti.json');
+  fs.writeFileSync(notiDesc, JSON.stringify({
+    alias: 'smoke-noti', root: proj, entry: 'noti', mode: 'java',
+    exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'], envRefs: [], onExit: notifyCmd,
+  }));
+  const waitStopped = (alias) => {
+    let st = null;
+    for (let i = 0; i < 40; i++) {
+      st = run(['status', alias]);
+      if (st.code === 0 && st.json?.data?.status === 'STOPPED') break;
+      sleep(250);
+    }
+    return st;
+  };
+
+  lifecycle('onExit：杀进程后 status 首次发现触发一次回调（负载+落账），再查不重复', () => {
+    const s = expectOk(run(['start-new', '--desc', notiDesc]));
+    process.kill(s.data.pid, 'SIGKILL');
+    const st = waitStopped('smoke-noti');
+    expectOk(st);
+    assert.equal(st.json.data.status, 'STOPPED');
+    const hits = readNotifies();
+    assert.equal(hits.length, 1, `回调次数期望 1，实际 ${hits.length}：${JSON.stringify(hits)}`);
+    assert.equal(hits[0].runId, s.data.runId);
+    assert.equal(hits[0].alias, 'smoke-noti');
+    assert.equal(hits[0].appId, s.data.appId);
+    assert.equal(String(hits[0].pid), String(s.data.pid));
+    // 落账：运行记录 notifiedAt + notifyResult；再次查询的响应可透出
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
+    assert(rt.current.notifiedAt, '运行记录缺少 notifiedAt');
+    assert.equal(rt.current.notifyResult, 'ok', `notifyResult 异常：${rt.current.notifyResult}`);
+    const st2 = expectOk(run(['status', 'smoke-noti']));
+    assert.equal(st2.data.run.notifiedAt, rt.current.notifiedAt);
+    expectOk(run(['list']));
+    assert.equal(readNotifies().length, 1, '同一 run 重复触发了回调');
+  });
+
+  lifecycle('onExit：人工 stop 不触发回调', () => {
+    expectOk(run(['start', 'smoke-noti']));
+    expectOk(run(['stop', 'smoke-noti']));
+    assert.equal(readNotifies().length, 1, '人工 stop 不应触发 onExit 回调');
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${expectOk(run(['status', 'smoke-noti'])).data.appId}.json`), 'utf8'));
+    assert.equal(rt.current.notifiedAt ?? null, null, 'stop 落的账不应带 notifiedAt');
+  });
+
+  lifecycle('onExit：应用未配置时全局 config.json 兜底触发', () => {
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ onExit: notifyCmd }));
+    const f2 = path.join(base, 'desc-noti2.json');
+    fs.writeFileSync(f2, JSON.stringify({
+      alias: 'smoke-noti2', root: proj, entry: 'noti2', mode: 'java',
+      exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'], envRefs: [],
+    }));
+    try {
+      const s = expectOk(run(['start-new', '--desc', f2]));
+      process.kill(s.data.pid, 'SIGKILL');
+      const st = waitStopped('smoke-noti2');
+      expectOk(st);
+      assert.equal(st.json.data.status, 'STOPPED');
+      const hits = readNotifies();
+      assert.equal(hits.length, 2, `全局兜底未触发：${JSON.stringify(hits)}`);
+      assert.equal(hits[1].runId, s.data.runId);
+      assert.equal(hits[1].alias, 'smoke-noti2');
+    } finally {
+      try { fs.unlinkSync(path.join(home, 'config.json')); } catch { /* 已删 */ }
+    }
+  });
+
+  lifecycle('onExit：回调命令超时/失败静默，不影响 status 主路径', () => {
+    const f3 = path.join(base, 'desc-noti3.json');
+    fs.writeFileSync(f3, JSON.stringify({
+      alias: 'smoke-noti3', root: proj, entry: 'noti3', mode: 'java',
+      exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'], envRefs: [],
+      onExit: 'exit 7',
+    }));
+    const s = expectOk(run(['start-new', '--desc', f3]));
+    process.kill(s.data.pid, 'SIGKILL');
+    const st = waitStopped('smoke-noti3');
+    expectOk(st);
+    assert.equal(st.json.data.status, 'STOPPED', '回调失败影响了 status 结果');
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
+    assert(rt.current.notifiedAt, '失败回调也应落账 notifiedAt（同一 run 只试一次）');
+    assert.equal(rt.current.notifyResult, 'exit:7', `notifyResult 异常：${rt.current.notifyResult}`);
+    assert.equal(readNotifies().length, 2, '失败回调不应触碰正常 sink');
   });
 
   lifecycle('文本模式人类可读输出抽查（status 含 port/状态）', () => {

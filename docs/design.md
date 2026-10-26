@@ -230,3 +230,6 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 =======
 
 **v2.12（2026-10-26，status/list 周期监控，issue #114）**：`status`/`list` 新增 `--watch [--interval <ms>]`。默认 2000ms，允许 500-60000ms 的整数，越界报 usageError（`--interval` 不得脱离 `--watch` 单独使用）。`--json` 模式输出 NDJSON 帧流（每行 `{ schemaVersion, ok, command, data }`，不做 pretty-print），便于 `jq -c`、`while read` 或 agent 条件等待；人类模式在 TTY 清屏重绘，非 TTY 退化为逐帧输出并在首行注明。`--probe`/`--ready` 的探测与就绪证据随每帧重新计算并输出。Ctrl+C 或 stdout 管道断开（EPIPE）时清理定时器并退出；watch 不持有应用锁，`status` 的退出落账仍在短锁内同步完成，不残留锁文件。无 `--watch` 时命令解析与输出保持原样。
+
+**v2.13（2026-10-26，issue #135 受管进程退出通知钩子）**：desc 新增可选 `onExit`（≤1000 字符命令字符串，随注册表持久化），全局兜底为 `~/.project-runner/config.json` 的 `{ "onExit": "..." }`；应用配置优先，未配置时行为与现状完全一致。触发点挂在「查询首次观测到 RUNNING→已退出」的落账路径（`status`/`list`/ui 轮询共用的 `settleStoppedWriteback`）：落账同一写入里置 `notifiedAt` 认领单次通知，命令在锁外有界同步执行（15s 超时，Windows `cmd /d /s /c`、Linux `/bin/sh -c`），结果短锁补记 `notifyResult`；失败静默绝不影响 status 主路径。负载经 `PROJECT_RUNNER_*` 环境变量传递（appId/alias/runId/pid/endedAt/exitNote，及 #102 落地后的 exit.code/exit.signal，不可得时为空串）。人工 `stop` 走 `markStopped` 直接落账、不经此路径，天然不触发；`restart` 的停旧一步同理不触发。命令只来自本机信任边界内的配置（Skill 写入的 desc / 本机 config.json），无任何远程或 UI/API 注入面。无常驻监督进程——通知是"首次发现"语义，不保证实时（与 #109 自动重启策略互补，重启动作可复用同一出口上报）。
+
