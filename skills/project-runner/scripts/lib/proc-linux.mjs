@@ -11,6 +11,8 @@ const PROC = '/proc';
 const PIDFD_TERMINATE = fileURLToPath(new URL('../linux/pidfd-terminate.py', import.meta.url));
 const DISCOVER_SETTLE_MS = 1500;
 const DISCOVER_POLL_MS = 400;
+// 资源采样单次覆盖的进程数上限：命令模式聚合后代时仍保持有界读，不随进程树无限扩张。
+export const RESOURCE_MAX_TREE_PIDS = 64;
 // 已知包管理器/构建器启动器的命令行特征：同映像单链折叠时只别除命中特征的祖先
 // （npm-cli/yarn/pnpm/maven/gradle wrapper，含 npm 重写进程标题后的 "npm run …" 形式）；
 // 其余同映像链仍按歧义拒绝。
@@ -31,7 +33,7 @@ export function bootId() {
 }
 
 // /proc/<pid>/stat 的 comm 可含空格与括号：先取最后一个 ')'，再按空白切分。
-// fields[0]=state, fields[1]=ppid, fields[19]=starttime（第 22 字段）。
+// fields[0]=state, fields[1]=ppid, fields[11]=utime, fields[12]=stime, fields[19]=starttime（第 22 字段）。
 function readStat(pid) {
   let raw;
   try { raw = fs.readFileSync(`${PROC}/${pid}/stat`, 'utf8'); }
@@ -46,12 +48,16 @@ function readStat(pid) {
   const fields = raw.slice(close + 2).trim().split(/\s+/);
   const state = fields[0];
   const ppid = Number.parseInt(fields[1], 10);
+  // 去掉 pid/comm 后 fields[0] 对应 /proc/<pid>/stat 第 3 字段：utime 为第 14 字段 →
+  // fields[11]，stime 为第 15 字段 → fields[12]，starttime 为第 22 字段 → fields[19]。
+  const utime = Number.parseInt(fields[11], 10);
+  const stime = Number.parseInt(fields[12], 10);
   const starttime = fields[19];
-  if (!state || !Number.isInteger(ppid) || !starttime) {
+  if (!state || !Number.isInteger(ppid) || !Number.isInteger(utime) || !Number.isInteger(stime) || !starttime) {
     return { result: 'error', code: 'statParseFailed', message: `无法解析 /proc/${pid}/stat` };
   }
   if (state === 'Z' || state === 'X' || state === 'x') return { result: 'exited' };
-  return { ok: true, state, ppid, starttime, comm };
+  return { ok: true, state, ppid, utime, stime, starttime, comm };
 }
 
 // /proc/<pid>/exe 在权限不足（yama/hidepid）或内核线程时不可读：降级为 comm 前缀，
@@ -288,6 +294,108 @@ export function discover(rootPid, expectedImage, waitMs = COMMAND_DISCOVER_TIMEO
   }
 }
 
+// ---------- 资源用量采样（RSS / CPU） ----------
+// CLK_TCK 只用于把 /proc/<pid>/stat 的 jiffies 换算成秒；缓存一次，
+// getconf 不可用时回退到 Linux 常见默认值 100。
+let clockTicksCache = null;
+function clockTicks() {
+  if (clockTicksCache == null) {
+    let ticks = NaN;
+    try {
+      const r = spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+      if (!r.error && r.status === 0) ticks = Number.parseInt(String(r.stdout).trim(), 10);
+    } catch { /* 回退默认值 */ }
+    clockTicksCache = Number.isInteger(ticks) && ticks > 0 ? ticks : 100;
+  }
+  return clockTicksCache;
+}
+
+// /proc/<pid>/status 通常只有 1-2 KB；仍按上限读，避免异常 procfs 或恶意挂载点造成无界读取。
+function readBoundedText(file, maxBytes) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(maxBytes);
+    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
+function readResourceSample(pid) {
+  const s = readStat(pid);
+  if (!s.ok) return { pid, result: s.result ?? 'error', ...(s.code ? { code: s.code } : {}) };
+  const text = readBoundedText(`${PROC}/${pid}/status`, 16 * 1024);
+  if (text == null) return { pid, result: 'error', code: 'statusUnreadable' };
+  const rssKb = /^VmRSS:\s+(\d+)\s+kB$/m.exec(text);
+  const hwmKb = /^VmHWM:\s+(\d+)\s+kB$/m.exec(text);
+  const ticks = s.utime + s.stime;
+  return {
+    pid,
+    result: 'ok',
+    starttime: s.starttime,
+    rssBytes: rssKb ? Number(rssKb[1]) * 1024 : null,
+    peakRssBytes: hwmKb ? Number(hwmKb[1]) * 1024 : null,
+    cpuTicks: ticks,
+    cpuTimeMs: Math.round(ticks / clockTicks() * 1000),
+  };
+}
+
+// 单次有界采样：先对全部目标取一次 RSS/CPU 计数，间隔 intervalMs 后再取一次 CPU 计数，
+// 用两次差值计算 CPU 利用率（不引入常驻轮询）。items 形如 [{id, tree}]；
+// tree=true 时按 PPID 树聚合目标后代（命令模式的真实目标可能再派生 worker）。
+export function resources(items, intervalMs = 200) {
+  const list = (items ?? [])
+    .map((it) => ({ id: Number(it?.id), tree: !!it?.tree }))
+    .filter((it) => Number.isInteger(it.id) && it.id > 0);
+  if (!list.length) return { result: 'ok', intervalMs, items: [], processes: [] };
+  const rows = snapshotProcesses();
+  if (rows.error) return { result: 'error', code: 'procUnreadable', message: rows.error.message };
+  const byParent = childrenByParent(rows);
+  const itemsOut = [];
+  const uniquePids = new Set();
+  for (const it of list) {
+    const pids = [it.id];
+    let truncated = false;
+    if (it.tree) {
+      for (const child of descendantsOf(it.id, byParent)) {
+        if (pids.length >= RESOURCE_MAX_TREE_PIDS) { truncated = true; break; }
+        pids.push(child);
+      }
+    }
+    itemsOut.push({ id: it.id, pids, ...(truncated ? { truncated: true } : {}) });
+    for (const pid of pids) uniquePids.add(pid);
+  }
+  const interval = Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : 200;
+  const first = new Map([...uniquePids].map((pid) => [pid, readResourceSample(pid)]));
+  sleepSync(Math.max(20, interval));
+  const second = new Map([...uniquePids].map((pid) => [pid, readStat(pid)]));
+  const hz = clockTicks();
+  const processes = [];
+  for (const pid of uniquePids) {
+    const a = first.get(pid);
+    if (!a || a.result !== 'ok') { processes.push({ pid, result: a?.result ?? 'error', ...(a?.code ? { code: a.code } : {}) }); continue; }
+    const b = second.get(pid);
+    if (!b || !b.ok) { processes.push({ pid, result: b?.result ?? 'error', ...(b?.code ? { code: b.code } : {}) }); continue; }
+    if (b.starttime !== a.starttime) { processes.push({ pid, result: 'error', code: 'pidReused' }); continue; }
+    const deltaTicks = Math.max(0, (b.utime + b.stime) - a.cpuTicks);
+    const cpuPercent = Math.round((deltaTicks / hz) / (interval / 1000) * 10000) / 100;
+    processes.push({
+      pid,
+      result: 'ok',
+      rssBytes: a.rssBytes,
+      peakRssBytes: a.peakRssBytes,
+      privateBytes: null,
+      cpuPercent,
+      cpuTimeMs: a.cpuTimeMs,
+    });
+  }
+  return { result: 'ok', intervalMs: interval, items: itemsOut, processes };
+}
+
 function ipv4FromHex(hex) {
   if (!/^[0-9a-f]{8}$/i.test(hex)) return hex; // IPv6 保留 hex，避免臆造格式
   const bytes = [];
@@ -438,6 +546,7 @@ export function run(action, params = {}) {
     case 'discover': return discover(params.id, params.image, params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS);
     case 'listening': return listeningPorts(params.id);
     case 'listening-batch': return listeningPortsBatch(params.ids);
+    case 'resources': return resources(params.items, params.intervalMs ?? 200);
     default: return { result: 'error', code: 'unsupportedAction' };
   }
 }

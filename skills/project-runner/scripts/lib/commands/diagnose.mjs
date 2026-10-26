@@ -14,6 +14,7 @@ import { readinessTimeoutError, conflictError } from '../errors.mjs';
 import { bootId } from '../proc-linux.mjs';
 import { displayEnv } from '../env.mjs';
 import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from '../restart.mjs';
+import { sampleRunResources } from '../resources.mjs';
 
 // 实际监听端口去重排序：同一端口可能在 0.0.0.0 与 :: 各有一条监听记录。
 function uniqueListeningPorts(entries) {
@@ -159,7 +160,7 @@ export function cmdList(ctx) {
       if (cached instanceof Error) throw cached;
       ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
     } catch (e) {
-      return { alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root, tags: app.tags ?? [] };
+      return { alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root, tags: app.tags ?? [], memoryBytes: null };
     }
     const current = rt?.current ?? null;
     const runExit = current?.exit ?? null;
@@ -176,8 +177,33 @@ export function cmdList(ctx) {
       exitWatchError: current?.exitWatchError ?? null,
       exitNote: st.note ?? current?.exitNote ?? null,
       log: current?.logPaths?.stdout ?? null, root: app.root,
+      // 单点采样（无趋势）：RUNNING 受管应用带 RSS；采样失败/未运行时保持 null。
+      memoryBytes: null,
     };
   });
+  // list 的内存列（#111）：所有 RUNNING 受管应用共用一次平台采样（Windows 1 次 pwsh，Linux 直读 /proc）。
+  // 命令模式按目标 + 后代聚合（tree=true）；失败只降级为 memoryBytes=null，不影响 list 结果。
+  const candidates = [];
+  rows.forEach((row, index) => {
+    if (row.status !== 'RUNNING' || !Number.isInteger(row.pid) || row.managed === false) return;
+    const cached = runtimes.get(row.appId);
+    const cur = cached instanceof Error ? null : cached?.current;
+    if (!cur || !cur.managed) return;
+    candidates.push({ index, pid: row.pid, kind: cur.kind ?? 'direct', verified: true, creationFileTime: cur.creationFileTime, image: cur.image });
+  });
+  if (candidates.length) {
+    const samples = sampleRunResources(candidates.map(({ pid, kind }) => ({ pid, kind, verified: true })));
+    candidates.forEach((c, i) => {
+      const s = samples[i];
+      if (s?.available) {
+        rows[c.index].memoryBytes = s.rssBytes ?? null;
+        rows[c.index].cpuPercent = s.cpuPercent ?? null;
+        rows[c.index].resourcesScope = s.scope;
+      } else {
+        rows[c.index].resourcesNote = s?.reason ?? '资源采样不可用';
+      }
+    });
+  }
   // 列表也附实际监听端口（#107）：一次批量枚举所有 RUNNING pid，避免每个应用各起一次 pwsh。
   // 枚举失败不回退到 expectedPort 冒充实际端口；UI 会按无 actualPorts 处理。
   const runningPids = [...new Set(rows.filter((r) => r.status === 'RUNNING' && Number.isInteger(r.pid)).map((r) => r.pid))];
@@ -456,7 +482,18 @@ export async function cmdHealth(ctx) {
   };
 }
 
-export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false) {
+// status --resources（#111）：只对 RUNNING 受管实例做一次有界采样；非 RUNNING 明确说明不采样，
+// 绝不因采样失败改变状态或退出码。
+function statusResources(st, cur) {
+  const pid = st.status === 'RUNNING' ? (st.pid ?? cur?.pid) : null;
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { available: false, reason: `非 RUNNING（${st.status}），不采样资源用量` };
+  }
+  const [result] = sampleRunResources([{ pid, kind: cur?.kind ?? 'direct', verified: true, creationFileTime: cur?.creationFileTime, image: cur?.image }]);
+  return result ?? { available: false, reason: '资源采样不可用' };
+}
+
+export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false, resourcesRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -484,6 +521,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
+  const resources = resourcesRequested ? statusResources(st, cur) : null;
   const runExit = cur?.exit ?? null;
   const runExitSummary = exitSummary(cur);
   return {
@@ -525,6 +563,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),
+    ...(resources ? { resources } : {}),
     readinessUntested: st.status === 'RUNNING' && readiness?.state !== 'READY',
     note: st.note ?? null,
     loggerNote: st.loggerNote ?? null,

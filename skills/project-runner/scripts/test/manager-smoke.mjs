@@ -248,6 +248,27 @@ try {
     assert.equal(j.data.readinessUntested, true);
   });
 
+  lifecycle('status --resources → 直连单进程 RSS/CPU 单次采样', () => {
+    const j = expectOk(run(['status', 'smoke', '--resources']));
+    const res = j.data.resources;
+    assert.equal(j.data.status, 'RUNNING');
+    assert.equal(res?.available, true, JSON.stringify(res));
+    assert.equal(res.scope, 'process');
+    assert.equal(res.processCount, 1);
+    assert(Number.isFinite(res.rssBytes) && res.rssBytes > 0, `rss 异常：${res.rssBytes}`);
+    assert(Number.isFinite(res.cpuPercent) && res.cpuPercent >= 0, `cpuPercent 异常：${res.cpuPercent}`);
+    assert(Number.isFinite(res.cpuTimeMs) && res.cpuTimeMs >= 0, `cpuTimeMs 异常：${res.cpuTimeMs}`);
+    assert.equal(res.processes[0].pid, currentPid);
+  });
+
+  lifecycle('list 内存列来自单点采样（RUNNING 行有 RSS）', () => {
+    const j = expectOk(run(['list']));
+    const row = j.data.apps.find((a) => a.alias === 'smoke');
+    assert.equal(row.status, 'RUNNING');
+    assert(Number.isFinite(row.memoryBytes) && row.memoryBytes > 0, `memoryBytes 异常：${row.memoryBytes}`);
+    assert(Number.isFinite(row.cpuPercent) && row.cpuPercent >= 0, `cpuPercent 异常：${row.cpuPercent}`);
+  });
+
   lifecycle('重复 start → ALREADY_RUNNING（退出码 3）', () => {
     const j = expectFail(run(['start', 'smoke']), 3, 'ALREADY_RUNNING');
     assert(j.error.message.includes('已有受管实例在运行'));
@@ -257,6 +278,13 @@ try {
     const j = expectOk(run(['stop', 'smoke']));
     assert.equal(j.data.result, 'stopped');
     assert.equal(j.data.runId, firstRunId);
+  });
+
+  lifecycle('status --resources 非 RUNNING 时明确不采样', () => {
+    const j = expectOk(run(['status', 'smoke', '--resources']));
+    assert.equal(j.data.status, 'STOPPED');
+    assert.equal(j.data.resources?.available, false);
+    assert.match(String(j.data.resources?.reason), /非 RUNNING/);
   });
 
   lifecycle('重复 stop → alreadyStopped', () => {

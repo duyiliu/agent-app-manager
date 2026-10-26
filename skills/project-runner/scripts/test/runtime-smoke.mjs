@@ -615,6 +615,15 @@ try {
     strayPids.push(childPid);
     const childId = psProc('capture', { id: childPid });
     assert.equal(childId.result, 'ok', `后代未存活：${JSON.stringify(childId)}`);
+    // 命令模式资源采样必须聚合目标 + 后代（tree），而不是只看受管目标自身。
+    const res = cli('status', 'cmdtree', '--resources').json.data.resources;
+    assert.equal(res?.available, true, JSON.stringify(res));
+    assert.equal(res.scope, 'tree');
+    assert(res.processCount >= 2, `tree 采样进程数不足：${JSON.stringify(res)}`);
+    const resPids = res.processes.map((p) => p.pid);
+    assert(resPids.includes(rt.current.pid), `未包含目标 ${rt.current.pid}：${resPids}`);
+    assert(resPids.includes(childPid), `未包含后代 ${childPid}：${resPids}`);
+    assert(Number.isFinite(res.rssBytes) && res.rssBytes > 0, `聚合 RSS 异常：${res.rssBytes}`);
     const stop = cli('stop', 'cmdtree');
     assert.equal(stop.code, 0, stop.text);
     assert.equal(stop.json.data.result, 'stopped');

@@ -113,7 +113,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ~~~text
 list [--json]
-status <alias|appId|--tag <t>> [--probe] [--ready] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据
+status <alias|appId|--tag <t>> [--probe] [--ready] [--resources] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；--resources 单次 RSS/CPU 采样（命令模式聚合目标后代）
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
 doctor [--json]                          # 只读自检（不修复）
 start <alias|appId|--tag <t>> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证；--tag 批量启动
@@ -132,7 +132,7 @@ STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核�
 
 `list/status` 读取注册表，实时核验受管 JVM 身份；区分 RUNNING、STOPPED、STARTING、UNKNOWN，以及独立的 `managed` 状态。未注册项目不在列表；历史 Unmanaged 记录不得凭端口扫描宣称 STOPPED 或 RUNNING。输出项目别名、来源、状态、PID/端口（有证据才填写）、托管能力、日志位置。
 
-输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
+输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。资源用量为可选的单次快照：`status --resources` 与 `list` 的 `memoryBytes` 列、ui 应用表内存列均只做一次有界采样（Windows `GetProcessMemoryInfo`+`GetProcessTimes`，Linux `/proc/<pid>/status|stat`），不引入趋势图或常驻轮询；命令模式按目标+后代聚合，采样失败不影响状态与退出码。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
 
 ## 5. 最小可靠性要求
 
@@ -223,3 +223,5 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 
 **v2.10（2026-10-26，restartPolicy 监督重启，issue #109）**：desc 新增可选 `restartPolicy`（`never` 默认 / `on-failure`），`on-failure` 可配 `maxRestarts`（0–100，默认 3）与 `backoffMs`（0–600000，默认 1000）。manager 仍无常驻服务：命令模式与直连模式的 detached `log-writer` 同时承担看门狗——观察目标/Wrapper 退出、按退出码与信号判断是否异常、在同一 `runId` 的 runtime 记录中写入 `restartCount`/`restartState`/`nextRestartAt`/`lastExit`/`restartEvents`，等待 backoff 后按原启动描述重新拉起并重新采集目标身份（命令模式重新 discover）。异常退出后等待期 phase=`BACKOFF`，连续重启达到 `maxRestarts` 后 phase=`DEAD` 并停止监督；两者在 `list`/`status`/UI 可见。正常 `code=0` 退出、人为 `stop`/`remove`（写 `stopRequested`）以及运行记录被新 run 替换均不触发重启。`BACKOFF` 可被 `stop` 取消，`DEAD` 无存活进程可直接 `start`/`restart` 重新计数；监督失败仍保留证据，不伪造 RUNNING。回归：`runtime-smoke` 覆盖直连/命令模式自动重启、达上限 DEAD、人为 stop 与正常退出不重启，以及 desc 校验。
 
+
+**v2.11（2026-10-26，资源用量可见性，issue #111）**：新增受管进程 RSS/CPU 单次采样，回应“内存膨胀只能自己开任务管理器对照 pid”的可观测性缺口。平台层：Windows 在 `ps/proc.ps1` 用 `GetProcessMemoryInfo` 取 WorkingSet/PagefileUsage、`GetProcessTimes` 两次计数算 CPU 利用率；Linux 读 `/proc/<pid>/status` 的 `VmRSS` 与 `/proc/<pid>/stat` 的 utime/stime，CLK_TCK 由 `getconf` 解析并缓存。接口层：`status <ref> --resources` 输出单次 `resources` 快照（scope=process|tree、rssBytes、privateBytes、cpuPercent、cpuTimeMs、逐进程明细）；`list` 新增 `memoryBytes`（另有 `cpuPercent`/`resourcesScope`），ui 应用表与详情卡展示内存列。命令模式（`kind=command`）按受管目标 + PPID 后代聚合，复用平台侧一次进程树快照，进程数上限 64；一次调用完成全部 pid 采样（Windows 仍只 1 次 pwsh）。边界：非 RUNNING 不采样；采样失败只降级为 `available:false`/`resourcesNote`，不改变状态、退出码，也不引入常驻轮询或趋势存储。

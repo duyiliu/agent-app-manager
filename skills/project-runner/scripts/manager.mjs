@@ -110,6 +110,15 @@ function envWarnLine(names) {
     : null;
 }
 
+function fmtBytes(n) {
+  if (!Number.isFinite(n)) return '-';
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}G`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)}M`;
+  if (n >= 1024) return `${Math.round(n / 1024)}K`;
+  return `${n}B`;
+}
+
+
 function renderHuman(command, data) {
   if (data?.batch) return renderBatch(command, data);
   switch (command) {
@@ -120,10 +129,11 @@ function renderHuman(command, data) {
       const exitText = (a) => a.exit
         ? (a.exit.signal ? `signal=${a.exit.signal}` : `code=${a.exit.code ?? '?'}`)
         : '-';
-      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'exit'.padEnd(14) + 'tags'.padEnd(18) + 'lastRunId';
+      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'rss'.padEnd(9) + 'exit'.padEnd(14) + 'tags'.padEnd(18) + 'lastRunId';
       const rows = data.apps.map((a) =>
         String(a.alias).padEnd(14) + String(a.mode ?? '').padEnd(8) + String(a.status).padEnd(10)
         + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7)
+        + String(a.memoryBytes != null ? fmtBytes(a.memoryBytes) : '-').padEnd(9)
         + exitText(a).padEnd(14) + String((a.tags ?? []).join(',') || '-').padEnd(18) + String(a.lastRunId ?? '-')
         + (a.error ? `\n  ! ${a.error}` : '')
         + (a.exitSummary ? `\n  exit: ${a.exitSummary}` : ''));
@@ -150,6 +160,11 @@ function renderHuman(command, data) {
         data.run?.logHints?.length ? `logHints=${data.run.logHints.join(', ')}` : null,
         data.portListening !== undefined ? `portListening=${data.portListening}（监听 ≠ 业务就绪）` : null,
         data.actualPorts !== undefined ? `actualPorts=${data.actualPorts.length ? data.actualPorts.join(',') : '[]'}${data.portMismatch ? `（与 expectedPort=${data.expectedPort} 不一致）` : ''}` : null,
+        data.resources
+          ? data.resources.available
+            ? `resources=${fmtBytes(data.resources.rssBytes)} rss（${data.resources.scope === 'tree' ? '含后代聚合' : '仅目标进程'}，${data.resources.processCount} 个进程，CPU ${Number(data.resources.cpuPercent ?? 0).toFixed(1)}%，采样窗口 ${data.resources.intervalMs}ms）`
+            : `resources 不可用：${data.resources.reason ?? '原因不明'}`
+          : null,
         data.jrebelEvidence ? `jrebelEvidence=${JSON.stringify(data.jrebelEvidence)}` : null,
         data.runtimeFile ? `证据: ${data.runtimeFile}` : null,
         ...(data.prevRuns ?? []).map((p) => `prev=${p.runId} phase=${p.phase}${p.archiveReason ? ` archiveReason=${p.archiveReason}` : ''}${p.pid != null ? ` pid=${p.pid}` : ''} archivedAt=${p.archivedAt}`),
@@ -257,9 +272,10 @@ function usageText() {
     '',
     '命令：',
     '  version                           显示 manager 版本号（--version/-v 同效）',
-    '  list                              列出已登记应用与实时状态（含 tags）',
-    '  status <alias|appId> [--probe] [--ready]   单应用详情；--probe 检测本机 TCP 监听与',
-    '       pid→实际监听端口（actualPorts/portMismatch），--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据',
+    '  list                              列出已登记应用与实时状态（含 tags 与内存列）',
+    '  status <alias|appId> [--probe] [--ready] [--resources]   单应用详情；--probe 检测本机 TCP 监听与',
+    '       pid→实际监听端口（actualPorts/portMismatch），--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；',
+    '       --resources 对当前 RUNNING 受管实例做一次 RSS/CPU 有界采样（命令模式聚合目标后代）',
     '  status --tag <t> [--probe] [--ready]       按 tags 批量查询（逐条返回，单条失败不中断）',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
     '  doctor [--json]                    只读自检（不修复）',
@@ -335,13 +351,13 @@ async function main() {
       case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
       case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
       case 'status': {
-      const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--probe': 'flag', '--ready': 'flag' });
+      const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--probe': 'flag', '--ready': 'flag', '--resources': 'flag' });
       if (opts.has('--tag')) {
         if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
         data = await cmdStatusByTags(ctx, parseTagFilters(opts.getAll('--tag')), opts.has('--probe'), opts.has('--ready'));
       } else {
         if (opts.positional.length !== 1) throw usageError('status 需要 <alias|appId> 或 --tag <t>');
-        data = await cmdStatus(ctx, opts.positional[0], opts.has('--probe'), opts.has('--ready'));
+        data = await cmdStatus(ctx, opts.positional[0], opts.has('--probe'), opts.has('--ready'), false, opts.has('--resources'));
       }
       break;
     }

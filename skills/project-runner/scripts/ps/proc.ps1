@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port', 'listening', 'listening-batch')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port', 'listening', 'listening-batch', 'resources')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -12,8 +12,11 @@ param(
   [string]$Image = '',
   [int]$WaitMs = 10000,
   [string]$ReadyFile = '',
-  # verify-batch：UTF-8 JSON 数组的 base64，形如
-  # [{ "id": 123, "creationFileTime": "...", "image": "..." }, ...]
+  # 资源采样的两次 CPU 计数间隔（毫秒）；只用于单次快照，不引入常驻轮询。
+  [int]$IntervalMs = 200,
+  # verify-batch / resources：UTF-8 JSON 数组的 base64。
+  # verify-batch: [{ "id": 123, "creationFileTime": "...", "image": "..." }, ...]
+  # resources:    [{ "id": 123, "tree": true }, ...]
   [string]$Json = ''
 )
 
@@ -39,11 +42,28 @@ public static class ProcUtil {
   static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool CloseHandle(IntPtr h);
+  [DllImport("psapi.dll", SetLastError = true)]
+  static extern bool GetProcessMemoryInfo(IntPtr h, out PROCESS_MEMORY_COUNTERS counters, uint size);
 
   const uint QUERY = 0x1000;       // PROCESS_QUERY_LIMITED_INFORMATION
   const uint TERMINATE = 0x1;      // PROCESS_TERMINATE
+  const uint VM_READ = 0x10;       // PROCESS_VM_READ（GetProcessMemoryInfo 需要）
   const uint SYNCHRONIZE = 0x100000; // WaitForSingleObject 必需
   const int ERROR_INVALID_PARAMETER = 87;
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct PROCESS_MEMORY_COUNTERS {
+    public uint cb;
+    public uint PageFaultCount;
+    public UIntPtr PeakWorkingSetSize;
+    public UIntPtr WorkingSetSize;
+    public UIntPtr QuotaPeakPagedPoolUsage;
+    public UIntPtr QuotaPagedPoolUsage;
+    public UIntPtr QuotaPeakNonPagedPoolUsage;
+    public UIntPtr QuotaNonPagedPoolUsage;
+    public UIntPtr PagefileUsage;
+    public UIntPtr PeakPagefileUsage;
+  }
 
   static string Err(string code, int win32) { return "ERR\t" + code + "\t" + win32.ToString(); }
 
@@ -164,6 +184,78 @@ public static class ProcUtil {
     }
     finally { CloseHandle(h); }
   }
+
+  // 资源采样：打开并持有句柄 → 读一次内存/CPU 计数 → 间隔 intervalMs → 再读 CPU 计数，
+  // 用两次差值算单次 CPU 利用率（%），不会为了趋势做常驻轮询。
+  // 内存取 WorkingSetSize（RSS 口径）与 PagefileUsage（私有提交）；无法取得时返回 -1 而不是整条失败。
+  // 每行输出：OK\tpid\tworkingSet\tprivateBytes\tcpuPercent\tcpuTimeMs；失败：ERR\tpid\tcode。
+  public static string[] SampleResources(int[] pids, int intervalMs) {
+    int n = pids.Length;
+    IntPtr[] handles = new IntPtr[n];
+    long[] kernel1 = new long[n];
+    long[] user1 = new long[n];
+    ulong[] ws = new ulong[n];
+    ulong[] pb = new ulong[n];
+    bool[] memOk = new bool[n];
+    string[] err = new string[n];
+    for (int i = 0; i < n; i++) {
+      IntPtr h = OpenProcess(QUERY | VM_READ, false, pids[i]);
+      bool canMemory = h != IntPtr.Zero;
+      if (h == IntPtr.Zero) {
+        // 受保护/提权进程可能拒绝 VM_READ：降级到仅查询 CPU，内存字段标记不可用。
+        h = OpenProcess(QUERY, false, pids[i]);
+        if (h == IntPtr.Zero) {
+          int e2 = Marshal.GetLastWin32Error();
+          err[i] = (e2 == ERROR_INVALID_PARAMETER) ? "notfound" : ("openFailed:" + e2.ToString());
+          continue;
+        }
+      }
+      handles[i] = h;
+      long c, ex, k, u;
+      if (!GetProcessTimes(h, out c, out ex, out k, out u)) {
+        err[i] = "timesFailed:" + Marshal.GetLastWin32Error().ToString();
+        CloseHandle(h); handles[i] = IntPtr.Zero;
+        continue;
+      }
+      if (ex != 0) {
+        err[i] = "exited";
+        CloseHandle(h); handles[i] = IntPtr.Zero;
+        continue;
+      }
+      kernel1[i] = k; user1[i] = u;
+      if (canMemory) {
+        var counters = new PROCESS_MEMORY_COUNTERS();
+        counters.cb = (uint)Marshal.SizeOf(typeof(PROCESS_MEMORY_COUNTERS));
+        if (GetProcessMemoryInfo(h, out counters, counters.cb)) {
+          ws[i] = counters.WorkingSetSize.ToUInt64();
+          pb[i] = counters.PagefileUsage.ToUInt64();
+          memOk[i] = true;
+        }
+      }
+    }
+    if (intervalMs > 0) System.Threading.Thread.Sleep(intervalMs);
+    var inv = System.Globalization.CultureInfo.InvariantCulture;
+    string[] outLines = new string[n];
+    for (int i = 0; i < n; i++) {
+      if (err[i] != null) { outLines[i] = "ERR\t" + pids[i].ToString(inv) + "\t" + err[i]; continue; }
+      IntPtr h = handles[i];
+      if (h == IntPtr.Zero) { outLines[i] = "ERR\t" + pids[i].ToString(inv) + "\tnoHandle"; continue; }
+      try {
+        long c2, ex2, k2, u2;
+        if (!GetProcessTimes(h, out c2, out ex2, out k2, out u2)) { outLines[i] = "ERR\t" + pids[i].ToString(inv) + "\ttimesFailed2"; continue; }
+        if (ex2 != 0) { outLines[i] = "ERR\t" + pids[i].ToString(inv) + "\texited"; continue; }
+        long total = k2 + u2;
+        double delta = Math.Max(0, total - (kernel1[i] + user1[i]));
+        double cpuPct = intervalMs > 0 ? delta / ((double)intervalMs * 10000.0) * 100.0 : 0.0;
+        string wsText = memOk[i] ? ws[i].ToString(inv) : "-1";
+        string pbText = memOk[i] ? pb[i].ToString(inv) : "-1";
+        outLines[i] = "OK\t" + pids[i].ToString(inv) + "\t" + wsText + "\t" + pbText + "\t"
+          + cpuPct.ToString("F2", inv) + "\t" + (total / 10000.0).ToString("F1", inv);
+      }
+      finally { CloseHandle(handles[i]); }
+    }
+    return outLines;
+  }
 }
 '@
 
@@ -216,6 +308,93 @@ if ($Action -eq 'verify-batch') {
     $out += (Parse-Result ([ProcUtil]::Verify([int]$it.id, [long]$it.creationFileTime, [string]$it.image)))
   }
   $out | ConvertTo-Json -Compress
+  exit 0
+}
+
+# resources：单次有界资源采样（RSS/CPU）。items 为 [{ id, tree }]；tree=true 时
+# 在后代 PPID 树中聚合目标 + 后代（命令模式的真实用量）。整个采样只 spawn 一次 pwsh，
+# 后代枚举（CIM）与两次 CPU 计数都在同一进程内完成，不引入常驻轮询。
+if ($Action -eq 'resources') {
+  if (-not $Json) {
+    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $items = @()
+  try {
+    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
+    $items = @($jsonText | ConvertFrom-Json)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  # 一次 CIM 查询取全量拓扑，供所有 tree 项复用；失败时退化为只采样目标自身。
+  $rows = @()
+  try {
+    $rows = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)
+  } catch { $rows = @() }
+  $byParent = @{}
+  foreach ($p in $rows) {
+    $pp = [int64]$p.ParentProcessId
+    if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
+    [void]$byParent[$pp].Add([int64]$p.ProcessId)
+  }
+  $maxPids = 64
+  $expanded = @()
+  $unique = New-Object System.Collections.Generic.List[int]
+  $seen = @{}
+  foreach ($it in $items) {
+    $id = [int64]$it.id
+    if ($id -le 0) { continue }
+    $pids = @([int]$id)
+    $truncated = $false
+    if ($it.tree) {
+      $queue = [System.Collections.ArrayList]@($id)
+      $visited = @{}
+      while ($queue.Count -gt 0) {
+        # ArrayList 可能把元素收敛为 Int32，而 $byParent 的键是 Int64；必须显式转换，
+        # 否则 hashtable 按类型查找会返回空，后代永远不会展开。
+        $cur = [int64]$queue[0]; $queue.RemoveAt(0)
+        $kids = $byParent[$cur]
+        if (-not $kids) { continue }
+        foreach ($k in $kids) {
+          if ($visited.ContainsKey($k)) { continue }
+          $visited[$k] = $true
+          if ($pids.Count -ge $maxPids) { $truncated = $true; continue }
+          $pids += [int]$k
+          [void]$queue.Add([int64]$k)
+        }
+      }
+    }
+    $expanded += [pscustomobject]@{ id = [int]$id; pids = @($pids); truncated = $truncated }
+    foreach ($p in $pids) {
+      if (-not $seen.ContainsKey($p)) { $seen[$p] = $true; [void]$unique.Add([int]$p) }
+    }
+  }
+  $lines = @([ProcUtil]::SampleResources([int[]]$unique.ToArray(), [int]$IntervalMs))
+  $procs = @()
+  foreach ($line in $lines) {
+    $parts = $line -split "`t", 6
+    if ($parts[0] -eq 'OK') {
+      $rss = [long]$parts[2]
+      $pb = [long]$parts[3]
+      $procs += [pscustomobject]@{
+        pid = [int]$parts[1]
+        result = 'ok'
+        rssBytes = $(if ($rss -ge 0) { $rss } else { $null })
+        privateBytes = $(if ($pb -ge 0) { $pb } else { $null })
+        cpuPercent = [double]$parts[4]
+        cpuTimeMs = [double]$parts[5]
+      }
+    } elseif ($parts.Count -ge 3) {
+      $procs += [pscustomobject]@{ pid = [int]$parts[1]; result = 'error'; code = [string]$parts[2] }
+    }
+  }
+  [pscustomobject]@{
+    result = 'ok'
+    intervalMs = [int]$IntervalMs
+    items = @($expanded)
+    processes = @($procs)
+  } | ConvertTo-Json -Compress -Depth 6
   exit 0
 }
 
