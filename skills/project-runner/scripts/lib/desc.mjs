@@ -59,6 +59,39 @@ export const IMAGE_NAME_RE = process.platform === 'win32'
 
 export const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024; // 单次运行日志的写入上限（超过即轮转）
 
+// desc 键级白名单（#134）：归一化只输出固定字段，拼错键会被静默丢弃导致探针/端口校验失效。
+// x- 前缀为显式扩展豁免通道；allowed 由归一化目标对象的键派生，新增字段不会漏同步。
+const UNMANAGED_DESC_KEYS = new Set([
+  'alias', 'displayName', 'root', 'entry', 'mode', 'cwd', 'expectedPort', 'logHints', 'tags',
+]);
+
+function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function unknownKeyErrors(d, allowedKeys) {
+  const errs = [];
+  for (const key of Object.keys(d)) {
+    if (allowedKeys.has(key) || key.startsWith('x-')) continue;
+    let best = null, bestDist = Infinity;
+    for (const k of allowedKeys) {
+      const dist = editDistance(key, k);
+      if (dist < bestDist) { bestDist = dist; best = k; }
+    }
+    errs.push(bestDist <= 2 ? `未知键 ${key}（是否想写 ${best}？）` : `未知键 ${key}`);
+  }
+  return errs;
+}
+
 export function computeAppId(root, entry) {
   const key = process.platform === 'win32'
     ? `${root.toLowerCase()}\u0000${entry.toLowerCase()}`
@@ -119,8 +152,7 @@ export function loadManagedDesc(file) {
   }
   if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
   validateRestartFields(d, errs);
-  if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
-  return {
+  const normalized = {
     alias: d.alias,
     displayName: typeof d.displayName === 'string' && d.displayName ? d.displayName : d.alias,
     root: d.root,
@@ -143,6 +175,9 @@ export function loadManagedDesc(file) {
     ...normalizeRestartFields(d),
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
+  errs.push(...unknownKeyErrors(d, new Set(Object.keys(normalized))));
+  if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
+  return normalized;
 }
 
 // 非受管登记描述：宽松校验（record-unmanaged）
@@ -166,6 +201,7 @@ export function loadUnmanagedDesc(file) {
   if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需 1-65535 的整数');
   if (d.logHints != null && (!Array.isArray(d.logHints) || d.logHints.some((h) => typeof h !== 'string'))) errs.push('logHints 必须是字符串数组');
   validateTags(d.tags, errs);
+  errs.push(...unknownKeyErrors(d, UNMANAGED_DESC_KEYS));
   if (errs.length) throw usageError(`描述无效：${errs.join('；')}`);
   return d;
 }
