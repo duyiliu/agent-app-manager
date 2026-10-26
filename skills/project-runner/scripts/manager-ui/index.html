@@ -1218,7 +1218,7 @@ async function loadSources() {
   try {
     const d = await api('/api/sources?app=' + encodeURIComponent(selected), sourcesController.signal);
     if (version !== sourcesVersion) return;
-    hideBanner(); // 成功读取即清掉残留横幅（如 403 恢复后），与其它轮询成功路径一致
+    hideBannerIfRecovered(); // 成功读取即视为恢复：清横幅并让日志跟随解除 degrading（与 loadApps 一致）
     runSel.replaceChildren();
     for (const s of d.sources ?? []) {
       runSel.appendChild(new Option(`${s.current ? '● ' : ''}${s.label} · ${fmtSize(s.size)}`, s.src));
