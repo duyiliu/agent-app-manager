@@ -13,6 +13,7 @@ import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.m
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
 const MANAGER_SCRIPT = path.resolve(SCRIPT_DIR, '..', 'manager.mjs');
+const APP_JS_FILE = path.join(SCRIPT_DIR, 'app.js');
 const TAIL_CHUNK = 256 * 1024;
 const fail = (status, message, code) => Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
 
@@ -182,6 +183,8 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   // 进程内缓存，更新 index.html 后重启 ui 生效。
   let indexHtmlCache = null;
   const indexHtml = () => (indexHtmlCache ??= fs.readFileSync(INDEX_FILE));
+  let appJsCache = null;
+  const appJs = () => (appJsCache ??= fs.readFileSync(APP_JS_FILE));
 
   async function route(res, u, method) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
@@ -195,6 +198,11 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
         'Content-Security-Policy': "frame-ancestors 'none'",
       });
       res.end(indexHtml());
+      return;
+    }
+    if (u.pathname === '/app.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(appJs());
       return;
     }
     if (u.pathname === '/api/lifecycle') {

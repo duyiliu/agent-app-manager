@@ -335,5 +335,11 @@ setInterval(() => {}, 1000);
   assert(!tail.lines.some((line) => line.includes('\uFFFD')), 'tail must not replace characters at its byte boundary');
   console.log('log rotation checks passed');
 } finally {
-  fs.rmSync(temp, { recursive: true, force: true });
+  // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。
+  let cleaned = false;
+  for (let i = 0; i < 150; i++) {
+    try { fs.rmSync(temp, { recursive: true, force: true }); cleaned = true; break; }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+  }
+  if (!cleaned) console.warn(`[warn] 临时目录清理超时，已跳过（不影响断言）：${temp}`);
 }

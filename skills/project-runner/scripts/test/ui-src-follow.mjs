@@ -168,7 +168,10 @@ const check = async (name, fn) => {
 };
 
 const html = fs.readFileSync(PAGE, 'utf8');
-const scriptSrc = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
+// 页面脚本自 #56 起外置为 app.js；仍校验 index.html 以 <script src="app.js"> 引用之。
+const scriptRef = /<script\s+src="([^"]+)"><\/script>/.exec(html);
+assert(scriptRef, '页面缺少 <script src> 引用');
+const scriptSrc = fs.readFileSync(path.join(path.dirname(PAGE), scriptRef[1]), 'utf8');
 const ctx = vm.createContext({
   document: documentStub,
   sessionStorage: sessionStorageStub,
@@ -460,7 +463,13 @@ try {
   });
 } finally {
   child.kill();
-  fs.rmSync(base, { recursive: true, force: true });
+  // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。
+  let cleaned = false;
+  for (let i = 0; i < 150; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); cleaned = true; break; }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+  }
+  if (!cleaned) console.warn(`[warn] 临时目录清理超时，已跳过（不影响断言）：${base}`);
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }
 console.log('\nui source-follow ok');

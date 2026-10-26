@@ -43,6 +43,7 @@ skills/project-runner/
     │   └── proc-linux.mjs       # Linux /proc 身份核验、终止、后代发现、资源采样、端口诊断
     ├── manager-ui/
     │   ├── index.html           # manager ui 管理台页面（默认只读，启停/移除二次确认）
+    │   ├── app.js               # 管理台前端脚本（poll/api/渲染，经 <script src> 引用）
     │   └── server.mjs           # ui 本地服务（仅 127.0.0.1，无令牌）
     ├── ps/
     │   └── proc.ps1             # Windows 受管进程身份核验、终止与端口诊断适配
