@@ -60,6 +60,9 @@ export function runNotifyCommand(command, env, home) {
     const r = spawnSync(shell, args, {
       env: { ...process.env, ...env, PROJECT_RUNNER_HOME: home },
       stdio: 'ignore', timeout: NOTIFY_TIMEOUT_MS, windowsHide: true,
+      // 回调命令整串交给 cmd 自行解析；Node 默认会对含空格的参数再包引号并转义内部
+      // 引号，与 cmd /s /c 的首尾剥引号叠加会拆坏用户命令，故原样传递。
+      windowsVerbatimArguments: true,
     });
     if (r.error) return `failed:${r.error.code ?? r.error.message}`;
     if (r.signal) return r.signal === 'SIGTERM' ? 'timeout' : `signal:${r.signal}`;

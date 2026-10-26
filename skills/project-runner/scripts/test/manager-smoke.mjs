@@ -674,10 +674,9 @@ try {
     + 'appId:process.env.PROJECT_RUNNER_APP_ID,pid:process.env.PROJECT_RUNNER_PID,'
     + 'note:process.env.PROJECT_RUNNER_EXIT_NOTE,endedAt:process.env.PROJECT_RUNNER_ENDED_AT'
     + `})+'\\n');\n`);
-  // Windows `cmd /s /c` 会剥掉整串首尾引号：双包一层保证内部引号原样到达。
-  const notifyCmd = isWindows
-    ? `""${process.execPath}" "${notifySink}""`
-    : `"${process.execPath}" "${notifySink}"`;
+  // 测试命令不含引号（测试路径无空格）：Node 在 Windows 会对含空格的参数再包引号并转义
+  // 内部引号，与 cmd /s /c 的首尾剥引号叠加会拆坏命令——用户侧回调同理应避免依赖嵌套引号。
+  const notifyCmd = `${process.execPath} ${notifySink}`;
   const readNotifies = () => (fs.existsSync(notifyOut)
     ? fs.readFileSync(notifyOut, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
     : []);
