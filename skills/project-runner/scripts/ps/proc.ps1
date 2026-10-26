@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port', 'listening', 'listening-batch')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -239,6 +239,10 @@ if (($Action -eq 'port') -and (($Id -lt 1) -or ($Id -gt 65535))) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
+if (($Action -eq 'listening') -and ($Id -le 0)) {
+  [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+  exit 0
+}
 
 # port：端口占用诊断（与原 ps/port.ps1 同语义），但身份采集复用本进程已编译的
 # ProcUtil——N 个监听人也只需 1 次 pwsh 调用；identity.image 与 capture 同源
@@ -287,6 +291,53 @@ if ($Action -eq 'port') {
     }
   }
   if (@($out).Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress -Depth 4 }
+  exit 0
+}
+
+# listening：pid→实际监听端口（#107）。Get-NetTCPConnection 按 OwningProcess 过滤，
+# 只输出本机地址与端口，不采集命令行。权限不足/进程已退出时返回空数组，不臆造。
+if ($Action -eq 'listening') {
+  $out = @()
+  try {
+    $rows = @(Get-NetTCPConnection -State Listen -OwningProcess $Id -ErrorAction SilentlyContinue)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  foreach ($conn in $rows) {
+    $out += [pscustomobject]@{ localAddress = [string]$conn.LocalAddress; localPort = [int]$conn.LocalPort }
+  }
+  if (@($out).Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress -Depth 3 }
+  exit 0
+}
+
+# listening-batch：一次 pwsh 调用枚举多个 pid 的监听端口（ui list 轮询用），
+# 避免每个运行中应用各起一次 pwsh。输入同 verify-batch：UTF-8 JSON 数组的 base64。
+if ($Action -eq 'listening-batch') {
+  $pids = @()
+  try {
+    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
+    $pids = @($jsonText | ConvertFrom-Json)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $wanted = @{}
+  foreach ($p in $pids) { if ([int]$p -gt 0) { $wanted[[int]$p] = $true } }
+  if ($wanted.Count -eq 0) { '[]'; exit 0 }
+  $out = @()
+  try {
+    $conns = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  foreach ($conn in $conns) {
+    $owner = [int]$conn.OwningProcess
+    if (-not $wanted.ContainsKey($owner)) { continue }
+    $out += [pscustomobject]@{ pid = $owner; localAddress = [string]$conn.LocalAddress; localPort = [int]$conn.LocalPort }
+  }
+  if (@($out).Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress -Depth 3 }
   exit 0
 }
 

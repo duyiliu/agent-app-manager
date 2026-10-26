@@ -352,6 +352,20 @@ try {
     const sigText = elFor('detail').textContent;
     assert(sigText.includes('signal=SIGKILL') && sigText.includes('被信号终止'), sigText);
   });
+  // #107：UI 必须优先展示/链接实际监听端口，expectedPort 只保留为启动前冲突检查与回退展示。
+  await check('端口链接优先使用实际端口（列表与详情）', () => {
+    const anchorHrefs = (root) => [...root.querySelectorAll('a.port-link')].map((a) => a.href);
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:5173, actualPorts:[5174], portMismatch:true, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:4242, startedAt:null } })`);
+    const detailHrefs = anchorHrefs(elFor('detail'));
+    assert(detailHrefs.includes('http://127.0.0.1:5174/'), `详情缺少实际端口链接：${detailHrefs.join(',')}`);
+    assert(!detailHrefs.includes('http://127.0.0.1:5173/'), `详情不应链接 expectedPort：${detailHrefs.join(',')}`);
+    assert(elFor('detail').textContent.includes('5173'), '详情应保留 expectedPort 展示');
+    run(`appsCache = [{ alias:'portapp', appId:'aport', mode:'node', status:'RUNNING', pid:4242, expectedPort:5173, actualPorts:[5174], root:'/tmp/x' }]; renderApps();`);
+    const listHrefs = anchorHrefs(elFor('appList'));
+    assert(listHrefs.includes('http://127.0.0.1:5174/'), `列表缺少实际端口链接：${listHrefs.join(',')}`);
+    assert(!listHrefs.includes('http://127.0.0.1:5173/'), `列表不应链接 expectedPort：${listHrefs.join(',')}`);
+  });
+
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);

@@ -106,7 +106,7 @@ export async function cmdUi(ctx) {
       open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         list: () => cmdList(ctx),
-        status: (ref) => cmdStatus(ctx, ref).then((data) => { delete data.portListening; delete data.portNote; return data; }),
+        status: (ref) => cmdStatus(ctx, ref, false, false, true).then((data) => { delete data.portListening; delete data.portNote; return data; }),
         health: () => cmdHealth(ctx),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),

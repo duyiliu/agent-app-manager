@@ -784,6 +784,18 @@ function exitLabel(exit) {
 }
 function exitOk(exit) { return !!exit && !exit.signal && exit.code === 0; }
 function exitClass(exit) { return exit ? (exitOk(exit) ? 'good' : 'bad') : undefined; }
+// 实际监听端口（#107）：优先用于展示与链接；expectedPort 仅作为启动前冲突检查与回退展示。
+function actualPortsOf(d) {
+  return Array.isArray(d?.actualPorts) ? d.actualPorts.filter((p) => Number.isInteger(p) && p > 0) : [];
+}
+function portAnchor(port, title) {
+  const a = el('a', 'port-link', ':' + port);
+  a.href = `http://127.0.0.1:${port}/`;
+  a.target = '_blank'; a.rel = 'noopener';
+  a.title = title ?? '新标签页打开该应用端口';
+  a.addEventListener('click', (e) => e.stopPropagation());
+  return a;
+}
 function renderApps() {
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
@@ -822,15 +834,17 @@ function renderApps() {
     const meta = el('div', 'app-meta');
     meta.append(el('span', null, a.mode ?? '?'));
     if (a.pid != null) meta.appendChild(el('span', null, 'pid ' + a.pid));
-    if (a.expectedPort != null) {
+    const actualPorts = actualPortsOf(a);
+    const shownPorts = actualPorts.length ? actualPorts : (a.expectedPort != null ? [a.expectedPort] : []);
+    if (shownPorts.length) {
       if (a.status === 'RUNNING') {
-        const link = el('a', 'port-link', ':' + a.expectedPort);
-        link.href = `http://127.0.0.1:${a.expectedPort}/`;
-        link.target = '_blank'; link.rel = 'noopener';
-        link.title = '新标签页打开该应用端口';
-        link.addEventListener('click', (e) => e.stopPropagation());
-        meta.appendChild(link);
-      } else meta.appendChild(el('span', null, ':' + a.expectedPort));
+        for (const port of shownPorts) {
+          const title = actualPorts.length && a.expectedPort != null && a.expectedPort !== port
+            ? `实际监听端口 ${port}（配置 expectedPort=${a.expectedPort}）`
+            : '新标签页打开该应用端口';
+          meta.appendChild(portAnchor(port, title));
+        }
+      } else meta.appendChild(el('span', null, ':' + (a.expectedPort ?? shownPorts[0])));
     }
     if (a.exit) meta.appendChild(el('span', 'v ' + exitClass(a.exit), exitLabel(a.exit)));
     if (a.error) meta.appendChild(el('span', 'v bad', a.error));
@@ -1013,6 +1027,7 @@ function renderDetail(d) {
     return;
   }
   const card = el('div', 'card');
+  const actualPorts = actualPortsOf(d);
   const head = el('div', 'card-head');
   head.append(el('span', 'name', d.alias), statusPill(d.status),
     el('span', 'pill mode', d.mode ?? '?'),
@@ -1093,6 +1108,10 @@ function renderDetail(d) {
     card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：等待健康总览返回；就绪与 JRebel/热加载验证仍需按 Skill 规程用真实证据判定。'));
   }
   if (d.note) card.appendChild(el('div', 'hint-line', 'note: ' + d.note));
+  if (d.portMismatch) {
+    card.appendChild(el('div', 'hint-line', `端口漂移：配置 expectedPort=${d.expectedPort}，实际监听 ${actualPorts.join(', ')}；端口链接已指向实际端口。`));
+  }
+  if (d.actualPortsError) card.appendChild(el('div', 'alert', `实际端口探测失败：${d.actualPortsError}`));
   if (d.loggerNote) card.appendChild(el('div', 'alert', d.loggerNote));
   if (run?.logRotateFailedStreams?.length) {
     card.appendChild(el('div', 'alert', `日志轮转重开失败（${run.logRotateFailedStreams.join('/')}）：期间输出可能未落盘，管道后续自动恢复重试；请人工核验日志完整性。`));
@@ -1102,21 +1121,31 @@ function renderDetail(d) {
   const grid = el('div', 'kv');
   kvRow(grid, '仓库', d.root);
   kvRow(grid, '入口', d.entry);
+  const actualLinked = st === 'RUNNING' && actualPorts.length > 0;
   if (d.expectedPort != null) {
     grid.appendChild(el('div', 'k', '预期端口'));
     const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));
-    if (st === 'RUNNING') {
-      const a = el('a', 'port-link', String(d.expectedPort));
-      a.href = `http://127.0.0.1:${d.expectedPort}/`;
-      a.target = '_blank'; a.rel = 'noopener'; a.title = '新标签页打开该应用端口';
-      pv.appendChild(a);
-    } else pv.textContent = String(d.expectedPort);
+    if (st === 'RUNNING' && !actualLinked) pv.appendChild(portAnchor(d.expectedPort));
+    else pv.textContent = String(d.expectedPort);
     const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '诊断');
     diag.type = 'button';
     diag.title = '只读诊断该端口占用（同 CLI port），不接管、不停止外部进程';
     diag.disabled = !!portDiag?.loading && portDiag?.alias === d.alias;
     diag.addEventListener('click', (e) => { e.stopPropagation(); diagnosePort(d.alias, d.expectedPort); });
     pv.appendChild(diag);
+    grid.appendChild(pv);
+  }
+  if (actualPorts.length) {
+    grid.appendChild(el('div', 'k', '实际端口'));
+    const pv = el('div', 'v' + (d.portMismatch ? ' bad' : ' good'));
+    if (st === 'RUNNING') {
+      actualPorts.forEach((port, i) => {
+        if (i) pv.appendChild(el('span', null, ' '));
+        pv.appendChild(portAnchor(port, d.expectedPort != null && d.expectedPort !== port
+          ? `实际监听端口 ${port}（配置 expectedPort=${d.expectedPort}）`
+          : '新标签页打开该应用端口'));
+      });
+    } else pv.textContent = actualPorts.join(', ');
     grid.appendChild(pv);
   }
   kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
@@ -1177,7 +1206,7 @@ function renderDetail(d) {
 
   const bits = [
     run?.pid != null ? 'pid ' + run.pid : null,
-    d.expectedPort != null ? ':' + d.expectedPort : null,
+    actualPorts.length ? actualPorts.map((p) => ':' + p).join(' ') : (d.expectedPort != null ? ':' + d.expectedPort : null),
     run?.runId,
     fmtTime(run?.startedAt),
   ].filter(Boolean).join(' · ');

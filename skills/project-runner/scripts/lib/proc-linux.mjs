@@ -330,6 +330,63 @@ function pidBySocketInodes(inodes) {
   return found;
 }
 
+// pid→实际监听端口（#107）：先一次性解析 /proc/net/tcp{,6} 的 LISTEN 套接字 inode，
+// 再按 /proc/<pid>/fd 的 socket:[inode] 定位归属。只读、只返回本地地址与端口。
+function listeningSocketsByInode() {
+  const byInode = new Map();
+  for (const file of [`${PROC}/net/tcp`, `${PROC}/net/tcp6`]) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    for (const line of text.split('\n').slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 10 || parts[3] !== '0A') continue; // 0A = TCP LISTEN
+      const [addrHex, portHex] = (parts[1] ?? '').split(':');
+      const localPort = Number.parseInt(portHex, 16);
+      if (!Number.isInteger(localPort) || localPort < 1) continue;
+      byInode.set(parts[9], { localAddress: ipv4FromHex(addrHex), localPort, source: path.basename(file) });
+    }
+  }
+  return byInode;
+}
+
+function socketInodesForPid(pid) {
+  const inodes = new Set();
+  let fds;
+  try { fds = fs.readdirSync(`${PROC}/${pid}/fd`); } catch { return inodes; }
+  for (const fd of fds) {
+    let link;
+    try { link = fs.readlinkSync(`${PROC}/${pid}/fd/${fd}`); } catch { continue; }
+    const m = /^socket:\[(\d+)\]$/.exec(link);
+    if (m) inodes.add(m[1]);
+  }
+  return inodes;
+}
+
+// 批量形式供 list 一次解析监听表后按 pid 归属，避免 N 个应用重复读 /proc/net。
+export function listeningPortsBatch(pids) {
+  const targets = [...new Set((pids ?? []).filter((p) => Number.isInteger(p) && p > 0))];
+  if (!targets.length) return [];
+  const byInode = listeningSocketsByInode();
+  if (!byInode.size) return [];
+  const out = [];
+  for (const pid of targets) {
+    const seen = new Set();
+    for (const inode of socketInodesForPid(pid)) {
+      const row = byInode.get(inode);
+      if (!row) continue;
+      const key = `${row.localAddress}:${row.localPort}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ pid, localAddress: row.localAddress, localPort: row.localPort });
+    }
+  }
+  return out;
+}
+
+export function listeningPorts(pid) {
+  return listeningPortsBatch([pid]).map(({ localAddress, localPort }) => ({ localAddress, localPort }));
+}
+
 export function portOccupants(port) {
   const rows = [...parseNet(`${PROC}/net/tcp`, port), ...parseNet(`${PROC}/net/tcp6`, port)];
   if (!rows.length) return [];
@@ -379,6 +436,8 @@ export function run(action, params = {}) {
     case 'terminate-tree': return terminateTree(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
     case 'grace': return gracefulTerminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
     case 'discover': return discover(params.id, params.image, params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS);
+    case 'listening': return listeningPorts(params.id);
+    case 'listening-batch': return listeningPortsBatch(params.ids);
     default: return { result: 'error', code: 'unsupportedAction' };
   }
 }

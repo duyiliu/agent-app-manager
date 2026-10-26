@@ -5,12 +5,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { isWindows, findExecutable, killTree, listDescendants, findProcesses } from './platform.mjs';
 import { computeAppId } from '../lib/desc.mjs';
-import { psProc } from '../lib/probe.mjs';
+import { psProc, listListeningPorts } from '../lib/probe.mjs';
 import { persistableDiscovery } from '../lib/launch.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
@@ -58,8 +59,25 @@ fs.writeFileSync(path.join(projNpm, 'srv.js'),
 // 端口诊断回归：受管 node 监听固定端口，port 命令应给出同一 pid 与完整身份
 fs.writeFileSync(path.join(projNpm, 'lsn.js'),
   'require("node:http").createServer((q, s) => s.end("ok")).listen(process.env.PORT || 18123, "127.0.0.1", () => console.log("lsn-ready"));\n', 'utf8');
+// 端口漂移模拟（#107）：primary 被外部占用时顺延到 fallback，与 Vite 自动换端口同形态。
+fs.writeFileSync(path.join(projNpm, 'fallback.js'),
+  'const http = require("node:http");\n'
+  + 'const primary = Number(process.env.PORT), fallback = Number(process.env.FALLBACK_PORT);\n'
+  + 'const ok = (q, s) => s.end("ok");\n'
+  + 'const fallbackServer = http.createServer(ok);\n'
+  + 'const primaryServer = http.createServer(ok);\n'
+  + 'primaryServer.once("error", (e) => {\n'
+  + '  if (e.code !== "EADDRINUSE") { console.error(e); process.exit(1); }\n'
+  + '  fallbackServer.listen(fallback, "127.0.0.1", () => console.log("fallback-ready PORT=" + fallback));\n'
+  + '});\n'
+  + 'primaryServer.listen(primary, "127.0.0.1", () => console.log("primary-ready PORT=" + primary));\n', 'utf8');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer();
+  s.once('error', reject);
+  s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+});
 const cli = (...args) => {
   const r = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args],
     { encoding: 'utf8', windowsHide: true, timeout: 60000 });
@@ -527,9 +545,10 @@ try {
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     assert.equal(r.code, 0, r.text);
-    const st = cli('status', 'portapp').json.data;
-    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${st.appId}.json`), 'utf8'));
+    const base = cli('status', 'portapp').json.data;
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${base.appId}.json`), 'utf8'));
     assert(await logHas(rt.current.logPaths.stdout, 'lsn-ready'), 'stdout 未见 lsn-ready');
+    const st = cli('status', 'portapp', '--probe').json.data;
     const p = cli('port', String(PORT));
     assert.equal(p.code, 0, p.text);
     const occ = (p.json.data.occupants ?? []).find((o) => o.pid === st.run.pid);
@@ -537,7 +556,47 @@ try {
     assert.equal(occ.identity?.result, 'ok', `身份采集失败：${JSON.stringify(occ)}`);
     assert(occ.executablePath, '缺少 executablePath');
     assert.match(occ.executablePath.replace(/\\/g, '/'), /node(\.exe)?$/);
-    assert.equal(cli('stop', 'portapp').code, 0);
+    assert.deepEqual(st.actualPorts, [PORT], `status --probe 实际端口不符：${JSON.stringify(st.actualPorts)}`);
+    assert.equal(st.portMismatch, false);
+    assert(cli('stop', 'portapp').code === 0);
+  });
+  // #107 验收：5173→5174 同类场景（expectedPort 被外部占用，受管进程顺延到另一端口）
+  await check('status --probe 返回 actualPorts；端口漂移时 portMismatch=true，停止后不再返回旧端口', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    const primary = await freePort();
+    let fallback = await freePort();
+    while (fallback === primary) fallback = await freePort();
+    const occupant = net.createServer((q, s) => s.end('occupied'));
+    await new Promise((resolve, reject) => { occupant.once('error', reject); occupant.listen(primary, '127.0.0.1', resolve); });
+    let started = false;
+    try {
+      const r = cli('start-new', '--desc', descFile({
+        alias: 'portdrift', root: projNpm, entry: 'drift', mode: 'node', exe: 'node', args: ['fallback.js'],
+        env: { PORT: String(primary), FALLBACK_PORT: String(fallback) }, expectedPort: primary,
+      }), '--force');
+      if (pwshMissing(r)) skip('缺 pwsh 7');
+      assert.equal(r.code, 0, r.text);
+      started = true;
+      const appId = r.json.data.appId;
+      const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${appId}.json`), 'utf8'));
+      assert(await logHas(rt.current.logPaths.stdout, 'fallback-ready'), 'stdout 未见 fallback-ready');
+      const st = cli('status', 'portdrift', '--probe').json.data;
+      assert.deepEqual(st.actualPorts, [fallback], `actualPorts 应为 [${fallback}]：${JSON.stringify(st.actualPorts)}`);
+      assert.equal(st.portMismatch, true);
+      assert.equal(st.expectedPort, primary);
+      assert(listListeningPorts(st.run.pid).some((e) => e.localPort === fallback), 'listListeningPorts 未返回实际端口');
+      const listRow = cli('list').json.data.apps.find((a) => a.alias === 'portdrift');
+      assert.deepEqual(listRow.actualPorts, [fallback], `list actualPorts 不符：${JSON.stringify(listRow.actualPorts)}`);
+      const stop = cli('stop', 'portdrift');
+      assert.equal(stop.code, 0, stop.text);
+      started = false;
+      const after = cli('status', 'portdrift', '--probe').json.data;
+      assert.deepEqual(after.actualPorts, [], `停止后不应返回旧端口：${JSON.stringify(after.actualPorts)}`);
+      assert.equal(after.portMismatch, false);
+    } finally {
+      if (started) { try { cli('stop', 'portdrift', '--tree'); } catch { /* 兜底清理 */ } }
+      await new Promise((resolve) => occupant.close(resolve));
+    }
   });
   await check('desc 校验：command 缺 expectedImage / 与 exe 混填均拒绝', () => {
     const r1 = cli('start-new', '--desc', descFile({
@@ -625,7 +684,7 @@ try {
   });
 } finally {
   // 兜底：按当时仍在的后代 PID 清理，不只依赖 wrapper PID（wrapper 可能先死，#46）
-  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail', 'cmdexec', 'cmddetach']) {
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'portdrift', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail', 'cmdexec', 'cmddetach']) {
     try { cli('stop', a, '--tree'); } catch { /* 忽略 */ }
   }
   const cleanupFailures = [];
