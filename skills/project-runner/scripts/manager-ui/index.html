@@ -405,6 +405,31 @@ aside {
   font-size:10.5px;
   vertical-align:1px;
   margin:0 2px}
+.lifecycle-opts {
+  display:flex;
+  align-items:center;
+  gap:14px;
+  flex-wrap:wrap;
+  margin:0 13px 11px;
+  padding:8px 10px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:rgba(148,163,184,.03);
+  font-size:11px;
+  color:var(--text-dim)}
+.lifecycle-opt { display:inline-flex; align-items:center; gap:6px; cursor:pointer }
+.lifecycle-opt input[type="checkbox"] { width:14px; height:14px; accent-color:var(--accent); cursor:pointer }
+.lifecycle-grace {
+  width:88px;
+  height:26px;
+  padding:0 8px;
+  color:var(--text);
+  background:#0b1016;
+  border:1px solid var(--line-strong);
+  border-radius:6px;
+  font:11px var(--mono-font)}
+.lifecycle-grace:focus { outline:2px solid rgba(45,212,191,.75); outline-offset:1px }
+.lifecycle-unit, .lifecycle-note { color:var(--text-faint) }
 .hint-line {
   margin:0 13px 11px;
   font-size:11px;
@@ -615,7 +640,7 @@ aside {
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记且证据保留（均与 manager CLI 同一实现，操作需二次确认）；stop 是有界强制终止，不杀进程树。</div>
+<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记且证据保留（均与 manager CLI 同一实现，操作需二次确认）；stop 默认有界强制终止、不杀进程树，详情卡可勾选「同时终止子进程」（--tree）并设置优雅退出毫秒（--grace）。</div>
 <div class="banner" id="fatalBanner" hidden></div>
 <div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">
@@ -936,6 +961,8 @@ function kvRow(grid, k, v, cls) {
   grid.append(el('div', 'k', k), el('div', 'v' + (cls ? ' ' + cls : ''), String(v)));
 }
 let detailOpen = false, detailTouched = false;
+// 停止/重启的附加参数：控件在详情卡内，值跨轮询重绘保留；启动/移除不使用。
+let lifecycleTree = false, lifecycleGrace = '';
 function applyDetail(open) {
   $('#detail').hidden = !open;
   $('#detailBar').setAttribute('aria-expanded', String(open));
@@ -1013,6 +1040,29 @@ function appendPortDiagnosis(card, d) {
   }
   card.appendChild(panel);
 }
+function lifecycleOptions() {
+  const row = el('div', 'lifecycle-opts');
+  const treeLabel = el('label', 'lifecycle-opt');
+  const tree = el('input', 'lifecycle-tree');
+  tree.type = 'checkbox';
+  tree.checked = lifecycleTree;
+  tree.title = '停止/重启时连带终止该实例的全部后代进程（同 CLI --tree）；启动/移除不使用';
+  tree.addEventListener('change', e => { lifecycleTree = !!e.target.checked; });
+  treeLabel.append(tree, el('span', null, '同时终止子进程（--tree）'));
+  const graceLabel = el('label', 'lifecycle-opt');
+  const grace = el('input', 'lifecycle-grace');
+  grace.type = 'number';
+  grace.min = '0';
+  grace.max = '600000';
+  grace.step = '100';
+  grace.placeholder = '例如 3000';
+  grace.value = lifecycleGrace;
+  grace.title = '停止/重启前先等待优雅退出的毫秒数（0-600000，同 CLI --grace）；留空=现有强制终止';
+  grace.addEventListener('input', e => { lifecycleGrace = e.target.value; });
+  graceLabel.append(el('span', null, '优雅退出'), grace, el('span', 'lifecycle-unit', 'ms'));
+  row.append(treeLabel, graceLabel, el('span', 'lifecycle-note', '仅停止/重启生效；留空=不等待'));
+  return row;
+}
 function renderDetail(d) {
   currentDetail = d;
   const box = $('#detail');
@@ -1057,7 +1107,7 @@ function renderDetail(d) {
       const cur = d.run;
       const unresolved = cur && cur.managed !== false && !['RUNNING', 'STOPPED'].includes(cur.phase);
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
-      mk('停止', 'stop', st === 'RUNNING', '有界强制终止，不杀进程树（同 CLI stop）');
+      mk('停止', 'stop', st === 'RUNNING', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）');
       mk('重启', 'restart', st === 'RUNNING', '确认旧实例退出后启动新实例（同 CLI restart）');
       if (unresolved) mk('ack 并启动', 'start', true, `放弃未结记录 ${cur.runId} 并重新启动（同 start --ack-unresolved）`, `&ack=${encodeURIComponent(cur.runId)}`);
       mk('移除', 'remove', st === 'STOPPED', '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）');
@@ -1090,6 +1140,7 @@ function renderDetail(d) {
   head.appendChild(el('span', 'spacer'));
   head.appendChild(el('span', 'appid', d.appId));
   card.appendChild(head);
+  if (d.managed !== false) card.appendChild(lifecycleOptions());
 
   const run = d.run;
   const needsAttention = run && run.managed !== false && !['RUNNING', 'STOPPED'].includes(run.phase);
@@ -1260,6 +1311,19 @@ function lifecycleEnvWarning(r) {
     ? `env 中疑似机密字面值：${names.join(', ')}（非阻断）；请改用 envRefs/envFile 提供`
     : null;
 }
+function lifecycleRequestPath(alias, op, extra = '') {
+  const q = new URLSearchParams({ app: alias, op });
+  if (extra) {
+    const extraParams = new URLSearchParams(extra.replace(/^&/, ''));
+    for (const [k, v] of extraParams) q.set(k, v);
+  }
+  if (op === 'stop' || op === 'restart') {
+    if (lifecycleTree) q.set('tree', '1');
+    const grace = String(lifecycleGrace ?? '').trim();
+    if (grace !== '') q.set('grace', grace);
+  }
+  return `/api/lifecycle?${q.toString()}`;
+}
 async function doLifecycle(alias, op, extra = '') {
   if (lifecycleBusy || !alias) return;
   lifecycleBusy = true;
@@ -1269,12 +1333,17 @@ async function doLifecycle(alias, op, extra = '') {
   loadStatus(); // 立刻重绘按钮为执行中态，不等请求返回（stop/restart 可能数秒）
   try {
     // 启停可能耗时数十秒（命令模式 discover 上限 ~60s），加 150s 超时防永久挂起
-    const r = await api(`/api/lifecycle?app=${encodeURIComponent(alias)}&op=${op}${extra}`, AbortSignal.timeout(150_000), 'POST');
+    const r = await api(lifecycleRequestPath(alias, op, extra), AbortSignal.timeout(150_000), 'POST');
     const pid = r.pid ?? r.start?.pid;
     if (lastLifecycleError?.alias === alias) lastLifecycleError = null;
     if (portDiag?.alias === alias && portDiag.auto) portDiag = null;
     const envWarning = lifecycleEnvWarning(r);
-    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${envWarning ? ` · 警告：${envWarning}` : ''}`, Boolean(envWarning));
+    // restart 的 treeKilled 在停旧实例结果里；stop 在顶层。未请求 tree 时保持原横幅。
+    const stopResult = op === 'restart' ? r.stop : r;
+    const treeNote = Array.isArray(stopResult?.treeKilled)
+      ? `；treeKilled=${stopResult.treeKilled.length} killedPids=${JSON.stringify(stopResult.killedPids ?? [])}`
+      : '';
+    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${treeNote}${envWarning ? ` · 警告：${envWarning}` : ''}`, Boolean(envWarning));
   } catch (e) {
     lastLifecycleError = { alias, op, code: e.code, message: e.message, detail: e.detail };
     showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true);

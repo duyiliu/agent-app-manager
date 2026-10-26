@@ -294,13 +294,19 @@ export function cmdCleanupWrapper(ctx, ref) {
   });
 }
 // --grace 参数校验：stop/restart 共用（Number() 严格解析，3000abc 不豁免为 3000）。
-function parseGraceMs(opts) {
-  if (!opts.has('--grace')) return null;
-  const graceMs = Number(opts.get('--grace'));
+// ui /api/lifecycle 也复用同一校验，避免命令行与 UI 的参数契约分叉。
+export function parseGraceMsValue(raw) {
+  if (raw == null) return null;
+  const graceMs = Number(raw);
   if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 600000) {
     throw usageError('--grace 需要 0-600000 的毫秒数');
   }
   return graceMs;
+}
+
+function parseGraceMs(opts) {
+  if (!opts.has('--grace')) return null;
+  return parseGraceMsValue(opts.get('--grace'));
 }
 
 export function cmdStop(ctx, ref) {

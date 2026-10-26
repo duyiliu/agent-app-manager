@@ -179,7 +179,7 @@ const ctx = vm.createContext({
   window: {},
   CSS: { escape: (s) => String(s) },
   Option: Opt,
-  fetch, URL, URLSearchParams, TextDecoder, AbortController, Blob, crypto, atob,
+  fetch, URL, URLSearchParams, TextDecoder, AbortController, AbortSignal, Blob, crypto, atob,
   setInterval, setTimeout, clearInterval, clearTimeout,
   console, alert: () => {},
 });
@@ -261,7 +261,7 @@ try {
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
 
   await check('所有生命周期操作首次点击只进入确认态，二次点击才提交', async () => {
-    run(`globalThis.__lifecycleCalls = []; doLifecycle = (alias, op, extra = '') => { __lifecycleCalls.push({ alias, op, extra }); }; globalThis.__savedSelected = selected; selected = null;`);
+    run(`globalThis.__lifecycleCalls = []; globalThis.__origDoLifecycle = doLifecycle; doLifecycle = (alias, op, extra = '') => { __lifecycleCalls.push({ alias, op, extra }); }; globalThis.__savedSelected = selected; selected = null;`);
     const clickBtn = (btn) => btn.dispatch('click', { target: btn, stopPropagation() {} });
     const cases = [
       { name: '普通启动', label: '启动', op: 'start', extra: '', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
@@ -289,7 +289,7 @@ try {
       assert.equal(run('__lifecycleCalls[0].extra'), c.extra);
       run('disarmOp()');
     }
-    run('selected = __savedSelected;');
+    run('selected = __savedSelected; doLifecycle = __origDoLifecycle;');
   });
   // 合并源：同一批次 stdout/stderr 双流、双 offset/decoder；stderr 行加 [err] 前缀，
   // 过滤/只看错误/下载共用同一 lines 缓存；顺序明确标注为近似。
@@ -366,6 +366,42 @@ try {
     assert(!listHrefs.includes('http://127.0.0.1:5173/'), `列表不应链接 expectedPort：${listHrefs.join(',')}`);
   });
 
+  await check('详情卡生命周期控件：tree 复选框 + grace 毫秒输入，值跨重绘保留', () => {
+    run(`lifecycleTree = false; lifecycleGrace = ''; renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:1 } })`);
+    const box = elFor('detail').querySelector('.lifecycle-tree');
+    const grace = elFor('detail').querySelector('.lifecycle-grace');
+    assert(box && grace, '详情卡缺少 tree 复选框或 grace 输入');
+    assert.equal(box.type, 'checkbox');
+    assert.equal(grace.type, 'number');
+    box.checked = true; box.dispatch('change', { target: box });
+    grace.value = '3000'; grace.dispatch('input', { target: grace });
+    assert.equal(run('lifecycleTree'), true);
+    assert.equal(run('lifecycleGrace'), '3000');
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:1 } })`);
+    assert.equal(elFor('detail').querySelector('.lifecycle-tree').checked, true);
+    assert.equal(elFor('detail').querySelector('.lifecycle-grace').value, '3000');
+    run(`lifecycleTree = false; lifecycleGrace = '';`);
+  });
+
+  await check('stop 请求透传 tree/grace，横幅展示 treeKilled/killedPids', async () => {
+    run(`lifecycleTree = true; lifecycleGrace = '3000'; lifecycleBusy = false; lifecycleOpKey = null;`);
+    try {
+      run(`globalThis.__uiUrls = []; globalThis.__origFetch = fetch; fetch = async (u, opt) => { const s = String(u); if (s.includes('/api/lifecycle')) { globalThis.__uiUrls.push(s); return { ok:true, status:200, json:async()=>({ ok:true, data:{ result:'stopped', treeKilled:[{ pid:4321, image:'node' }], killedPids:[4321] } }) }; } return globalThis.__origFetch(u, opt); };`);
+      await run(`doLifecycle('his','stop')`);
+      const urls = run('__uiUrls');
+      assert.equal(urls.length, 1, JSON.stringify(urls));
+      const u = new URL(urls[0]);
+      assert.equal(u.searchParams.get('tree'), '1');
+      assert.equal(u.searchParams.get('grace'), '3000');
+      const banner = elFor('fatalBanner').textContent;
+      assert(banner.includes('treeKilled=1'), banner);
+      assert(banner.includes('killedPids=[4321]'), banner);
+    } finally {
+      run(`fetch = __origFetch;`);
+      run(`lifecycleTree = false; lifecycleGrace = '';`);
+    }
+  });
+
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);
@@ -410,7 +446,8 @@ try {
     }
   });
 
-  await check('健康总览：列表与详情展示 READY 及监听/HTTP 证据', () => {
+  await check('健康总览：列表与详情展示 READY 及监听/HTTP 证据', async () => {
+    await run('loadApps()'); // 前序用例覆盖了 appsCache，先从服务端恢复真实应用列表
     run(`healthByAlias = new Map([['ahis', { appId:'ahis', status:'RUNNING', state:'READY', expectedPort:8080, listening:true, readiness:{ state:'READY', configured:true, evidence:[{ kind:'http', url:'http://127.0.0.1:8080/ready', status:200 }] } }]])`);
     run(`renderApps()`);
     assert(elFor('appList').textContent.includes('READY'), '应用列表缺少健康状态');

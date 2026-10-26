@@ -201,7 +201,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       // 外层方法守卫只挡「非 GET 且非 lifecycle-POST」，这里必须再查一次：
       // 否则 GET /api/lifecycle?op=stop 会被 <img>/导航等跨站请求触达（CSRF）。
       if (method !== 'POST') throw fail(405, '启停/移除仅接受 POST');
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null) });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null, u.searchParams.get('tree'), u.searchParams.get('grace')) });
     }
     if (u.pathname === '/api/port') {
       // 只读端口诊断：与 CLI `port <N>` 同一实现；输出在 HTTP 层按白名单裁剪。
