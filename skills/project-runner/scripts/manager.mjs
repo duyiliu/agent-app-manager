@@ -21,7 +21,9 @@ import { detectProjects } from './lib/detect.mjs';
 import {
   parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdStart, cmdStop, cmdRestart,
   cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi, cmdCleanupWrapper,
+  cmdStartByTags, cmdStopByTags, cmdRestartByTags, cmdStatusByTags,
 } from './lib/commands.mjs';
+import { parseTagFilters } from './lib/desc.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource } from './lib/log-sources.mjs';
 
 export { SCHEMA_VERSION, MANAGER_VERSION };
@@ -43,6 +45,18 @@ function parseArgv(argv) {
     throw usageError(usageText());
   }
   return ctx;
+}
+
+// 批量命令把 --tag 及其值从原始参数里移除，再逐条复用单应用命令的解析与校验。
+function stripTagArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--tag') { i++; continue; }
+    if (a.startsWith('--tag=')) continue;
+    out.push(a);
+  }
+  return out;
 }
 
 function resolveHome(argHome, readOnly = false) {
@@ -97,6 +111,7 @@ function envWarnLine(names) {
 }
 
 function renderHuman(command, data) {
+  if (data?.batch) return renderBatch(command, data);
   switch (command) {
     case 'version':
       return `project-runner manager v${data.version}`;
@@ -105,11 +120,11 @@ function renderHuman(command, data) {
       const exitText = (a) => a.exit
         ? (a.exit.signal ? `signal=${a.exit.signal}` : `code=${a.exit.code ?? '?'}`)
         : '-';
-      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'exit'.padEnd(14) + 'lastRunId';
+      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'exit'.padEnd(14) + 'tags'.padEnd(18) + 'lastRunId';
       const rows = data.apps.map((a) =>
         String(a.alias).padEnd(14) + String(a.mode ?? '').padEnd(8) + String(a.status).padEnd(10)
         + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7)
-        + exitText(a).padEnd(14) + String(a.lastRunId ?? '-')
+        + exitText(a).padEnd(14) + String((a.tags ?? []).join(',') || '-').padEnd(18) + String(a.lastRunId ?? '-')
         + (a.error ? `\n  ! ${a.error}` : '')
         + (a.exitSummary ? `\n  exit: ${a.exitSummary}` : ''));
       return [head, ...rows].join('\n');
@@ -121,6 +136,7 @@ function renderHuman(command, data) {
     case 'status':
       return [
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
+        (data.tags ?? []).length ? `tags=${data.tags.join(',')}` : null,
         data.run ? `run=${data.run.runId} phase=${data.run.phase} managed=${data.run.managed} started=${data.run.startedAt ?? '-'}` : 'run=无',
         data.run?.pid != null ? `pid=${data.run.pid}${data.run.creationFileTime ? ` creationFileTime=${data.run.creationFileTime}` : ''}${data.run.image ? ` image=${data.run.image}` : ''}` : null,
         data.run?.exit ? `exit: ${data.run.exit.signal ? `signal=${data.run.exit.signal}` : `code=${data.run.exit.code ?? '?'}`}${data.run.exit.at ? ` at=${data.run.exit.at}` : ''}${data.run.exitSummary ? `（${data.run.exitSummary}）` : ''}` : null,
@@ -212,25 +228,52 @@ function renderHuman(command, data) {
   }
 }
 
+function renderBatch(command, data) {
+  const lines = [`批量 ${command} tags=${data.tags.join(',')}：匹配 ${data.matched}，成功 ${data.succeeded}，失败 ${data.failed}`];
+  for (const r of data.results) {
+    if (!r.ok) {
+      lines.push(`- ${r.alias} (${r.appId}) 失败[${r.error.code}] ${r.error.message}`);
+      continue;
+    }
+    if (command === 'status') {
+      lines.push(...renderHuman('status', r).split('\n').map((line) => `- ${line}`));
+    } else if (command === 'start' || command === 'start-new') {
+      lines.push(`- ${r.alias} (${r.appId}) RUNNING run=${r.runId} pid=${r.pid}`);
+    } else if (command === 'stop') {
+      lines.push(`- ${r.alias} (${r.appId}) ${r.result}${r.runId ? ` run=${r.runId}` : ''}${r.treeKilled?.length ? ` 后代已终止 ${r.treeKilled.length} 个` : ''}`);
+    } else if (command === 'restart') {
+      lines.push(`- ${r.alias} (${r.appId}) stop=${r.stop?.result} → run=${r.start?.runId} pid=${r.start?.pid} status=${r.start?.status}`);
+    } else {
+      lines.push(`- ${r.alias} (${r.appId}) ok`);
+    }
+  }
+  lines.push(data.note);
+  return lines.join('\n');
+}
+
 function usageText() {
   return [
     '用法：node manager.mjs [--home <绝对路径>] [--json] <命令> [参数]',
     '',
     '命令：',
     '  version                           显示 manager 版本号（--version/-v 同效）',
-    '  list                              列出已登记应用与实时状态',
+    '  list                              列出已登记应用与实时状态（含 tags）',
     '  status <alias|appId> [--probe] [--ready]   单应用详情；--probe 检测本机 TCP 监听与',
     '       pid→实际监听端口（actualPorts/portMismatch），--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据',
+    '  status --tag <t> [--probe] [--ready]       按 tags 批量查询（逐条返回，单条失败不中断）',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
     '  doctor [--json]                    只读自检（不修复）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] [--wait-ready [--ready-timeout <ms>]] 用已保存配置启动（任意目录可用）',
+    '  start --tag <t> [--force]                  按 tags 批量启动：逐条执行，失败继续、不回滚',
     '  stop <alias|appId> [--tree] [--grace <ms>]   停止受管实例：默认有界强制终止；',
+    '  stop --tag <t> [--tree] [--grace <ms>]       按 tags 批量停止：逐条执行，失败继续、不回滚；',
     '       --tree 连带终止全部后代进程（#39）；--grace 先发优雅信号（Linux SIGTERM /',
     '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止；restart 的 --tree/--grace',
     '       作用于停旧实例这一步',
     '  cleanup-wrapper <alias|appId>     清理命令模式失败后残留的 wrapper（仅 UNKNOWN 且身份完整）',
     '  restart <alias|appId> [--force] [--tree] [--grace <ms>] [--wait-ready [--ready-timeout <ms>]]   确认退出后重启（仅受管实例；--tree/--grace 作用于停旧实例这一步）',
+    '  restart --tag <t> [--force] [--tree] [--grace <ms>]       按 tags 批量重启：--tree/--grace 逐条透传给停旧实例',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
@@ -242,6 +285,7 @@ function usageText() {
     '  record-unmanaged --desc <file> [--log-hints p1,p2] [--force]   记录非受管启动尝试（同 appId 已有受管登记时须 --force）',
     '',
     '启动描述 mode 取值：java | jrebel | python | node | proc（其他真实可执行进程）。',
+    'desc 可选 tags（字符串数组，最多 16 个）：--tag 按标签大小写不敏感匹配；可重复 --tag 或逗号分隔取并集。',
     '受管目标两种形态（desc 二选一）：',
     '  exe+args                 真实可执行文件（.exe/.com）；.cmd/.bat/.ps1 包装与',
     '                           WindowsApps 应用执行别名会被拒绝',
@@ -281,30 +325,26 @@ async function main() {
   }
   try {
     let data;
-    const refCommands = new Set(['status', 'stop', 'restart']);
-    if (command === 'start' || command === 'remove') {
+    if (command === 'remove') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
     } else if (command === 'cleanup-wrapper') {
       if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError('cleanup-wrapper 需要 <alias|appId>');
       if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
-    } else if (refCommands.has(command)) {
-      if (!ctx.rest[0] || ctx.rest[0].startsWith('--')) throw usageError(`${command} 需要 <alias|appId>`);
-      if (command !== 'stop' && command !== 'restart' && command !== 'status') {
-        // stop/restart/status 的选项由各自分支内 parseNamed 统一解析——
-        // 手工白名单与 cmd 参数解析是两份口径，会漂移（#82-D）；其余 ref 命令无选项。
-        const extra = ctx.rest.slice(1)[0];
-        if (extra !== undefined) throw usageError(`无法识别的参数：${extra}`);
-      }
     }
     switch (command) {
       case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
       case 'list': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = cmdList(ctx); break;
       case 'status': {
-        const opts = parseNamed(ctx.rest.slice(1), { '--probe': 'flag', '--ready': 'flag' });
-        if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
-        data = await cmdStatus(ctx, ctx.rest[0], opts.has('--probe'), opts.has('--ready'));
-        break;
+      const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--probe': 'flag', '--ready': 'flag' });
+      if (opts.has('--tag')) {
+        if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
+        data = await cmdStatusByTags(ctx, parseTagFilters(opts.getAll('--tag')), opts.has('--probe'), opts.has('--ready'));
+      } else {
+        if (opts.positional.length !== 1) throw usageError('status 需要 <alias|appId> 或 --tag <t>');
+        data = await cmdStatus(ctx, opts.positional[0], opts.has('--probe'), opts.has('--ready'));
       }
+      break;
+    }
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
       case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;
       case 'detect': {
@@ -313,10 +353,41 @@ async function main() {
         data = detectProjects(path.resolve(opts.get('--root')));
         break;
       }
-      case 'start': data = await cmdStart(ctx, ctx.rest[0]); break;
-      case 'stop': data = cmdStop(ctx, ctx.rest[0]); break;
+      case 'start': {
+        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--ack-unresolved': 'value', '--force': 'flag', '--wait-ready': 'flag', '--ready-timeout': 'value' });
+        if (opts.has('--tag')) {
+          if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
+          if (opts.has('--ack-unresolved')) throw usageError('start --tag 不支持 --ack-unresolved：请先逐个应用核验未结记录');
+          data = await cmdStartByTags(ctx, parseTagFilters(opts.getAll('--tag')), stripTagArgs(ctx.rest));
+        } else {
+          if (!opts.positional.length) throw usageError('start 需要 <alias|appId> 或 --tag <t>');
+          data = await cmdStart(ctx, opts.positional[0]);
+        }
+        break;
+      }
+      case 'stop': {
+        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--tree': 'flag', '--grace': 'value' });
+        if (opts.has('--tag')) {
+          if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
+          data = await cmdStopByTags(ctx, parseTagFilters(opts.getAll('--tag')), stripTagArgs(ctx.rest));
+        } else {
+          if (!opts.positional.length) throw usageError('stop 需要 <alias|appId> 或 --tag <t>');
+          data = cmdStop(ctx, opts.positional[0]);
+        }
+        break;
+      }
       case 'cleanup-wrapper': data = cmdCleanupWrapper(ctx, ctx.rest[0]); break;
-      case 'restart': data = await cmdRestart(ctx, ctx.rest[0]); break;
+      case 'restart': {
+        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--force': 'flag', '--tree': 'flag', '--grace': 'value', '--wait-ready': 'flag', '--ready-timeout': 'value' });
+        if (opts.has('--tag')) {
+          if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
+          data = await cmdRestartByTags(ctx, parseTagFilters(opts.getAll('--tag')), stripTagArgs(ctx.rest));
+        } else {
+          if (!opts.positional.length) throw usageError('restart 需要 <alias|appId> 或 --tag <t>');
+          data = await cmdRestart(ctx, opts.positional[0]);
+        }
+        break;
+      }
       case 'remove': data = cmdRemove(ctx, ctx.rest[0]); break;
       case 'prune': data = cmdPrune(ctx); break;
       case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;

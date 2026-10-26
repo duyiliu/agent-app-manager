@@ -47,11 +47,13 @@ export function cmdRecordUnmanaged(ctx) {
       existing.maxRestarts = null;
       existing.backoffMs = null;
       existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
+      existing.tags = d.tags ?? [];
       existing.updatedAt = now;
     } else {
       reg.apps[appId] = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
+        tags: d.tags ?? [],
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
         restartPolicy: 'never', maxRestarts: null, backoffMs: null,
         envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,

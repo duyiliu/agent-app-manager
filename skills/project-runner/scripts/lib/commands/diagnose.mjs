@@ -159,7 +159,7 @@ export function cmdList(ctx) {
       if (cached instanceof Error) throw cached;
       ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
     } catch (e) {
-      return { alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
+      return { alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root, tags: app.tags ?? [] };
     }
     const current = rt?.current ?? null;
     const runExit = current?.exit ?? null;
@@ -168,6 +168,7 @@ export function cmdList(ctx) {
       status: st.status, managed: st.managed ?? (current?.managed ?? null),
       pid: st.status === 'RUNNING' ? (st.pid ?? current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
+      tags: app.tags ?? [],
       restartPolicy: app.restartPolicy ?? 'never',
       restartState: current?.restartState ?? st.restartState ?? null,
       restartCount: current?.restartCount ?? 0,
@@ -488,6 +489,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
+    tags: app.tags ?? [],
     env: displayEnv(app.env ?? {}),
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,

@@ -10,6 +10,39 @@ import { validateRestartFields, normalizeRestartFields } from './restart.mjs';
 
 export const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 export const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+// 分组标签：与 alias 同级的可读标识，用于 --tag 批量启停；大小写不敏感匹配。
+export const TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+export const MAX_TAGS = 16;
+
+function validateTags(tags, errs) {
+  if (tags == null) return;
+  if (!Array.isArray(tags)) { errs.push('tags 必须是字符串数组'); return; }
+  if (tags.length > MAX_TAGS) { errs.push(`tags 最多 ${MAX_TAGS} 个`); return; }
+  const seen = new Set();
+  for (const tag of tags) {
+    if (typeof tag !== 'string' || !TAG_RE.test(tag)) {
+      errs.push(`tags 的每一项需匹配 ${TAG_RE}`);
+      continue;
+    }
+    const key = tag.toLowerCase();
+    if (seen.has(key)) errs.push(`tags 不能重复（大小写不敏感）：${tag}`);
+    else seen.add(key);
+  }
+}
+
+// --tag 可重复或逗号分隔；去重保留首次出现顺序（匹配时大小写不敏感）。
+export function parseTagFilters(values) {
+  const tags = (values ?? []).flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
+  if (!tags.length) throw usageError('--tag 需要非空标签');
+  const seen = new Set();
+  const out = [];
+  for (const tag of tags) {
+    if (!TAG_RE.test(tag)) throw usageError(`--tag 标签需匹配 ${TAG_RE}：${tag}`);
+    const key = tag.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); out.push(tag); }
+  }
+  return out;
+}
 export const ENTRY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // 可登记的运行形态标签：java/jrebel 为 JVM 应用，python/node 为对应解释器进程，
@@ -68,6 +101,7 @@ export function loadManagedDesc(file) {
   if (hasCmd && !IMAGE_NAME_RE.test(d.expectedImage ?? '')) errs.push('command 模式需要 expectedImage（目标进程映像基名，如 node.exe/java.exe）');
   if (hasExe && (d.expectedImage != null || d.discoverTimeoutMs != null)) errs.push('expectedImage/discoverTimeoutMs 仅 command 模式使用');
   if (d.discoverTimeoutMs != null && (!Number.isInteger(d.discoverTimeoutMs) || d.discoverTimeoutMs < 1000 || d.discoverTimeoutMs > 120000)) errs.push('discoverTimeoutMs 需为 1000-120000 整数');
+  validateTags(d.tags, errs);
   if (d.args != null && (!Array.isArray(d.args) || d.args.some((a) => typeof a !== 'string'))) errs.push('args 必须是字符串数组');
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
   if (d.envFile != null && (typeof d.envFile !== 'string' || !d.envFile.trim())) errs.push('envFile 必须是非空字符串路径');
@@ -93,6 +127,7 @@ export function loadManagedDesc(file) {
     entry: d.entry ?? 'default',
     cwd: d.cwd ?? d.root,
     mode: d.mode ?? 'java',
+    tags: d.tags ?? [],
     exe: d.exe ?? null,
     args: d.args ?? [],
     command: d.command ?? null,
@@ -130,6 +165,7 @@ export function loadUnmanagedDesc(file) {
   if (d.cwd != null && (typeof d.cwd !== 'string' || !path.isAbsolute(d.cwd))) errs.push('cwd 必须是绝对路径');
   if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需 1-65535 的整数');
   if (d.logHints != null && (!Array.isArray(d.logHints) || d.logHints.some((h) => typeof h !== 'string'))) errs.push('logHints 必须是字符串数组');
+  validateTags(d.tags, errs);
   if (errs.length) throw usageError(`描述无效：${errs.join('；')}`);
   return d;
 }
@@ -301,6 +337,7 @@ export function upsertApp(reg, appId, desc) {
     existing.entry = desc.entry;
     existing.cwd = desc.cwd;
     existing.mode = desc.mode;
+    existing.tags = desc.tags ?? [];
     existing.exe = desc.exe;
     existing.args = desc.args;
     existing.command = desc.command ?? null;
@@ -323,7 +360,7 @@ export function upsertApp(reg, appId, desc) {
   }
   const app = {
     appId, alias: desc.alias, displayName: desc.displayName, root: desc.root, entry: desc.entry,
-    cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
+    cwd: desc.cwd, mode: desc.mode, tags: desc.tags ?? [], exe: desc.exe, args: desc.args,
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
     discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
     envFile: desc.envFile ?? null, env: desc.env ?? {},

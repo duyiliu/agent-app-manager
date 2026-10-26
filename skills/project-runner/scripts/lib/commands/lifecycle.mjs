@@ -9,7 +9,7 @@ import { resolveAppId, writeRuntime, resolveUnresolvedRun, parseAckRunId } from 
 import { launchManaged, cleanupWrapper } from '../launch.mjs';
 import { prepareLaunchEnv } from '../env.mjs';
 import { parseNamed } from './common.mjs';
-import { parseReadyOptions, requireReadyEvidence, waitForReady, startReadyFields } from './diagnose.mjs';
+import { parseReadyOptions, requireReadyEvidence, waitForReady, startReadyFields, cmdStatus } from './diagnose.mjs';
 
 export async function cmdStartNew(ctx) {
   const opts = parseNamed(ctx.rest, {
@@ -392,4 +392,68 @@ export async function cmdRestart(ctx, ref) {
         : '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
     };
   });
+}
+
+// ---------- tags 分组批量启停 ----------
+
+// 标签匹配大小写不敏感；一个应用可属于多个标签，--tag 多值按并集去重。
+// 返回顺序沿用注册表插入顺序，便于多次批量操作结果稳定。
+function selectAppsByTags(home, tags) {
+  const wanted = new Set(tags.map((t) => String(t).toLowerCase()));
+  const reg = readRegistry(home);
+  return Object.values(reg.apps).filter((app) => Array.isArray(app.tags)
+    && app.tags.some((t) => wanted.has(String(t).toLowerCase())));
+}
+
+// 批量语义固定为「逐条执行、失败继续、不回滚」：stop 场景尽量清理其余应用，
+// start/restart 场景保留已成功部分并回报，绝不静默中断。
+async function runBatch(command, tags, apps, op) {
+  const results = [];
+  for (const app of apps) {
+    try {
+      const data = await op(app);
+      results.push({ ok: true, ...(data ?? {}) });
+    } catch (e) {
+      results.push({
+        ok: false, alias: app.alias, appId: app.appId,
+        error: { code: e.code ?? 'INTERNAL', message: e.message, ...(e.detail !== undefined ? { detail: e.detail } : {}) },
+      });
+    }
+  }
+  const succeeded = results.filter((r) => r.ok).length;
+  const failed = results.length - succeeded;
+  return {
+    batch: true, command, tags, matched: apps.length, succeeded, failed, partialFailure: failed > 0, results,
+    note: '按标签逐条执行：单条失败不中断后续、不回滚已完成的应用；每条结果以 results[].ok 为准',
+  };
+}
+
+function batchAppsOrNotFound(home, tags) {
+  const apps = selectAppsByTags(home, tags);
+  if (!apps.length) throw notFoundError(`没有应用带有标签：${tags.join(', ')}（可用 list 查看 tags）`);
+  return apps;
+}
+
+export async function cmdStartByTags(ctx, tags, cleanArgs = []) {
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('start', tags, apps, (app) => cmdStart({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+}
+
+export function cmdStopByTags(ctx, tags, cleanArgs = []) {
+  const parsed = parseNamed(cleanArgs, { '--tree': 'flag', '--grace': 'value' });
+  parseGraceMs(parsed); // 批量前先校验一次，避免逐条重复失败
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('stop', tags, apps, (app) => cmdStop({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+}
+
+export async function cmdRestartByTags(ctx, tags, cleanArgs = []) {
+  const parsed = parseNamed(cleanArgs, { '--force': 'flag', '--tree': 'flag', '--grace': 'value' });
+  parseGraceMs(parsed);
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('restart', tags, apps, (app) => cmdRestart({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+}
+
+export async function cmdStatusByTags(ctx, tags, probeRequested = false, readyRequested = false) {
+  const apps = batchAppsOrNotFound(ctx.home, tags);
+  return runBatch('status', tags, apps, (app) => cmdStatus(ctx, app.alias, probeRequested, readyRequested));
 }

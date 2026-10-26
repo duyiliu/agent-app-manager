@@ -4,6 +4,7 @@
 > 状态：v2 已实现（manager.mjs，PR #2 合并）；2026-10-17 完成合并后验收，AC01–AC07 核心场景全部通过。**AC03 分层结论：全量通过**（L1/L2 于 2026-10-19 隔离环境实测；L3「真实 pi 会话退出后的存活」于 2026-10-20 按同判据补验通过——真实嵌套 pi 会话正常退出后，会话外全新进程实测 status/logs/stop 四项判据全过，Managed 启动路径无需阻塞）。实测命令与原始输出见 `docs/verification/ac03-l1-l2-evidence.md`（L3 见其 §4.5）。若未来更换运行器或宿主调度层（尤其新增 `KILL_ON_JOB_CLOSE` 包裹），须按同一判据重验后方可宣称 AC03 兼容。2026-10-20 新增 `manager ui` 本地 Web 管理台（默认只读展示 + 显式确认的本机启停/移除；§2.2、AC08），"简单部署"原则、非目标与 P2 表述已同步调整。
 > **v2.3（2026-10-21，多语言）**：受管范围由 JVM 推广到任意真实可执行进程——desc `mode` 扩展为 `java|jrebel|python|node|proc`；`resolveExe` 收紧为"必须解析为 .exe/.com 真实可执行文件"，拒绝 `.cmd`/`.bat`/`.ps1` 包装与 `Microsoft\WindowsApps` 应用执行别名 reparse point（npm/pnpm 等 shim 场景须先解析到底层 `node <entry>.js`）；`.tmp` 兼容日志新增 `runner-local-*` 通用名。生命周期、未结记录、锁与 ui 机制全部不变；冒烟见 `scripts/test/runtime-smoke.mjs`。
 > **v2.4（2026-10-21，命令模式）**：desc 新增 `command` + `expectedImage`（+可选 `discoverTimeoutMs`），与 `exe/args` 二选一。manager 亲自用 `cmd /d /s /c <command>` 拉起脚本/复合命令（`npm run dev`、`mvn spring-boot:run`、`*.cmd` 编排等），再按 PPID 链在后代进程中有界轮询匹配 `expectedImage` 映像基名：首次匹配后再观察 ~1.5s 取最终清单（防"假唯一"），恰好 1 个 → 采集 pid+创建时间+映像进既有受管模型（kind=`command`，wrapper 身份一并记录供清理佐证）；≥2 个 → `DISCOVERY_AMBIGUOUS` 拒绝并列候选，wrapper 留证标 UNKNOWN；wrapper 先退出且无目标 → `SPAWN_FAILED`；超时 → UNKNOWN。`stop` 终止目标进程（同句柄核验不变）并尽力终止残留 wrapper；`restart`=`stop`+重放命令+重新发现。**实测约束**：5ec3fb4 起 logger 与 wrapper 一律 `detached: true`——非 detached 子进程在 Windows 会被放入 kill-on-close 作业对象，CLI 退出即整树终止；detached 后 stdout 经 pipe 转发不受影响（Windows cmd 与 Linux sh 均已实测）。安全边界不变：管理目标仍只能是 manager 自己启动的后代，不凭端口/事后断言认领外部进程。
+> **v2.5（issue #110，tags 分组批量）**：desc 可选 `tags: string[]`（最多 16 个，大小写不敏感去重）透传注册表；`list`/`status` 展示。`start|stop|restart|status --tag <t>` 对同标签应用逐条执行：**单条失败不中断后续、不回滚已完成部分**，`--tree/--grace/--force` 逐条透传；结果含 `matched/succeeded/failed/results[]`，调用方须检查每条 `ok`；无匹配 → `NOT_FOUND`。`start --tag` 不接受 `--ack-unresolved`。
 > 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill；日志查看能力自 v2.2 起并入 `manager ui`（原单项目 Viewer 已移除）
 > 评审说明：v1 的 same-context PASS 不继承为 v2 的代码审查或运行验证结论；实施后须按本文件验收。
 
@@ -26,7 +27,7 @@
 - **简单部署**：Windows 11 + PowerShell 7，或 Linux（`/proc`，不依赖 pwsh）；Node.js 22。Linux 安全停止还需要随 Skill 分发的 Python 3.9+ pidfd helper 与内核 pidfd 支持；缺少时拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`。尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地管理台：默认只读展示，启停/移除仅限本机且须页面显式二次确认；按需启动、非常驻、仅绑定 127.0.0.1 且无令牌（本机可信用户，见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发；Linux 路径不调用 PowerShell。macOS 暂不支持（无 `/proc`）。
 - **保持原能力**：PR #5 现有单项目启动规程、热加载验证、`.tmp` 日志与只读日志查看能力不被替换（v2.2 起并入 `manager ui`，原单项目 Viewer 移除）。
 
-非目标：项目全盘扫描、通用进程盘点、IDEA 进程关联与接管、批量启停、自动构建、跨机器管理、Docker 编排、JVM 监控、远程管理、对外网开放或常驻的 Web 控制台、多实例托管（本地 Web 管理台的边界见 §2.2）。
+非目标：项目全盘扫描、通用进程盘点、IDEA 进程关联与接管、无差别批量启停（all/通配符/隐式编排；用户显式声明的 `tags` + `--tag` 分组批量例外，见 §4）、自动构建、跨机器管理、Docker 编排、JVM 监控、远程管理、对外网开放或常驻的 Web 控制台、多实例托管（本地 Web 管理台的边界见 §2.2）。
 
 ## 2. 组件与数据
 
@@ -62,7 +63,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 - 一个仓库可有多个应用；按规范化仓库真实路径 + 应用入口去重，别名不区分 Windows 大小写。
 - 保留已经由 Skill 登记、但现在停止的项目；`list` 不等于“只列正在运行”。不再需要的登记由用户显式 `remove` 移除：仅允许无存活受管实例时移除（RUNNING 一律拒绝，STARTING/UNKNOWN 未结记录按既有 ack 流程）；只删注册表条目，`runtime/<appId>.json` 与 `logs/<appId>/` 证据保留，供事后追溯与 `prune` 按保留期回收。
-- desc 可包含 `env`（合法环境变量名到字符串字面值的映射），随应用配置明文持久化到 `registry.json`，启动时覆盖 manager 当前环境中的同名变量；`envRefs` 仍只记录依赖宿主提供的变量名，不存值。**`env` 禁止存放机密**（如密码、Token、许可证内容）；机密由系统环境变量提供并用 `envRefs` 声明，或用 `envFile` 指向本机 env 文件。启动前一次性校验 `envRefs`：任一变量缺失即以 `ENV_MISSING` 拒绝并列出全部缺失名称；`envFile` 仅启动时读取并注入内存（`KEY=VALUE`，值不写入 registry/runtime/status/UI），其文件本身不允许通过管理台浏览。`env` 中出现敏感名称（`SECRET|TOKEN|PASSWORD|PASSWD|KEY|CREDENTIAL` 等）或疑似凭据字面值时启动前告警但不阻断；human/JSON 状态与 UI 回显对敏感名称显示 `***`，非敏感 env 值保持截断行为。不存完整原始进程命令行或展开后的秘密。命令发现失败的候选证据同样须在落盘前白名单投影（`pid`/`image`/`comm`/`creationFileTime`，必要时仅保留 `cmdHash`/`cmdLength`），原始 `cmd` 只允许留在探针内存中用于启动器折叠判定。
+- desc 可包含 `env`（合法环境变量名到字符串字面值的映射），随应用配置明文持久化到 `registry.json`，启动时覆盖 manager 当前环境中的同名变量；`envRefs` 仍只记录依赖宿主提供的变量名，不存值。**`env` 禁止存放机密**（如密码、Token、许可证内容）；机密由系统环境变量提供并用 `envRefs` 声明，或用 `envFile` 指向本机 env 文件。启动前一次性校验 `envRefs`：任一变量缺失即以 `ENV_MISSING` 拒绝并列出全部缺失名称；`envFile` 仅启动时读取并注入内存（`KEY=VALUE`，值不写入 registry/runtime/status/UI），其文件本身不允许通过管理台浏览。`env` 中出现敏感名称（`SECRET|TOKEN|PASSWORD|PASSWD|KEY|CREDENTIAL` 等）或疑似凭据字面值时启动前告警但不阻断；human/JSON 状态与 UI 回显对敏感名称显示 `***`，非敏感 env 值保持截断行为。不存完整原始进程命令行或展开后的秘密。命令发现失败的候选证据同样须在落盘前白名单投影（`pid`/`image`/`comm`/`creationFileTime`，必要时仅保留 `cmdHash`/`cmdLength`），原始 `cmd` 只允许留在探针内存中用于启动器折叠判定。desc 可选 `tags`（字符串数组）同样持久化到注册表，仅作分组标签（不参与身份/去重）；`--tag` 批量操作语义见第 4 节。
 - 不使用别名拼接可信文件路径；`appId`、`runId` 由脚本生成且严格校验。原子写文件，冲突写入不覆盖。
 
 ### 2.2 本地 Web 管理台（manager ui，默认只读展示 + 显式确认的本机生命周期操作）
@@ -104,7 +105,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 - P0 默认**有界强制停止**，执行前说明，不盲目终止整棵进程树。v2.5 起提供两个显式可选项：`stop --tree`/`restart --tree` 连带终止受管目标当时的后代进程（针对命令模式遗留子进程占端口，#39）；`stop --grace <ms>` 先发优雅信号（Linux `SIGTERM`、Windows `taskkill` 无 `/F`），窗口内未退出再回退强制终止——优雅关机仍不保证，只是尽力而为。
 - **树终止的有界性声明**：`--tree` 仅限**受管目标进程的后代**，不向上爬、不碰外部进程，也不引入任何外部认领。终止前先核验目标身份，通过后按 PPID 向下枚举当时仍在的子孙（含多级）并各自采集 `pid`+创建时间+映像；随后先终止目标、清理命令模式 wrapper，再对仍存活的后代逐个按快照身份同句柄核验后终止，返回 `treeKilled: [{pid,image}]` 留证。后代已自行退出或 PID 已复用时跳过不报错；目标身份核验不通过时不会触碰快照。未传 `--tree` 时默认不触碰后代（保守默认）。
 - `restart` 必须先确认旧进程已退出，才启动新实例；重复停止可返回 alreadyStopped。UNKNOWN、身份无法验证或外部进程一律拒绝停止/重启。
-- 用户明确要求单个目标的启动/重启可按已授权流程执行；不提供 `all`、通配符或自动批量重启。
+- 用户明确要求单个目标的启动/重启可按已授权流程执行；不提供 `all` 或通配符；批量仅限用户显式声明的 `--tag` 分组（语义见第 4 节），不做隐式自动批量重启。
 
 ## 4. 最小命令接口
 
@@ -112,13 +113,13 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 ~~~text
 list [--json]
-status <alias|appId> [--probe] [--ready] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据
+status <alias|appId|--tag <t>> [--probe] [--ready] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
 doctor [--json]                          # 只读自检（不修复）
-start <alias|appId> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证
-stop <alias|appId> [--tree] [--grace <ms>] [--json]  # 仅 Managed；--tree 连带后代（#39），--grace 优雅信号先行
+start <alias|appId|--tag <t>> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证；--tag 批量启动
+stop <alias|appId|--tag <t>> [--tree] [--grace <ms>] [--json]  # 仅 Managed；--tree 连带后代（#39），--grace 优雅信号先行；--tag 批量停止
 cleanup-wrapper <alias|appId> [--json]   # 仅 UNKNOWN 且 wrapper 身份完整时清理命令模式残留 wrapper；不改 phase、不清理目标候选/后代
-restart <alias|appId> [--force] [--tree] [--json] # 仅 Managed；--tree 同 stop
+restart <alias|appId|--tag <t>> [--force] [--tree] [--grace <ms>] [--json] # 仅 Managed；--tree/--grace 同 stop；--tag 批量重启
 remove <alias|appId> [--ack-unresolved <runId>] [--json]   # 移除登记：仅无存活受管实例；只删注册表条目，运行记录与日志证据保留
 prune [--dry-run] [--apply] [--json]     # 回收三类残留：超保留期批次日志（对齐 PREV_RUNS_KEEP=20）、locks/*.stale-*、.tmp-* 孤儿临时文件；默认 dry-run
 logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--src <run:…|hint:<hash>|tmp:…>] [--list-sources] [--follow] [--json]
