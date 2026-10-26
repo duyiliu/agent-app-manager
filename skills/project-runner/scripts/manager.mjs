@@ -233,10 +233,12 @@ function renderHuman(command, data) {
         ].filter(Boolean).join('\n');
       }
       if (data.stream === 'both') {
-        const body = data.lines.map((l) => `[${l.stream}] ${l.line}`).join('\n');
-        return data.missingStreams?.length ? `${body}${body ? '\n' : ''}（无 ${data.missingStreams.join('/')} 日志文件）` : body;
+        const body = data.lines.map((l) => (l?.stream ? `[${l.stream}] ${l.line}` : (typeof l === 'string' ? l : l.line))).join('\n');
+        const missing = data.missingStreams?.length ? `${body}${body ? '\n' : ''}（无 ${data.missingStreams.join('/')} 日志文件）` : body;
+        return data.note ? `${missing}${missing ? '\n' : ''}${data.note}` : missing;
       }
-      return data.lines.join('\n');
+      const body = data.lines.join('\n');
+      return data.note ? `${body}${body ? '\n' : ''}${data.note}` : body;
     }
     default:
       return JSON.stringify(data, null, 2);
@@ -291,7 +293,9 @@ function usageText() {
     '  restart <alias|appId> [--force] [--tree] [--grace <ms>] [--wait-ready [--ready-timeout <ms>]]   确认退出后重启（仅受管实例；--tree/--grace 作用于停旧实例这一步）',
     '  restart --tag <t> [--force] [--tree] [--grace <ms>]       按 tags 批量重启：--tree/--grace 逐条透传给停旧实例',
     '  logs <alias|appId> [--lines N] [--stream stdout|stderr|both] [--run <runId>] [--follow]',
-    '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流）',
+    '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources] [--grep <regex>] [--ignore-case]',
+    '       [--context N] [--since <30m|2026-10-25T10:00>]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流；',
+    '       grep/context/since 可叠加，--since 按行首时间戳过滤，无时间戳行跳过并提示）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
     '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
     '  ui [--port N] [--open]              本地 Web 管理台（默认固定 127.0.0.1:8199，无令牌仅本机；--open 监听成功后用默认浏览器打开 URL，失败仅打印地址；Ctrl+C 退出）',
