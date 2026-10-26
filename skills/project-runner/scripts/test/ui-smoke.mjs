@@ -110,7 +110,7 @@ try {
   const page = await get('/');
   await check('管理台页面含过滤输入框与只看错误开关', () => {
     assert.equal(page.status, 200);
-    for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"']) {
+    for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"', '/api/health', 'healthPill']) {
       assert(page.body.includes(marker), `页面缺少 ${marker}`);
     }
   });
@@ -166,6 +166,21 @@ try {
     assert.equal(status.run.runId, 'rtest1');
     assert(status.run.logPaths.stdout.endsWith('rtest1.stdout.log'));
   });
+
+  const health = (await get('/api/health')).json.data;
+  await check('健康总览：非 RUNNING 应用为 UNTESTED 且不做端口/就绪探测', () => {
+    assert.equal(health.apps.length, 4);
+    const his = health.apps.find((a) => a.alias === 'his');
+    assert.equal(his.status, 'STOPPED');
+    assert.equal(his.state, 'UNTESTED');
+    assert.equal(his.listening, null);
+    assert.equal(his.readiness.state, 'UNTESTED');
+    assert(his.readiness.note.includes('非 RUNNING'));
+    assert.equal(health.summary.running, 0);
+    assert.equal(health.summary.untested, 0);
+    assert(health.note.includes('监听（TCP）≠ 业务就绪'));
+  });
+  await check('GET-only：POST /api/health 返回 405', async () => assert.equal((await get('/api/health', { method: 'POST' })).status, 405));
 
   const runs = (await get('/api/runs?app=his')).json.data;
   await check('批次列表（当前 + prevRuns）', () => {

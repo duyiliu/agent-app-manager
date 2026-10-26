@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { usageError, conflictError } from '../errors.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile } from '../log-sources.mjs';
 import { parseNamed } from './common.mjs';
-import { cmdList, cmdStatus, cmdDoctor } from './diagnose.mjs';
+import { cmdList, cmdStatus, cmdDoctor, cmdHealth } from './diagnose.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'manager.mjs');
 
@@ -94,6 +94,7 @@ export async function cmdUi(ctx) {
       api: {
         list: () => cmdList(ctx),
         status: (ref) => cmdStatus(ctx, ref).then((data) => { delete data.portListening; delete data.portNote; return data; }),
+        health: () => cmdHealth(ctx),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
         listSources: (ref) => listSources(ctx.home, ref),

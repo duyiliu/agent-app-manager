@@ -305,6 +305,22 @@ aside {
 .pill.unmanaged::before { display:none }
 .pill.mode { color:var(--text-faint); font-weight:500 }
 .pill.mode::before { display:none }
+.pill.hl-READY { color:#9df0c5; border-color:rgba(74,222,128,.4); background:rgba(74,222,128,.1) }
+.pill.hl-READY::before { background:var(--ok); box-shadow:0 0 6px rgba(74,222,128,.7) }
+.pill.hl-NOT_READY { color:#ffb9b9; border-color:rgba(248,113,113,.4); background:var(--danger-soft) }
+.pill.hl-NOT_READY::before { background:var(--danger); box-shadow:0 0 6px rgba(248,113,113,.7) }
+.pill.hl-UNTESTED { color:#ffe099; border-color:rgba(251,191,36,.4); background:var(--warn-soft) }
+.pill.hl-UNTESTED::before { background:var(--warn); box-shadow:0 0 6px rgba(251,191,36,.7) }
+.health {
+  margin:0 13px 11px;
+  padding:9px 11px;
+  border:1px solid var(--line-soft);
+  border-radius:9px;
+  background:rgba(148,163,184,.035)}
+.health-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:11.5px; color:var(--text-dim) }
+.health-title { font-weight:650; color:var(--text) }
+.health-ev { margin-top:6px; display:grid; gap:3px; font:10.5px/1.6 var(--mono-font); color:var(--text-dim); overflow-wrap:anywhere }
+.health-note { margin-top:5px; font-size:10.5px; color:var(--text-faint); line-height:1.55 }
 
 .detail-panel { display:flex; flex-direction:column; min-width:0; min-height:0 }
 #detail { flex:0 1 auto; max-height:52%; overflow:auto; padding:12px 14px 4px }
@@ -633,6 +649,8 @@ const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : nu
 
 let selected = null;          // 当前选中的 alias
 let appsCache = [];
+let healthByAlias = new Map(); // GET /api/health 结果：appId -> 健康总览行
+let lastDetail = null;         // 最近一次 /api/status 详情，供健康刷新时重绘
 let paused = false, manualRefresh = false;
 let previousStatuses = new Map();
 let notifiedRuns;
@@ -640,7 +658,7 @@ try { notifiedRuns = new Set(JSON.parse(sessionStorage.getItem('pr-ui-notified-r
 let wantedHistoryRun = null, selectedHistoryRun = null;
 let fatal = false;            // 403（非本机访问）后停止轮询
 let degrading = false;        // 数据损坏等持久性错误
-let appsBusy = false, statusBusy = false; // loadApps/loadStatus 在飞守卫：响应慢于轮询周期时不堆叠请求
+let appsBusy = false, statusBusy = false, healthBusy = false; // loadApps/loadStatus/loadHealth 在飞守卫：响应慢于轮询周期时不堆叠请求
 
 async function api(path, signal, method = 'GET') {
   const u = new URL(path, location.origin);
@@ -691,12 +709,40 @@ function handlePollError(e) {
 // ---------- 应用列表 ----------
 
 function statusPill(status) { return el('span', 'pill st-' + (status ?? 'UNKNOWN'), status ?? 'UNKNOWN'); }
+function healthPill(state) { return el('span', 'pill hl-' + (state ?? 'UNTESTED'), state ?? 'UNTESTED'); }
+function healthEvidenceLines(h) {
+  const out = [];
+  if (!h || h.status !== 'RUNNING') return ['非 RUNNING：未做端口监听/就绪探测'];
+  out.push(h.expectedPort == null
+    ? '监听：未登记 expectedPort，无法 TCP 探测'
+    : `监听 127.0.0.1:${h.expectedPort} → ${h.listening ? '是' : '否'}`);
+  const ev = h.readiness?.evidence ?? [];
+  for (const e of ev) {
+    if (e.kind === 'http') out.push(`HTTP ${e.status ?? '—'} ${e.url}${e.error ? ' · ' + e.error : ''}`);
+    else if (e.kind === 'logPattern') out.push(`日志 ${e.stream}: ${e.matched}`);
+  }
+  if (!ev.length) out.push(h.readiness?.configured ? '就绪条件已配置但暂无证据' : '未配置 readyUrl / readyLogPattern：UNTESTED');
+  return out;
+}
+function healthTitle(h) { return healthEvidenceLines(h).join('\n'); }
+function healthBlock(h) {
+  const box = el('div', 'health');
+  const head = el('div', 'health-head');
+  head.append(el('span', 'health-title', '健康'), healthPill(h.state),
+    el('span', null, h.state === 'READY' ? '就绪证据命中' : h.state === 'NOT_READY' ? '就绪证据未命中' : '未做就绪探测'));
+  box.appendChild(head);
+  const ev = el('div', 'health-ev');
+  for (const line of healthEvidenceLines(h)) ev.appendChild(el('div', null, line));
+  box.appendChild(ev);
+  box.appendChild(el('div', 'health-note', '监听（TCP）≠ 业务就绪：READY 仅代表配置的 readyUrl/readyLogPattern 证据命中。'));
+  return box;
+}
 function renderApps() {
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const rank = { RUNNING: 0, STARTING: 1, UNKNOWN: 2, STOPPED: 3 };
   const filtered = appsCache
-    .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort].some(v => String(v ?? '').toLowerCase().includes(q)))
+    .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state].some(v => String(v ?? '').toLowerCase().includes(q)))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
   $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
   const previousScroll = list.scrollTop;
@@ -717,7 +763,13 @@ function renderApps() {
     card.type = 'button';
     card.setAttribute('role', 'listitem');
     const head = el('div', 'app-head');
+    const health = healthByAlias.get(a.appId);
     head.append(el('span', 'app-alias', a.alias), statusPill(a.status));
+    if (health) {
+      const hp = healthPill(health.state);
+      hp.title = healthTitle(health);
+      head.appendChild(hp);
+    }
     if (a.managed === false) head.appendChild(el('span', 'pill unmanaged', '非受管'));
     card.appendChild(head);
     const meta = el('div', 'app-meta');
@@ -736,7 +788,7 @@ function renderApps() {
     if (a.error) meta.appendChild(el('span', 'v bad', a.error));
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
-    card.title = a.error ? `${a.alias}：${a.error}` : [a.alias, a.displayName !== a.alias ? a.displayName : null, a.appId].filter(Boolean).join(' · ');
+    card.title = a.error ? `${a.alias}：${a.error}` : [a.alias, a.displayName !== a.alias ? a.displayName : null, a.appId, health ? health.state : null].filter(Boolean).join(' · ');
     card.onclick = () => selectApp(a.alias);
     ordered.push(card);
   }
@@ -827,6 +879,7 @@ function applyDetail(open) {
   $('#detailBar').setAttribute('aria-expanded', String(open));
 }
 function renderDetail(d) {
+  lastDetail = d;
   const box = $('#detail');
   const bar = $('#detailBar');
   box.replaceChildren();
@@ -913,8 +966,10 @@ function renderDetail(d) {
     alert.appendChild(el('span', null, ' 显式恢复。不要删除运行数据绕过。'));
     card.appendChild(alert);
   }
-  if (d.readinessUntested) {
-    card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：就绪与 JRebel/热加载验证需按 Skill 规程用真实证据判定，本页不代替该结论。'));
+  const health = healthByAlias.get(d.appId);
+  if (health) card.appendChild(healthBlock(health));
+  else if (d.readinessUntested) {
+    card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：等待健康总览返回；就绪与 JRebel/热加载验证仍需按 Skill 规程用真实证据判定。'));
   }
   if (d.note) card.appendChild(el('div', 'hint-line', 'note: ' + d.note));
   if (d.loggerNote) card.appendChild(el('div', 'alert', d.loggerNote));
@@ -986,6 +1041,7 @@ function renderDetail(d) {
   $('#detailSummary').replaceChildren(
     el('span', 'db-name', d.alias),
     statusPill(d.status),
+    ...(health ? [healthPill(health.state)] : []),
     el('span', 'pill mode', d.mode ?? '?'),
     el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'),
     el('span', 'db-info', bits));
@@ -1020,7 +1076,7 @@ async function doLifecycle(alias, op, extra = '') {
   }
   lifecycleBusy = false;
   lifecycleOpKey = null;
-  await Promise.all([loadApps(), loadStatus(), loadSources()]);
+  await Promise.all([loadApps(), loadStatus(), loadSources(), loadHealth()]);
   manualRefresh = false;
   pollTail();
 }
@@ -1041,6 +1097,18 @@ async function loadStatus() {
     if (e.status === 404) { renderDetail(null); return; }
     handlePollError(e);
   } finally { statusBusy = false; }
+}
+async function loadHealth() {
+  if (fatal || (paused && !manualRefresh) || healthBusy) return;
+  healthBusy = true;
+  try {
+    const d = await api('/api/health');
+    healthByAlias = new Map((d.apps ?? []).map(h => [h.appId, h]));
+    if (appsCache.length) renderApps();
+    if (selected && lastDetail?.alias === selected) renderDetail(lastDetail);
+  } catch (e) {
+    if (e.status !== 404) handlePollError(e); // 旧服务无此接口时仅保留通用提示
+  } finally { healthBusy = false; }
 }
 function selectApp(alias) {
   if (selected === alias) return;
@@ -1298,6 +1366,7 @@ async function manualReload() {
   manualRefresh = true;
   try {
     await loadApps();
+    await loadHealth();
     if (selected) { await Promise.all([loadStatus(), loadSources()]); pollTail(); }
   } finally { manualRefresh = false; }
 }
@@ -1510,6 +1579,7 @@ loadApps().then(() => {
   if (pick) selectApp(pick.alias);
   else if (appsCache.length === 1) selectApp(appsCache[0].alias);
 });
+loadHealth();
 let pollTimers = [];
 function schedulePolling() {
   pollTimers.forEach(clearInterval);
@@ -1517,6 +1587,7 @@ function schedulePolling() {
   pollTimers = [
     setInterval(loadApps, slow ? 30000 : 4000),
     setInterval(loadStatus, slow ? 30000 : 4000),
+    setInterval(loadHealth, slow ? 60000 : 15000), // 健康探测较重：低频轮询，启停/手动刷新时额外立即刷新
     setInterval(loadSources, slow ? 30000 : 8000),
     setInterval(pollTail, slow ? 30000 : 1000),
   ];

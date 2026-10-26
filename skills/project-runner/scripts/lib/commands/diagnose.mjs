@@ -222,6 +222,85 @@ async function readinessCheck(home, app, cur) {
   return { state, configured, evidence };
 }
 
+// 管理台健康总览（GET /api/health）：对全部登记应用做一次只读评估。
+// RUNNING 应用并发执行 TCP 监听探测与 readyUrl/readyLogPattern 就绪评估；
+// 非 RUNNING、无就绪配置或缺少就绪证据一律明确标 UNTESTED，绝不把监听当成就绪。
+// 批量核验 RUNNING 身份，避免 N 个应用产生 N 次 pwsh 冷启动；单应用损坏只降级该行。
+export async function cmdHealth(ctx) {
+  const reg = readRegistry(ctx.home);
+  const apps = Object.values(reg.apps);
+  const prefetched = new Map();
+  const runtimes = new Map();
+  const pending = [];
+  for (const app of apps) {
+    try {
+      const rt = readRuntimeStrict(ctx.home, app.appId);
+      runtimes.set(app.appId, rt);
+      const cur = rt?.current;
+      if (cur && cur.managed && cur.phase === 'RUNNING' && cur.pid != null && cur.creationFileTime && cur.image) {
+        pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+      }
+    } catch (e) {
+      runtimes.set(app.appId, e);
+    }
+  }
+  if (pending.length) {
+    try {
+      const results = verifyRuns(pending);
+      pending.forEach((p, i) => {
+        if (!results[i]) return;
+        prefetched.set(p.appId, results[i]);
+        try { cacheVerifyResult(p, interpretVerifyResult(results[i])); } catch { /* error 结果不缓存 */ }
+      });
+    } catch { /* 批量失败回退逐条核验 */ }
+  }
+
+  const rows = await Promise.all(apps.map(async (app) => {
+    const base = {
+      alias: app.alias, appId: app.appId, expectedPort: Number.isInteger(app.expectedPort) ? app.expectedPort : null,
+    };
+    let rt;
+    let st;
+    try {
+      const cached = runtimes.get(app.appId);
+      if (cached instanceof Error) throw cached;
+      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
+    } catch (e) {
+      return {
+        ...base, status: 'UNKNOWN', managed: null, listening: null, state: 'UNTESTED',
+        readiness: { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [] },
+        error: `${e.code ?? 'UNKNOWN'}: ${e.message}`,
+      };
+    }
+    const running = st.status === 'RUNNING';
+    const listening = running && base.expectedPort != null ? await tcpListening(base.expectedPort) : null;
+    const readiness = running
+      ? await readinessCheck(ctx.home, app, rt?.current)
+      : { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，未做端口/就绪探测' };
+    return {
+      ...base, status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
+      pid: running ? (st.pid ?? rt?.current?.pid ?? null) : null,
+      listening, state: readiness.state, readiness,
+      note: st.note ?? null,
+      ...(st.loggerNote ? { loggerNote: st.loggerNote } : {}),
+    };
+  }));
+
+  const runningApps = rows.filter((r) => r.status === 'RUNNING');
+  return {
+    checkedAt: new Date().toISOString(),
+    apps: rows,
+    summary: {
+      total: rows.length,
+      running: runningApps.length,
+      ready: runningApps.filter((r) => r.state === 'READY').length,
+      notReady: runningApps.filter((r) => r.state === 'NOT_READY').length,
+      untested: runningApps.filter((r) => r.state === 'UNTESTED').length,
+    },
+    note: '监听（TCP）≠ 业务就绪：READY 仅代表配置的 readyUrl/readyLogPattern 证据命中，未配置或非 RUNNING 为 UNTESTED',
+  };
+}
+
 export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);

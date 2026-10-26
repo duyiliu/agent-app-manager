@@ -5,7 +5,7 @@
 export { parseNamed } from './commands/common.mjs';
 export { cmdStartNew, cmdStart, cmdStop, cmdRestart, cmdCleanupWrapper } from './commands/lifecycle.mjs';
 export { cmdRecordUnmanaged, cmdRemove } from './commands/registry.mjs';
-export { cmdPort, cmdDoctor, cmdList, cmdStatus } from './commands/diagnose.mjs';
+export { cmdPort, cmdDoctor, cmdList, cmdStatus, cmdHealth } from './commands/diagnose.mjs';
 export { cmdLogs } from './commands/logs.mjs';
 export { cmdPrune } from './commands/prune.mjs';
 export { cmdUi } from './commands/ui.mjs';
