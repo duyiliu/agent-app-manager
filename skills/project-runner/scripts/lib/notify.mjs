@@ -1,9 +1,11 @@
 // 受管进程退出通知钩子（issue #135）：desc `onExit`（登记进注册表）或全局
-// `~/.project-runner/config.json` 的 `onExit` 配置的回调命令，在「查询首次观测到
-// RUNNING→已退出」的落账路径上执行一次（运行记录 `notifiedAt`/`notifyResult` 留证）。
-// 人工 stop 走 markStopped 直接落账、不经此路径，不触发。
+// `~/.project-runner/config.json` 的 `onExit` 配置的回调命令。触发路径有二：
+// ① 查询首次观测到 RUNNING→已退出的落账路径执行一次（运行记录
+// `notifiedAt`/`notifyResult` 留证）；② restartPolicy=on-failure 的监督型应用，
+// 由 log-writer 在监督 finalize（不重启/clean-exit、重启耗尽 DEAD）时认领执行一次，
+// BACKOFF（将自动重启）不触发。人工 stop 走 markStopped 直接落账、不经此路径，不触发。
 // 命令只来自本机信任边界内的配置（Skill 写入的 desc 文件 / 本机 config.json），
-// 不存在远程/不可信注入面；执行有界超时、失败静默——绝不影响 status/list 主路径。
+// 不存在远程/不可信注入面；执行有界超时、失败静默——绝不影响 status/list 主流程。
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';

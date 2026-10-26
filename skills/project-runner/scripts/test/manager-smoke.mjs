@@ -765,6 +765,37 @@ try {
     assert.equal(readNotifies().length, 2, '失败回调不应触碰正常 sink');
   });
 
+  lifecycle('onExit：restartPolicy 监督型应用 BACKOFF 不触发、重启耗尽 DEAD 触发一次', () => {
+    const f4 = path.join(base, 'desc-noti4.json');
+    fs.writeFileSync(f4, JSON.stringify({
+      alias: 'smoke-noti4', root: proj, entry: 'noti4', mode: 'java',
+      // 存活 3s：确保 start-new 的身份采集窗口内进程仍在线（Windows 上 wrapper/logger 拉起较慢）
+      exe: process.execPath, args: ['-e', 'console.log("noti4-start"); setTimeout(() => process.exit(42), 3000)'], envRefs: [],
+      restartPolicy: 'on-failure', maxRestarts: 1, backoffMs: 300, onExit: notifyCmd,
+    }));
+    const s = expectOk(run(['start-new', '--desc', f4]));
+    let st = null;
+    for (let i = 0; i < 80; i++) {
+      st = run(['status', 'smoke-noti4']);
+      if (st.code === 0 && st.json?.data?.run?.restartState === 'DEAD') break;
+      sleep(250);
+    }
+    expectOk(st);
+    assert.equal(st.json.data.status, 'DEAD');
+    assert.equal(st.json.data.run.restartCount, 1, '重启次数应为 1（maxRestarts=1）');
+    const hits = readNotifies();
+    assert.equal(hits.length, 3, `监督型 DEAD 应触发一次回调（此前共 2 次），实际 ${hits.length}：${JSON.stringify(hits)}`);
+    assert.equal(hits[2].runId, s.data.runId, '回调 runId 应为监督 run');
+    assert.equal(hits[2].alias, 'smoke-noti4');
+    // 落账：DEAD 记录带 notifiedAt/notifyResult，重复查询不重复触发
+    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
+    assert(rt.current.notifiedAt, 'DEAD 记录缺少 notifiedAt');
+    assert.equal(rt.current.notifyResult, 'ok', `notifyResult 异常：${rt.current.notifyResult}`);
+    expectOk(run(['status', 'smoke-noti4']));
+    expectOk(run(['list']));
+    assert.equal(readNotifies().length, 3, 'DEAD 后重复查询重复触发了回调');
+  });
+
   lifecycle('文本模式人类可读输出抽查（status 含 port/状态）', () => {
     const r = run(['status', 'smoke'], { json: false });
     assert.equal(r.code, 0);

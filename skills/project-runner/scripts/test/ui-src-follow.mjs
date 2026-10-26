@@ -461,6 +461,14 @@ try {
     }
     assert(elFor('detailSummary').querySelectorAll('.hl-READY').length >= 1, '摘要栏缺少健康状态 pill');
   });
+
+  await check('健康总览：listening=null（未探测）不误渲染为“否”', async () => {
+    run(`healthByAlias = new Map([['ahis', { appId:'ahis', status:'RUNNING', state:'UNTESTED', expectedPort:8080, listening:null, readiness:{ state:'UNTESTED', configured:false, evidence:[] } }]])`);
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:8080, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:123, logPaths:{} } })`);
+    const text = elFor('detail').textContent;
+    assert(text.includes('监听 127.0.0.1:8080 → 未探测'), `listening=null 应显示未探测：${text}`);
+    assert(!text.includes('监听 127.0.0.1:8080 → 否'), `listening=null 不应显示为否：${text}`);
+  });
 } finally {
   child.kill();
   // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。

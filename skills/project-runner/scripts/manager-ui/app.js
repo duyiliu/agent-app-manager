@@ -75,7 +75,7 @@ function healthEvidenceLines(h) {
   if (!h || h.status !== 'RUNNING') return ['非 RUNNING：未做端口监听/就绪探测'];
   out.push(h.expectedPort == null
     ? '监听：未登记 expectedPort，无法 TCP 探测'
-    : `监听 127.0.0.1:${h.expectedPort} → ${h.listening ? '是' : '否'}`);
+    : `监听 127.0.0.1:${h.expectedPort} → ${h.listening == null ? '未探测' : h.listening ? '是' : '否'}`);
   const ev = h.readiness?.evidence ?? [];
   for (const e of ev) {
     if (e.kind === 'http') out.push(`HTTP ${e.status ?? '—'} ${e.url}${e.error ? ' · ' + e.error : ''}`);

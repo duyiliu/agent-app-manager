@@ -10,6 +10,7 @@ import { readRuntimeStrict, atomicWriteJson } from './lib/store.mjs';
 import { withLockAsync, withLogEvidenceLock } from './lib/locks.mjs';
 import { psProc } from './lib/probe.mjs';
 import { effectiveRestartSettings, planRestart, exitDescription } from './lib/restart.mjs';
+import { resolveOnExit, notifyEnv, runNotifyCommand } from './lib/notify.mjs';
 
 const [configPath] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -193,6 +194,48 @@ function exitCodeFrom(exit) {
   return exit.code ?? (exit.signal ? 1 : 0);
 }
 
+// onExit 通知钩子（#135）：监督型应用最终不再重启（不重启/clean-exit、重启耗尽 DEAD）
+// 时退出即为实例终态，与查询路径「首次发现已退出」语义一致，认领并执行一次通知。
+// BACKOFF（将自动重启）不通知；人为 stop/运行记录已切换在进入 applyExitPlan 前已返回，
+// 天然不触发。认领在应用锁内（原子落账 notifiedAt 保证单次），命令在锁外有界执行，
+// 结果按 runId+notifiedAt 复核后短锁补记；失败静默，不影响监督主流程。
+function claimExitNotify(cur) {
+  try {
+    const hook = resolveOnExit(home, appId);
+    if (!hook || cur.notifiedAt) return null;
+    cur.notifiedAt = new Date().toISOString();
+    // exit 证据可能仍在 log-exit 锁重试中未写入 cur.exit，回退到 lastExit 保证负载完整
+    const curForEnv = cur.exit ? cur : {
+      ...cur,
+      exit: cur.lastExit ? { code: cur.lastExit.code ?? null, signal: cur.lastExit.signal ?? null } : null,
+    };
+    return {
+      command: hook.command,
+      runId: cur.runId,
+      notifiedAt: cur.notifiedAt,
+      env: notifyEnv(appId, hook.app, curForEnv),
+    };
+  } catch { return null; }
+}
+
+async function runExitNotify(notify) {
+  if (!notify) return;
+  let result;
+  try {
+    result = runNotifyCommand(notify.command, notify.env, home);
+  } catch { return; }
+  try {
+    // await 落账后再 finalize：监督进程可能随即退出，fire-and-forget 会丢结果回写
+    await withLockAsync(home, appId, 'exit-notify', () => {
+      const rt3 = readRuntimeStrict(home, appId);
+      if (rt3?.current?.runId === notify.runId && rt3.current.notifiedAt === notify.notifiedAt) {
+        rt3.current.notifyResult = result;
+        atomicWriteJson(runtimeFile, rt3);
+      }
+    });
+  } catch { /* 结果留证失败不影响通知本身 */ }
+}
+
 function finalize(code) {
   if (finishing) return;
   finishing = true;
@@ -352,9 +395,10 @@ function applyExitPlan(cur, rt, exit, context) {
       ? `${label}（${desc}）；restartPolicy=on-failure 不重启正常退出`
       : `${label}（${desc}）；不自动重启：${plan.reason}`;
     appendRestartEvent(cur, { type: 'no-restart', reason: plan.reason });
+    const notify = claimExitNotify(cur);
     atomicWriteJson(runtimeFile, rt);
     supervisorLog(`${label}（${desc}），不自动重启：${plan.reason}`);
-    return { action: 'finalize', code: exitCodeFrom(exit) };
+    return { action: 'finalize', code: exitCodeFrom(exit), notify };
   }
   if (plan.action === 'dead') {
     cur.phase = 'DEAD';
@@ -364,9 +408,10 @@ function applyExitPlan(cur, rt, exit, context) {
     cur.nextRestartAt = null;
     cur.exitNote = `${label}（${desc}）；自动重启已达上限 ${plan.restartCount}/${settings.maxRestarts}，进入 DEAD`;
     appendRestartEvent(cur, { type: 'dead', reason: 'max-restarts', restartCount: plan.restartCount });
+    const notify = claimExitNotify(cur);
     atomicWriteJson(runtimeFile, rt);
     supervisorLog(`自动重启已达上限（${plan.restartCount}/${settings.maxRestarts}），进入 DEAD`);
-    return { action: 'finalize', code: exitCodeFrom(exit) };
+    return { action: 'finalize', code: exitCodeFrom(exit), notify };
   }
   const nextAt = new Date(Date.now() + plan.delayMs).toISOString();
   cur.phase = 'BACKOFF';
@@ -416,7 +461,10 @@ async function onTargetExit(exit) {
     return;
   }
   if (outcome.action === 'schedule') scheduleRestart(outcome.delayMs);
-  else finalize(outcome.code ?? exitCodeFrom(exit));
+  else {
+    await runExitNotify(outcome.notify);
+    finalize(outcome.code ?? exitCodeFrom(exit));
+  }
 }
 
 // BACKOFF 等待按小步轮询：人为 stop/start/remove 改写 phase 或 runId 后，
@@ -558,8 +606,10 @@ async function performRestart() {
   }
 
   if (outcome.action === 'schedule') scheduleRestart(outcome.delayMs);
-  else if (outcome.action === 'finalize') finalize(outcome.code ?? 1);
-  else if (outcome.action === 'running') {
+  else if (outcome.action === 'finalize') {
+    await runExitNotify(outcome.notify);
+    finalize(outcome.code ?? 1);
+  } else if (outcome.action === 'running') {
     // 成功重启：继续持有 logger/监督进程。目标若在身份采集完成前已退出，
     // deferredExit 存在，再按正常退出路径重新评估，避免停在伪 RUNNING。
     if (outcome.deferredExit) {
