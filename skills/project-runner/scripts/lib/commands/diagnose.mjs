@@ -560,6 +560,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       nextRestartAt: cur.nextRestartAt ?? null,
       lastExit: cur.lastExit ?? null,
       restartEvents: cur.restartEvents ?? [],
+      notifiedAt: cur.notifiedAt ?? null, notifyResult: cur.notifyResult ?? null,
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),

@@ -119,6 +119,9 @@ export function loadManagedDesc(file) {
   }
   if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
   validateRestartFields(d, errs);
+  // onExit 是本机可信的回调命令（Skill 写入的 desc 或 ~/.project-runner/config.json），
+  // 不来自任何远程/不可信来源；仅限制长度，命令内容按本机信任边界放行。
+  if (d.onExit != null && (typeof d.onExit !== 'string' || !d.onExit.trim() || d.onExit.length > 1000)) errs.push('onExit 必须是不超过 1000 字符的非空命令字符串');
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
     alias: d.alias,
@@ -141,6 +144,7 @@ export function loadManagedDesc(file) {
     readyUrl: d.readyUrl ?? null,
     logMaxBytes: d.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     ...normalizeRestartFields(d),
+    onExit: d.onExit ?? null,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
 }
@@ -353,6 +357,7 @@ export function upsertApp(reg, appId, desc) {
     existing.restartPolicy = desc.restartPolicy ?? 'never';
     existing.maxRestarts = desc.maxRestarts ?? null;
     existing.backoffMs = desc.backoffMs ?? null;
+    existing.onExit = desc.onExit ?? null;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
     existing.updatedAt = now;
@@ -368,6 +373,7 @@ export function upsertApp(reg, appId, desc) {
     readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     restartPolicy: desc.restartPolicy ?? 'never', maxRestarts: desc.maxRestarts ?? null,
     backoffMs: desc.backoffMs ?? null,
+    onExit: desc.onExit ?? null,
     sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };
