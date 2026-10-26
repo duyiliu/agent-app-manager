@@ -41,7 +41,7 @@ function probeManagerUi(port) {
 }
 
 // 生命周期操作经 manager.mjs --json 子进程执行：stdout 是同一数据契约的 JSON。
-// 子进程退出码即 ManagerError exitCode（1-5），重构错误后 errorStatus 映射不变；
+// 子进程退出码即 ManagerError exitCode（1-6），重构错误后 errorStatus 映射不变；
 // 180s 超时兜底（CLI 前端 150s abort 通常先到），超时强杀子进程——中断的
 // start/stop 按既有语义留下 STARTING/UNKNOWN 未结证据，不静默伪造结果。
 function runLifecycleSubprocess(home, op, ref, ack) {
@@ -82,7 +82,7 @@ function runLifecycleSubprocess(home, op, ref, ack) {
         : baseMessage;
       const errObj = Object.assign(
         new Error(message),
-        { code: e2.code ?? 'LIFECYCLE_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 5 ? code : 4 },
+        { code: e2.code ?? 'LIFECYCLE_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 6 ? code : 4 },
       );
       if (e2.detail !== undefined) errObj.detail = e2.detail;
       reject(errObj);

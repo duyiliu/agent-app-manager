@@ -9,12 +9,18 @@ import { resolveAppId, writeRuntime, resolveUnresolvedRun, parseAckRunId } from 
 import { launchManaged, cleanupWrapper } from '../launch.mjs';
 import { prepareLaunchEnv } from '../env.mjs';
 import { parseNamed } from './common.mjs';
+import { parseReadyOptions, requireReadyEvidence, waitForReady, startReadyFields } from './diagnose.mjs';
 
 export async function cmdStartNew(ctx) {
-  const opts = parseNamed(ctx.rest, { '--desc': 'value', '--ack-unresolved': 'value', '--force': 'flag' });
+  const opts = parseNamed(ctx.rest, {
+    '--desc': 'value', '--ack-unresolved': 'value', '--force': 'flag',
+    '--wait-ready': 'flag', '--ready-timeout': 'value',
+  });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const readyOpts = parseReadyOptions(opts);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const desc = canonicalizeDesc(loadManagedDesc(opts.get('--desc')));
+  requireReadyEvidence(desc, readyOpts.waitReady); // 启动前拒绝，不产生任何进程或登记副作用
   const appId = computeAppId(desc.root, desc.entry);
   return withLockAsync(ctx.home, appId, 'start-new', async () => {
     // 已有受管实例在运行则拒绝（并发/重复启动只允许一份实例）
@@ -36,15 +42,20 @@ export async function cmdStartNew(ctx) {
       return a;
     });
     const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null, preparedEnv });
+    const readiness = readyOpts.waitReady
+      ? await waitForReady(ctx.home, app, cur, readyOpts.timeoutMs)
+      : null;
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       ...(cur.wrapperPid ? { wrapperPid: cur.wrapperPid } : {}),
-      readinessUntested: true, logPaths: cur.logPaths,
+      ...startReadyFields(readiness), logPaths: cur.logPaths,
       ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}),
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
-      note: '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
+      note: readiness
+        ? '已同步等待就绪：进程 RUNNING 且已有 READY 证据；证据不是业务功能验收'
+        : '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
     };
   });
 }
@@ -52,8 +63,12 @@ export async function cmdStartNew(ctx) {
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
 export async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--ack-unresolved': 'value', '--force': 'flag' });
+  const opts = parseNamed(ctx.rest.slice(1), {
+    '--ack-unresolved': 'value', '--force': 'flag',
+    '--wait-ready': 'flag', '--ready-timeout': 'value',
+  });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
+  const readyOpts = parseReadyOptions(opts);
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
@@ -62,6 +77,7 @@ export async function cmdStart(ctx, ref) {
     if (!app.exe && !app.command) {
       throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置；需 Skill 重新分析该项目并走 start-new`);
     }
+    requireReadyEvidence(app, readyOpts.waitReady); // 先于任何写操作/启动
     // 结构性检查：路径/产物失效只报该应用，不做全盘扫描（AC02）
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = app.command ? null : resolveExe(app.exe, cwd);
@@ -84,14 +100,19 @@ export async function cmdStart(ctx, ref) {
       return a;
     });
     const cur = await launchManaged(ctx.home, appId, appForLaunch, { abandonRunId: abandon?.runId ?? null, preparedEnv });
+    const readiness = readyOpts.waitReady
+      ? await waitForReady(ctx.home, appForLaunch, cur, readyOpts.timeoutMs)
+      : null;
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
-      readinessUntested: true, logPaths: cur.logPaths,
+      ...startReadyFields(readiness), logPaths: cur.logPaths,
       ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}),
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
-      note: '复用已保存启动配置；进程存活不等于业务就绪',
+      note: readiness
+        ? '复用已保存启动配置并同步等待就绪；READY 证据不是业务功能验收'
+        : '复用已保存启动配置；进程存活不等于业务就绪',
     };
   });
 }
@@ -301,14 +322,19 @@ export function cmdStop(ctx, ref) {
 export async function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
   // --tree/--grace 透传给停旧实例那一步：等价于 stop --tree/--grace + start 的组合。
-  const opts = parseNamed(ctx.rest.slice(1), { '--force': 'flag', '--tree': 'flag', '--grace': 'value' });
+  const opts = parseNamed(ctx.rest.slice(1), {
+    '--force': 'flag', '--tree': 'flag', '--grace': 'value',
+    '--wait-ready': 'flag', '--ready-timeout': 'value',
+  });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const graceMs = parseGraceMs(opts);
+  const readyOpts = parseReadyOptions(opts);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
   return withLockAsync(ctx.home, appId, 'restart', async () => {
     const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
+    requireReadyEvidence(app, readyOpts.waitReady); // 必须先校验：否则会先停旧实例再报用法错误
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
     const cwd = realpathOrConflict('cwd', app.cwd);
@@ -327,10 +353,15 @@ export async function cmdRestart(ctx, ref) {
       return a;
     });
     const cur = await launchManaged(ctx.home, appId, appForLaunch, { preparedEnv });
+    const readiness = readyOpts.waitReady
+      ? await waitForReady(ctx.home, appForLaunch, cur, readyOpts.timeoutMs)
+      : null;
     return {
       appId, alias: app.alias, stop: stopResult,
-      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths, ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}), ...(portEvidence ? { portEvidence } : {}) },
-      note: '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
+      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', ...startReadyFields(readiness), logPaths: cur.logPaths, ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}), ...(portEvidence ? { portEvidence } : {}) },
+      note: readiness
+        ? '已确认旧实例退出后启动新实例并同步等待就绪；READY 证据不是业务功能验收'
+        : '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
     };
   });
 }

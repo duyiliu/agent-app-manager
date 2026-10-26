@@ -8,6 +8,9 @@ import { usageError } from '../errors.mjs';
 import { verifyRun, verifyRuns, portOccupants, tcpListening, cacheVerifyResult, interpretVerifyResult } from '../probe.mjs';
 import { resolveAppId, statusWithFacts, exitSummary } from '../runtime.mjs';
 import { readTailLines, MAX_LOG_LINES } from '../logs.mjs';
+import { decodeText } from '../decode.mjs';
+import { RUN_LOG_MAX_BYTES } from '../desc.mjs';
+import { readinessTimeoutError, conflictError } from '../errors.mjs';
 import { bootId } from '../proc-linux.mjs';
 import { displayEnv } from '../env.mjs';
 
@@ -194,9 +197,11 @@ const readyRe = (pattern) => {
   return r;
 };
 
-async function readinessCheck(home, app, cur) {
-  const evidence = [];
-  if (app.readyLogPattern && cur?.runId) {
+async function readinessCheck(home, app, cur, opts = {}) {
+  const evidence = [...(opts.logEvidence ?? [])];
+  // opts.logEvidence 由等待器提供时表示已从批次日志起点增量扫描，避免 status 的
+  // 5000 行尾部窗口漏掉早期标记；undefined 表示 status --ready 的既有尾读语义。
+  if (opts.logEvidence === undefined && app.readyLogPattern && cur?.runId) {
     const re = readyRe(app.readyLogPattern);
     const dir = path.join(home, 'logs', app.appId);
     for (const stream of ['stdout', 'stderr']) {
@@ -223,6 +228,130 @@ async function readinessCheck(home, app, cur) {
   const configured = Boolean(app.readyLogPattern || app.readyUrl);
   const state = !configured ? 'UNTESTED' : evidence.some((e) => !e.failed) ? 'READY' : 'NOT_READY';
   return { state, configured, evidence };
+}
+
+const READY_WAIT_DEFAULT_MS = 60000;
+const READY_WAIT_MAX_MS = 600000;
+const READY_POLL_MS = 250;
+
+// UTF-8 尾部可能被写入切分：只解码完整前缀，残余字节留到下次与新增内容一起解码。
+// 非法 UTF-8（如 GBK）返回整个缓冲区，交给 decodeText 的既有回退策略。
+function completeUtf8Prefix(buf) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  try { decoder.decode(buf); return buf.length; } catch { /* 可能只是尾部不完整 */ }
+  for (let cut = 1; cut <= 3 && cut <= buf.length; cut++) {
+    try {
+      decoder.decode(buf.subarray(0, buf.length - cut));
+      return buf.length - cut;
+    } catch { /* 继续尝试更短的尾部 */ }
+  }
+  return buf.length;
+}
+
+// 等待期日志扫描器：从本批次日志起点按字节增量读取（上限 logMaxBytes），
+// 跨 chunk 保留未完成行/未完成 UTF-8 字节，避免早期就绪标记落在 status 的
+// 5000 行窗口之外。
+function createReadyLogScanner(home, app, cur) {
+  const streams = ['stdout', 'stderr'];
+  const maxBytes = app.logMaxBytes ?? RUN_LOG_MAX_BYTES;
+  const re = app.readyLogPattern ? readyRe(app.readyLogPattern) : null;
+  const dir = path.join(home, 'logs', app.appId);
+  const state = new Map(streams.map((stream) => [stream, {
+    offset: 0, pending: '', carry: Buffer.alloc(0), matched: null,
+  }]));
+  return () => {
+    if (!re || !cur?.runId) return [];
+    const evidence = [];
+    for (const stream of streams) {
+      const st = state.get(stream);
+      if (st.matched) { evidence.push(st.matched); continue; }
+      const file = path.join(dir, `${cur.runId}.${stream}.log`);
+      let size;
+      try { size = fs.statSync(file).size; } catch { continue; }
+      // 轮转/截断后文件变小：从头重扫新文件，不留下跨轮转的偏移。
+      if (size < st.offset) { st.offset = 0; st.pending = ''; st.carry = Buffer.alloc(0); }
+      const end = Math.min(size, maxBytes);
+      let text = '';
+      if (end > st.offset) {
+        try {
+          const len = end - st.offset;
+          const buf = Buffer.alloc(len);
+          const fd = fs.openSync(file, 'r');
+          try { fs.readSync(fd, buf, 0, len, st.offset); } finally { fs.closeSync(fd); }
+          st.offset = end;
+          const combined = st.carry.length ? Buffer.concat([st.carry, buf]) : buf;
+          const cut = completeUtf8Prefix(combined);
+          text = decodeText(combined.subarray(0, cut));
+          st.carry = combined.subarray(cut);
+        } catch { continue; }
+      }
+      if (!text && !st.pending) continue;
+      const parts = `${st.pending}${text}`.split(/\r?\n/);
+      st.pending = parts.pop() ?? '';
+      const hit = parts.find((l) => re.test(l)) ?? (st.pending && re.test(st.pending) ? st.pending : null);
+      if (hit != null) {
+        st.matched = { kind: 'logPattern', stream, matched: hit.slice(0, 200) };
+        evidence.push(st.matched);
+      }
+    }
+    return evidence;
+  };
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// --wait-ready 参数：默认 60s；--ready-timeout 只在等待模式下有意义。
+export function parseReadyOptions(opts) {
+  const waitReady = opts.has('--wait-ready');
+  if (!waitReady && opts.has('--ready-timeout')) {
+    throw usageError('--ready-timeout 需要与 --wait-ready 一起使用');
+  }
+  let timeoutMs = READY_WAIT_DEFAULT_MS;
+  if (opts.has('--ready-timeout')) {
+    const n = Number(opts.get('--ready-timeout'));
+    if (!Number.isInteger(n) || n < 0 || n > READY_WAIT_MAX_MS) {
+      throw usageError(`--ready-timeout 需要 0-${READY_WAIT_MAX_MS} 的毫秒数`);
+    }
+    timeoutMs = n;
+  }
+  return { waitReady, timeoutMs };
+}
+
+export function requireReadyEvidence(app, waitReady) {
+  if (waitReady && !app.readyLogPattern && !app.readyUrl) {
+    throw usageError('--wait-ready 需要先为应用配置 readyLogPattern 或 readyUrl（否则无法判定业务就绪）');
+  }
+}
+
+// 同步等待就绪：进程提前退出立即失败；超时抛出 READY_TIMEOUT（退出码 6）并保持
+// runtime 的 RUNNING 记录不变，调用方可继续用 status --ready 核验。
+export async function waitForReady(home, app, cur, timeoutMs) {
+  const startedAt = Date.now();
+  const scanLog = createReadyLogScanner(home, app, cur);
+  let last = null;
+  for (;;) {
+    const v = verifyRun(cur);
+    if (!v.alive) {
+      throw conflictError('PROCESS_EXITED', `${app.alias} 在就绪前已退出（runId=${cur.runId}），停止等待`, {
+        runId: cur.runId, pid: cur.pid, status: 'STOPPED', timeoutMs, readiness: last,
+      });
+    }
+    last = await readinessCheck(home, app, cur, { logEvidence: scanLog() });
+    const waitedMs = Date.now() - startedAt;
+    if (last.state === 'READY') return { ...last, waitedMs };
+    if (waitedMs >= timeoutMs) {
+      throw readinessTimeoutError(`${app.alias} 在 ${timeoutMs}ms 内未就绪（runId=${cur.runId}）；进程仍 RUNNING，可用 status --ready 继续核验`, {
+        runId: cur.runId, pid: cur.pid, status: 'RUNNING', timeoutMs, waitedMs, readiness: last,
+      });
+    }
+    await delay(Math.max(1, Math.min(READY_POLL_MS, timeoutMs - waitedMs)));
+  }
+}
+
+export function startReadyFields(readiness) {
+  return readiness
+    ? { readinessUntested: false, readiness }
+    : { readinessUntested: true };
 }
 
 // 管理台健康总览（GET /api/health）：对全部登记应用做一次只读评估。
