@@ -27,6 +27,23 @@ export function cmdLogs(ctx, ref) {
   if (src != null) {
     if (opts.has('--run') || opts.has('--stream')) throw usageError('--src 已指定日志源，不能与 --run/--stream 同时使用');
     const t = resolveSource(ctx.home, ref, src);
+    if (t.merged) {
+      if (opts.has('--follow')) throw usageError('合并日志源不支持 --follow；请在 manager ui 选择合并源跟随');
+      const parts = {};
+      for (const stream of ['stdout', 'stderr']) {
+        if (fs.existsSync(t.files[stream])) parts[stream] = readTailLines(t.files[stream], lines);
+      }
+      return {
+        appId: t.appId, alias: t.alias, src, runId: t.runId, stream: 'both', merged: true,
+        lines: mergeStreamTails(parts.stdout?.lines ?? [], parts.stderr?.lines ?? [])
+          .map(({ stream, line }) => (stream === 'stderr' ? `[err] ${line}` : line)),
+        truncated: { stdout: parts.stdout?.truncated ?? false, stderr: parts.stderr?.truncated ?? false },
+        skippedBytes: { stdout: parts.stdout?.skippedBytes ?? 0, stderr: parts.stderr?.skippedBytes ?? 0 },
+        files: t.files,
+        missingStreams: ['stdout', 'stderr'].filter((stream) => !parts[stream]),
+        orderNote: 'stdout/stderr 无统一时间戳；合并顺序为近似顺序',
+      };
+    }
     if (!fs.existsSync(t.file)) throw notFoundError(`日志不存在（src=${src}）`);
     if (opts.has('--follow')) {
       if (ctx.json) throw usageError('--follow 与 --json 不兼容');

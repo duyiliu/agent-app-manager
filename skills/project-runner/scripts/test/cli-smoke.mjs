@@ -215,6 +215,7 @@ await check('list-sources：受管应用列批次源，人类可读输出可用'
   assert.equal(ls.code, 0);
   assert(ls.text.includes('run:rkeep1.stdout'));
   assert(ls.text.includes('run:rold1.stdout'));
+  assert(ls.text.includes('merge:rkeep1'), '应列出双流合并源');
 });
 await check('--src hint:<hash> 与 ui 同源同内容', async () => {
   const ls = await run(['logs', 'unman', '--list-sources', '--json']);
@@ -241,6 +242,17 @@ await check('--src run:<历史批次> 与轮转日志可读', async () => {
   const rotated = await run(['logs', 'ok', '--src', 'run:rkeep1.stdout.1', '--json']);
   assert.equal(rotated.code, 0);
   assert.deepEqual(rotated.json.data.lines, ['rotated keep1 stdout']);
+});
+await check('--src merge:<runId> 同时读取双流并给 stderr 加 [err] 前缀', async () => {
+  const r = await run(['logs', 'ok', '--src', 'merge:rkeep1', '--json']);
+  assert.equal(r.code, 0);
+  assert.equal(r.json.data.merged, true);
+  assert.equal(r.json.data.stream, 'both');
+  assert(r.json.data.lines.includes('keep1 stdout A'));
+  assert(r.json.data.lines.includes('[err] keep1 stderr E1'));
+  assert(r.json.data.orderNote.includes('近似'));
+  assert.equal(r.json.data.missingStreams.length, 0);
+  assert.equal((await run(['logs', 'ok', '--src', 'merge:rkeep1', '--follow'])).code, 1);
 });
 await check('--src 与 --lines 组合有界读取', async () => {
   const r = await run(['logs', 'ok', '--src', 'run:rkeep1.stdout', '--lines', '1', '--json']);

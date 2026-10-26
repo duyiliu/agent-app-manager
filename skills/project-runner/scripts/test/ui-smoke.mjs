@@ -228,6 +228,14 @@ try {
     assert(sources.some((s) => s.src === 'tmp:jrebel-local-20261020-100000.stdout.log'));
     assert(sources.some((s) => s.src === 'tmp:runner-local-20261021-100000.stderr.log'));
   });
+  await check('统一日志源含双流合并源（标注近似顺序）', () => {
+    const merged = sources.find((s) => s.src === 'merge:rtest1');
+    assert(merged, '缺少当前批次合并源');
+    assert.equal(merged.stream, 'both');
+    assert.equal(merged.merged, true);
+    assert(merged.label.includes('合并') && merged.label.includes('近似顺序'));
+    assert(sources.some((s) => s.src === 'merge:rold1'), '缺少历史批次合并源');
+  });
   const repSources = (await get('/api/sources?app=report')).json.data.sources;
   await check('非受管应用日志源=登记线索（hash 定位符）', () => assert.match(repSources[0].src, /^hint:[0-9a-f]{12}$/));
   const hintTail = (await get(`/api/tail?app=report&src=${encodeURIComponent(repSources[0].src)}`)).json.data;
@@ -275,6 +283,43 @@ try {
   const tail = (await get('/api/tail?app=his&run=rtest1&stream=stdout')).json.data;
   await check('tail 批次日志内容', () => assert(Buffer.from(tail.b64, 'base64').toString('utf8').includes('ERROR boom')));
   await check('非法 runId 返回 404', async () => assert.equal((await get('/api/tail?app=his&run=rnot-exist')).status, 404));
+
+  const mergedTailRes = await get('/api/tail?app=his&src=merge:rtest1');
+  const mergedTail = mergedTailRes.json.data;
+  await check('合并 tail 同时返回 stdout/stderr 双流与双 offset', () => {
+    assert.equal(mergedTailRes.status, 200);
+    assert.equal(mergedTail.merged, true);
+    assert.equal(mergedTail.stream, 'both');
+    assert(mergedTail.orderNote.includes('近似'));
+    assert.equal(mergedTail.streams.stdout.exists, true);
+    assert.equal(mergedTail.streams.stderr.exists, true);
+    assert.equal(mergedTail.streams.stdout.start, 0);
+    assert.equal(mergedTail.streams.stderr.start, 0);
+    assert(Buffer.from(mergedTail.streams.stdout.b64, 'base64').toString('utf8').includes('ERROR boom'));
+    assert(Buffer.from(mergedTail.streams.stderr.b64, 'base64').toString('utf8').includes('stderr line'));
+  });
+  await check('合并 tail 以双 offset 增量读取，不重复旧内容', async () => {
+    fs.appendFileSync(path.join(home, 'logs', 'ahis', 'rtest1.stdout.log'), 'later out\n');
+    fs.appendFileSync(path.join(home, 'logs', 'ahis', 'rtest1.stderr.log'), 'later err\n');
+    const d = (await get(`/api/tail?app=his&src=merge:rtest1&offset=${mergedTail.streams.stdout.offset},${mergedTail.streams.stderr.offset}`)).json.data;
+    const out = Buffer.from(d.streams.stdout.b64, 'base64').toString('utf8');
+    const err = Buffer.from(d.streams.stderr.b64, 'base64').toString('utf8');
+    assert(out.includes('later out') && !out.includes('ERROR boom'));
+    assert(err.includes('later err') && !err.includes('stderr line'));
+    assert.equal(d.streams.stdout.offset, fs.statSync(path.join(home, 'logs', 'ahis', 'rtest1.stdout.log')).size);
+    assert.equal(d.streams.stderr.offset, fs.statSync(path.join(home, 'logs', 'ahis', 'rtest1.stderr.log')).size);
+  });
+  await check('合并 tail 单侧截断/轮转回退到新文件起始', async () => {
+    const stdoutFile = path.join(home, 'logs', 'ahis', 'rtest1.stdout.log');
+    const stderrFile = path.join(home, 'logs', 'ahis', 'rtest1.stderr.log');
+    const outOffset = fs.statSync(stdoutFile).size;
+    const errOffset = fs.statSync(stderrFile).size;
+    fs.writeFileSync(stderrFile, 'after rotate\n');
+    const d = (await get(`/api/tail?app=his&src=merge:rtest1&offset=${outOffset},${errOffset}`)).json.data;
+    assert.equal(d.streams.stderr.start, 0, '截断后 stderr 应从新文件起始读取');
+    assert(Buffer.from(d.streams.stderr.b64, 'base64').toString('utf8').includes('after rotate'));
+    assert.equal(d.streams.stdout.start, outOffset, '未轮转的 stdout 保持原 offset');
+  });
 
   const repTail = await get('/api/tail?app=report');
   await check('非受管 tail 报错给出线索（404）', () => {

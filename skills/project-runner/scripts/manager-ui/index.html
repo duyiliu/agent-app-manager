@@ -1286,9 +1286,30 @@ function selectApp(alias) {
 
 const MAX_LINES = 8000;
 const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:/;
-const classify = t => errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
+const isErrLine = (t) => t.startsWith('[err] ');
+// 合并源行序：两流无统一时间戳，按本批新行在各自流中的相对位置交错。
+// 只保证流内顺序稳定、结果确定，不冒充精确时间序（源标签与 meta 同步标注）。
+function mergeApprox(stdoutLines, stderrLines) {
+  const out = [];
+  let i = 0, j = 0;
+  while (i < stdoutLines.length || j < stderrLines.length) {
+    if (j >= stderrLines.length || (i < stdoutLines.length && (i + 1) / stdoutLines.length <= (j + 1) / stderrLines.length)) out.push(stdoutLines[i++]);
+    else out.push(stderrLines[j++]);
+  }
+  return out;
+}
+const isMergedSrc = (src) => typeof src === 'string' && src.startsWith('merge:');
+const newMergedTails = () => ({
+  offsets: { stdout: -1, stderr: -1 },
+  fileIds: { stdout: null, stderr: null },
+  pending: { stdout: '', stderr: '' },
+  decoders: { stdout: new TextDecoder('utf-8'), stderr: new TextDecoder('utf-8') },
+  encodings: { stdout: 'utf-8', stderr: 'utf-8' },
+});
+const classify = t => isErrLine(t) ? 'err' : errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
   : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(t) ? 'sql' : '';
 let logSrc = null, logSrcLabel = '', logSrcWasCurrent = false, offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
+let logMerged = false, mergedTails = newMergedTails();
 let srcDead = false; // 当前源 404 已失效：停止每秒轮询风暴，手动刷新或换源可恢复
 let renderedId = 0, sourcesVersion = 0, sourcesController = null, sourcesBySrc = new Map();
 let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBusy = false;
@@ -1313,12 +1334,13 @@ function compileFilter() {
   }
 }
 function lineVisible(text) {
-  if (errorsOnly && !errorPattern.test(text)) return false;
+  if (errorsOnly && !isErrLine(text) && !errorPattern.test(text)) return false;
   return !filterRe || filterRe.test(text);
 }
 function visibleLines() { return lines.filter(l => lineVisible(l.text)); }
 function renderMeta() {
   let text = `${logSrcLabel || logFallbackLabel} · ${fmtSize(logSize)} · 缓存 ${lines.length} 行`;
+  if (logMerged) text += ' · 合并 stdout/stderr，顺序为近似顺序（无统一时间戳）';
   if (removed) text += ` · 已移除较早 ${removed} 行`;
   if (filterError) text += ` · 正则无效（${filterError}），已按未过滤显示`;
   else if (filterRe || errorsOnly) text += ` · 命中 ${visibleLines().length} 行`;
@@ -1332,6 +1354,7 @@ function logHint(text, error = false) {
 }
 function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
+  logMerged = isMergedSrc(logSrc); mergedTails = newMergedTails();
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true; srcDead = false;
   logSize = 0; logFallbackLabel = '日志'; renderedDomCount = 0;
   updateFollow();
@@ -1386,6 +1409,7 @@ function renderLines(force = false) {
 }
 async function pollTail() {
   if (fatal || (paused && !manualRefresh) || degrading || !selected || !logSrc || tailBusy || (srcDead && !manualRefresh)) return;
+  if (logMerged) return pollMergedTail();
   tailBusy = true;
   try {
     const d = await api(`/api/tail?app=${encodeURIComponent(selected)}&src=${encodeURIComponent(logSrc)}&offset=${offset}`);
@@ -1422,6 +1446,94 @@ async function pollTail() {
       // 源已失效：不再每秒重试（轮询风暴），提示并刷新源列表；手动刷新或换源可恢复。
       srcDead = true;
       logHint('日志文件不存在（可能已被清理，或该批次未产生该流输出）；已暂停此源的轮询，可另选源或点刷新重试。');
+      loadSources();
+      return;
+    }
+    handlePollError(e);
+  } finally { tailBusy = false; }
+}
+
+async function pollMergedTail() {
+  tailBusy = true;
+  try {
+    const st = mergedTails;
+    const initial = st.offsets.stdout < 0 || st.offsets.stderr < 0;
+    let d, streams, resetStreams;
+    // 文件被 rename+重建且新文件已长得比旧 offset 大时，首次响应会从旧 offset 读到新文件中段；
+    // 发现文件身份变化后把该流 offset 归零再取一次，确保从新文件起始继续（最多重试一次）。
+    for (let attempt = 0; ; attempt++) {
+      d = await api(`/api/tail?app=${encodeURIComponent(selected)}&src=${encodeURIComponent(logSrc)}&offset=${st.offsets.stdout},${st.offsets.stderr}`);
+      streams = d.streams ?? {};
+      resetStreams = ['stdout', 'stderr'].filter((s) => {
+        const cur = streams[s];
+        if (!cur) return false;
+        if (st.offsets[s] >= 0 && cur.start !== st.offsets[s]) return true;
+        // rename+重建式轮转：旧 offset 可能仍小于新文件大小，用文件身份补充识别
+        return !!(cur.exists && st.fileIds[s] && cur.fileId && cur.fileId !== st.fileIds[s]);
+      });
+      const reread = resetStreams.filter((s) => streams[s].exists && streams[s].fileId && st.fileIds[s]
+        && streams[s].fileId !== st.fileIds[s] && streams[s].start !== 0);
+      if (!reread.length || attempt >= 1) break;
+      for (const s of reread) st.offsets[s] = 0;
+    }
+    srcDead = false;
+    if (resetStreams.length) {
+      pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
+      lines = []; removed = 0;
+      for (const s of resetStreams) {
+        st.pending[s] = ''; st.encodings[s] = 'utf-8'; st.decoders[s] = new TextDecoder('utf-8');
+      }
+      boundary = `合并源中 ${resetStreams.join('/')} 已轮转或被截断，日志缓存已清空并从新文件位置继续；轮转前尾部可用 --src run:${d.runId}.${resetStreams[0]}.1 查看`;
+      renderLines(true);
+    } else if (initial) {
+      const loaded = ['stdout', 'stderr'].filter((s) => streams[s]?.exists && streams[s].start > 0);
+      const missing = ['stdout', 'stderr'].filter((s) => streams[s] && !streams[s].exists);
+      boundary = loaded.length
+        ? `已加载尾部 ${loaded.map((s) => `${s} ${fmtSize(streams[s].size - streams[s].start)}`).join(' / ')}，更早内容未加载`
+        : '从文件起始读取';
+      if (missing.length) boundary += `；${missing.join('/')} 暂无日志`;
+    }
+    const fresh = { stdout: [], stderr: [] };
+    for (const s of ['stdout', 'stderr']) {
+      const cur = streams[s];
+      if (!cur) continue;
+      if (!cur.exists) { st.offsets[s] = 0; st.fileIds[s] = null; continue; }
+      if (cur.encoding && cur.encoding !== st.encodings[s]) {
+        st.encodings[s] = cur.encoding;
+        st.decoders[s] = new TextDecoder(cur.encoding);
+        st.pending[s] = '';
+      }
+      if (cur.b64) {
+        const bytes = Uint8Array.from(atob(cur.b64), c => c.charCodeAt(0));
+        const text = st.pending[s] + st.decoders[s].decode(bytes, { stream: true });
+        const parts = text.split('\n');
+        st.pending[s] = parts.pop();
+        for (const raw of parts) {
+          const line = raw.replace(/\r$/, '');
+          fresh[s].push(s === 'stderr' ? `[err] ${line}` : line);
+        }
+      }
+      st.offsets[s] = cur.offset;
+      st.fileIds[s] = cur.fileId ?? null;
+    }
+    const added = mergeApprox(fresh.stdout, fresh.stderr);
+    if (added.length) {
+      for (const text of added) lines.push({ id: nextId++, text });
+      if (lines.length > MAX_LINES) {
+        const count = lines.length - MAX_LINES;
+        lines.splice(0, count);
+        removed += count;
+      }
+      renderLines();
+    }
+    logSize = (streams.stdout?.size ?? 0) + (streams.stderr?.size ?? 0);
+    logFallbackLabel = d.runId ? `${d.runId}.both` : '合并日志';
+    renderMeta();
+    conn('已连接 · ' + new Date().toLocaleTimeString());
+  } catch (e) {
+    if (e.status === 404) {
+      srcDead = true;
+      logHint('日志文件不存在（该批次 stdout/stderr 均不可读，可能已被清理）；已暂停此源的轮询，可另选源或点刷新重试。');
       loadSources();
       return;
     }

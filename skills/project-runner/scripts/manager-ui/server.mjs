@@ -107,6 +107,48 @@ function errorPayload(error, message) {
   return { schemaVersion: SCHEMA_VERSION, ok: false, error: payload };
 }
 
+// 单流 tail 读取：offset 缺失/非法/超前时回退到文件尾部窗口。
+// exists=false 表示该流文件尚未产生（合并源允许单侧缺失），其他读盘错误原样抛出。
+function readTailChunk(file, rawOffset) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (e) {
+    if (e.code === 'ENOENT') return { exists: false, start: 0, offset: 0, size: 0, encoding: 'utf-8', b64: '', fileId: null };
+    throw e;
+  }
+  const size = stat.size;
+  let offset = Number(rawOffset);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > size) offset = Math.max(0, size - TAIL_CHUNK);
+  const len = Math.min(size - offset, TAIL_CHUNK);
+  const buf = Buffer.alloc(len);
+  const fd = fs.openSync(file, 'r');
+  let read;
+  try {
+    read = fs.readSync(fd, buf, 0, len, offset);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const bytes = buf.subarray(0, read);
+  let encoding = 'utf-8';
+  let validUtf8 = false;
+  // Tail offsets/chunk boundaries may split a UTF-8 code point. Ignore only
+  // up to three boundary bytes while still strictly validating the payload.
+  for (let prefix = 0; prefix <= 3 && !validUtf8; prefix++) {
+    for (let suffix = 0; suffix <= 3 && prefix + suffix <= bytes.length; suffix++) {
+      try {
+        new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(prefix, bytes.length - suffix));
+        validUtf8 = true;
+        break;
+      } catch { /* retry after excluding a possible partial boundary code point */ }
+    }
+  }
+  if (!validUtf8) encoding = 'gbk';
+  // fileId 用于前端识别 rename+重建式轮转（新文件可能很快长得比旧 offset 更大，仅靠 size < offset 会漏判）。
+  const fileId = `${stat.dev}:${stat.ino}:${Math.round(stat.birthtimeMs ?? 0)}`;
+  return { exists: true, start: offset, offset: offset + read, size, encoding, b64: bytes.toString('base64'), fileId };
+}
+
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(data));
@@ -205,37 +247,31 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
           u.searchParams.get('app') || '',
           u.searchParams.get('run') || null,
           u.searchParams.get('stream') === 'stderr' ? 'stderr' : 'stdout');
-      if (!fs.existsSync(t.file)) throw fail(404, `日志不存在（${t.runId ? `runId=${t.runId}, ` : ''}stream=${t.stream ?? '?'}）`);
-      const size = fs.statSync(t.file).size;
-      let offset = Number(u.searchParams.get('offset'));
-      if (!Number.isSafeInteger(offset) || offset < 0 || offset > size) offset = Math.max(0, size - TAIL_CHUNK);
-      const len = Math.min(size - offset, TAIL_CHUNK);
-      const buf = Buffer.alloc(len);
-      const fd = fs.openSync(t.file, 'r');
-      let read;
-      try {
-        read = fs.readSync(fd, buf, 0, len, offset);
-      } finally {
-        fs.closeSync(fd);
+      if (t.merged) {
+        // 合并源：offset 参数为 stdout,stderr 双 offset，各自独立读取（前端同时维护双 decoder）。
+        // 单侧文件暂不存在时返回 exists=false，不使整个合并源 404；两侧都缺失才报日志不存在。
+        const raw = u.searchParams.get('offset');
+        const parts = raw == null ? [] : raw.split(',', 2);
+        const streams = {
+          stdout: readTailChunk(t.files.stdout, parts[0]),
+          stderr: readTailChunk(t.files.stderr, parts[1]),
+        };
+        if (!streams.stdout.exists && !streams.stderr.exists) throw fail(404, `日志不存在（runId=${t.runId}, stream=stdout/stderr）`);
+        return sendJson(res, 200, {
+          schemaVersion: SCHEMA_VERSION, ok: true,
+          data: {
+            appId: t.appId, alias: t.alias, runId: t.runId, stream: 'both', merged: true,
+            orderNote: 'stdout/stderr 无统一时间戳；合并顺序按各流尾部相对位置近似交错，不保证精确时间序',
+            streams,
+          },
+        });
       }
-      const bytes = buf.subarray(0, read);
-      let encoding = 'utf-8';
-      let validUtf8 = false;
-      // Tail offsets/chunk boundaries may split a UTF-8 code point. Ignore only
-      // up to three boundary bytes while still strictly validating the payload.
-      for (let prefix = 0; prefix <= 3 && !validUtf8; prefix++) {
-        for (let suffix = 0; suffix <= 3 && prefix + suffix <= bytes.length; suffix++) {
-          try {
-            new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(prefix, bytes.length - suffix));
-            validUtf8 = true;
-            break;
-          } catch { /* retry after excluding a possible partial boundary code point */ }
-        }
-      }
-      if (!validUtf8) encoding = 'gbk';
+      const chunk = readTailChunk(t.file, u.searchParams.get('offset'));
+      if (!chunk.exists) throw fail(404, `日志不存在（${t.runId ? `runId=${t.runId}, ` : ''}stream=${t.stream ?? '?'}）`);
+      const { exists, ...data } = chunk;
       return sendJson(res, 200, {
         schemaVersion: SCHEMA_VERSION, ok: true,
-        data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, start: offset, offset: offset + read, size, encoding, b64: bytes.toString('base64') },
+        data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, ...data },
       });
     }
     throw fail(404, '接口不存在');

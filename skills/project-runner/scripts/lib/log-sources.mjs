@@ -67,7 +67,7 @@ function appRootOf(home, ref) {
 // 下标会错位读错文件；hash 定位与内容无关、与顺序无关，错位时明确报错而不是静默读错。
 const hintLocator = (hint) => `hint:${crypto.createHash('sha256').update(hint).digest('hex').slice(0, 12)}`;
 
-// 统一日志源列表：src 为不透明定位符（run:/hint:/tmp:），tail 时回传并重新校验
+// 统一日志源列表：src 为不透明定位符（run:/merge:/hint:/tmp:），tail 时回传并重新校验
 export function listSources(home, ref) {
   const { appId, app, rt } = appContext(home, ref);
   const curRunId = rt?.current?.runId ?? null;
@@ -84,13 +84,27 @@ export function listSources(home, ref) {
     } catch { /* 文件可能刚被清理或不可读，跳过 */ }
   };
   const runDir = path.join(home, 'logs', appId);
+  const mergeRunIds = new Set();
   if (fs.existsSync(runDir)) {
     for (const name of fs.readdirSync(runDir)) {
       const m = RUN_LOG_FILE_RE.exec(name);
       if (!m) continue;
       const rotated = name.endsWith('.log.1');
+      if (!rotated) mergeRunIds.add(m[1]);
       push({ src: `run:${m[1]}.${m[2]}${rotated ? '.1' : ''}`, kind: 'run', label: `${m[1]} · ${m[2]}${rotated ? ' · 轮转前' : ''}`, current: m[1] === curRunId, stream: m[2] }, path.join(runDir, name));
     }
+  }
+  // 合并源：同一批次 stdout/stderr 双流并读。只基于当前可跟随的 .log（不含 .log.1），
+  // 由前端同时维护双 offset/decoder；行序无统一时间戳，标签明确标注为近似顺序。
+  for (const runId of mergeRunIds) {
+    const files = ['stdout', 'stderr'].map((stream) => path.join(runDir, `${runId}.${stream}.log`));
+    const stats = files.map((file) => { try { const st = fs.statSync(file); return st.isFile() ? st : null; } catch { return null; } }).filter(Boolean);
+    if (!stats.length) continue;
+    sources.push({
+      src: `merge:${runId}`, kind: 'run', label: `${runId} · 合并 stdout+stderr（近似顺序）`,
+      current: runId === curRunId, stream: 'both', merged: true,
+      size: stats.reduce((n, st) => n + st.size, 0), mtimeMs: Math.round(Math.max(...stats.map((st) => st.mtimeMs))),
+    });
   }
   (rt?.current?.logHints ?? []).forEach((hint) => {
     if (typeof hint !== 'string' || !path.isAbsolute(hint)) return;
@@ -105,8 +119,9 @@ export function listSources(home, ref) {
       }
     }
   } catch { /* .tmp 缺失或为符号链接：无兼容日志 */ }
-  // 默认排序：当前运行 stdout > 当前运行其余 > 历史源按 mtime
-  const rank = (s) => (s.current ? (s.stream === 'stderr' ? 1 : 0) : 2);
+  // 默认排序：当前运行 stdout > 当前运行 stderr > 当前运行合并 > 历史源按 mtime；
+  // 合并源排在同一批次的单流之后，保持既有默认选择（当前 stdout）不变。
+  const rank = (s) => (s.current ? (s.merged ? 1.5 : s.stream === 'stderr' ? 1 : 0) : s.merged ? 2.5 : 2);
   sources.sort((a, b) => rank(a) - rank(b) || b.mtimeMs - a.mtimeMs || Number(b.stream === 'stdout') - Number(a.stream === 'stdout'));
   return { appId, alias: app.alias, sources };
 }
@@ -115,6 +130,23 @@ export function resolveSource(home, ref, src) {
   const { appId, app, rt } = appContext(home, ref);
   if (typeof src !== 'string' || src.length > 200) throw usageError('日志源标识无效');
   let m;
+  if ((m = /^merge:([a-z0-9][a-z0-9-]{0,47})$/.exec(src))) {
+    const runId = m[1];
+    const dir = path.join(home, 'logs', appId);
+    const files = {};
+    for (const stream of ['stdout', 'stderr']) {
+      const name = `${runId}.${stream}.log`;
+      try { files[stream] = uiResolveFile(dir, name); }
+      catch (e) {
+        // 双流可能只有一侧存在；缺失侧按不存在处理，另一侧仍可读
+        if (e.code === 'ENOENT') files[stream] = path.join(dir, name);
+        else throw e;
+      }
+    }
+    const present = ['stdout', 'stderr'].filter((stream) => fs.existsSync(files[stream]));
+    if (!present.length) throw notFoundError('日志不存在');
+    return { appId, alias: app.alias, runId, stream: 'both', merged: true, files, file: files[present[0]] };
+  }
   if ((m = /^run:([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)(\.1)?$/.exec(src))) {
     const suffix = m[3] ?? '';
     let file;
