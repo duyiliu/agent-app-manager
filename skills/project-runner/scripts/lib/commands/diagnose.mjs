@@ -9,6 +9,7 @@ import { verifyRun, verifyRuns, portOccupants, tcpListening, cacheVerifyResult, 
 import { resolveAppId, statusWithFacts } from '../runtime.mjs';
 import { readTailLines, MAX_LOG_LINES } from '../logs.mjs';
 import { bootId } from '../proc-linux.mjs';
+import { displayEnv } from '../env.mjs';
 
 export function portDiagnosis(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw usageError('port 需要 1-65535 的整数');
@@ -175,12 +176,6 @@ function extractJrebelEvidence(home, appId, cur) {
     reloadingSqlMapsCount: matching(/Reloading SQL maps/i).length,
     note: '仅引用当前批次日志原文；banner 不代表许可有效，日志证据不是热加载成功证明',
   };
-}
-
-function displayEnv(env = {}) {
-  return Object.fromEntries(Object.entries(env).map(([name, value]) => [
-    name, value.length > 120 ? `${value.slice(0, 120)}… (截断)` : value,
-  ]));
 }
 
 // 就绪证据评估：desc 可选 readyLogPattern（当前批次 stdout/stderr 正则）与 readyUrl

@@ -7,6 +7,7 @@ import { psProc, verifyRun, listDescendants, portConflict, TERMINATE_WAIT_MS, in
 import { withLock, withLockAsync, withRegistryLock } from '../locks.mjs';
 import { resolveAppId, writeRuntime, resolveUnresolvedRun, parseAckRunId } from '../runtime.mjs';
 import { launchManaged, cleanupWrapper } from '../launch.mjs';
+import { prepareLaunchEnv } from '../env.mjs';
 import { parseNamed } from './common.mjs';
 
 export async function cmdStartNew(ctx) {
@@ -26,6 +27,7 @@ export async function cmdStartNew(ctx) {
     }
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
+    const preparedEnv = prepareLaunchEnv(desc);
     const portEvidence = portConflict(desc.expectedPort, opts.has('--force'));
     const app = withRegistryLock(ctx.home, 'start-new', () => {
       const reg = readRegistry(ctx.home);
@@ -33,12 +35,13 @@ export async function cmdStartNew(ctx) {
       atomicWriteJson(registryPath(ctx.home), reg);
       return a;
     });
-    const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null });
+    const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null, preparedEnv });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind,
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       ...(cur.wrapperPid ? { wrapperPid: cur.wrapperPid } : {}),
       readinessUntested: true, logPaths: cur.logPaths,
+      ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}),
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '进程存活不等于业务就绪；就绪与 JRebel/热加载验证按 SKILL 规程另行执行',
@@ -69,6 +72,7 @@ export async function cmdStart(ctx, ref) {
     }
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
+    const preparedEnv = prepareLaunchEnv({ ...app, cwd });
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
     const appForLaunch = withRegistryLock(ctx.home, 'start', () => {
       const reg = readRegistry(ctx.home);
@@ -79,11 +83,12 @@ export async function cmdStart(ctx, ref) {
       atomicWriteJson(registryPath(ctx.home), reg);
       return a;
     });
-    const cur = await launchManaged(ctx.home, appId, appForLaunch, { abandonRunId: abandon?.runId ?? null });
+    const cur = await launchManaged(ctx.home, appId, appForLaunch, { abandonRunId: abandon?.runId ?? null, preparedEnv });
     return {
       appId, alias: app.alias, entry: app.entry, mode: app.mode, kind: cur.kind, source: 'saved-config',
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       readinessUntested: true, logPaths: cur.logPaths,
+      ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}),
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: '复用已保存启动配置；进程存活不等于业务就绪',
@@ -299,6 +304,8 @@ export async function cmdRestart(ctx, ref) {
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
     const cwd = realpathOrConflict('cwd', app.cwd);
     const exe = app.command ? null : resolveExe(app.exe, cwd);
+    // 环境校验必须在停止旧实例之前：缺失 envRefs/envFile 不可读时不得先停后败。
+    const preparedEnv = prepareLaunchEnv({ ...app, cwd });
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
     const stopResult = stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }); // 必须确认退出才继续；抛错则中止，绝不先起后停
     const appForLaunch = withRegistryLock(ctx.home, 'restart', () => {
@@ -310,10 +317,10 @@ export async function cmdRestart(ctx, ref) {
       atomicWriteJson(registryPath(ctx.home), reg);
       return a;
     });
-    const cur = await launchManaged(ctx.home, appId, appForLaunch);
+    const cur = await launchManaged(ctx.home, appId, appForLaunch, { preparedEnv });
     return {
       appId, alias: app.alias, stop: stopResult,
-      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths, ...(portEvidence ? { portEvidence } : {}) },
+      start: { runId: cur.runId, pid: cur.pid, status: 'RUNNING', readinessUntested: true, logPaths: cur.logPaths, ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}), ...(portEvidence ? { portEvidence } : {}) },
       note: '已确认旧实例退出后启动新实例；进程存活不等于业务就绪',
     };
   });

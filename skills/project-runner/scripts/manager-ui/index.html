@@ -1119,6 +1119,8 @@ function renderDetail(d) {
   kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
   kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
   kvRow(grid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
+  const envRows = Object.entries(d.env ?? {});
+  kvRow(grid, '环境变量', envRows.length ? envRows.map(([k, v]) => `${k}=${v}`).join('\n') : null, 'dim');
   kvRow(grid, 'stdout', run?.logPaths?.stdout);
   kvRow(grid, 'stderr', run?.logPaths?.stderr);
   kvRow(grid, '日志线索', run?.logHints?.length ? run.logHints.join('\n') : null, 'dim');
@@ -1200,6 +1202,14 @@ async function diagnosePort(alias, port, auto = false) {
   }
   if (selected === alias) rerenderDetail();
 }
+function lifecycleEnvWarning(r) {
+  const msg = r?.envWarning ?? r?.start?.envWarning;
+  if (msg) return msg;
+  const names = r?.envWarnings ?? r?.start?.envWarnings ?? [];
+  return names.length
+    ? `env 中疑似机密字面值：${names.join(', ')}（非阻断）；请改用 envRefs/envFile 提供`
+    : null;
+}
 async function doLifecycle(alias, op, extra = '') {
   if (lifecycleBusy || !alias) return;
   lifecycleBusy = true;
@@ -1213,7 +1223,8 @@ async function doLifecycle(alias, op, extra = '') {
     const pid = r.pid ?? r.start?.pid;
     if (lastLifecycleError?.alias === alias) lastLifecycleError = null;
     if (portDiag?.alias === alias && portDiag.auto) portDiag = null;
-    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}`, false);
+    const envWarning = lifecycleEnvWarning(r);
+    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${envWarning ? ` · 警告：${envWarning}` : ''}`, Boolean(envWarning));
   } catch (e) {
     lastLifecycleError = { alias, op, code: e.code, message: e.message, detail: e.detail };
     showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true);
