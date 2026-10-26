@@ -116,7 +116,7 @@ try {
   const page = await get('/');
   await check('管理台页面含过滤输入框与只看错误开关', () => {
     assert.equal(page.status, 200);
-    for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"', '/api/health', 'healthPill']) {
+    for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"']) {
       assert(page.body.includes(marker), `页面缺少 ${marker}`);
     }
   });
@@ -128,10 +128,15 @@ try {
     const r = await get('/', { headers: { 'Sec-Fetch-Dest': 'iframe' } });
     assert.equal(r.status, 403);
   });
-  await check('管理台页面内嵌脚本语法有效', () => {
-    const m = /<script>([\s\S]*?)<\/script>/.exec(page.body);
-    assert(m, '页面缺少内嵌脚本');
-    new vm.Script(m[1]); // 只编译不执行
+  await check('管理台页面引用外置 app.js 且语法有效', async () => {
+    assert(page.body.includes('<script src="app.js"></script>'), '页面缺少 app.js 引用');
+    const js = await get('/app.js');
+    assert.equal(js.status, 200);
+    assert.match(js.headers['content-type'] ?? '', /javascript/);
+    for (const marker of ['/api/health', 'healthPill']) {
+      assert(js.body.includes(marker), `app.js 缺少 ${marker}`);
+    }
+    new vm.Script(js.body); // 只编译不执行
   });
 
   await check('Host 不匹配返回 403', async () => assert.equal((await get('/api/apps', { host: 'evil.example' })).status, 403));
@@ -456,9 +461,10 @@ try {
       assert(r.json.data.envWarnings?.includes('DB_PASSWORD'), `缺少 env 告警：${r.body}`);
       assert(r.json.data.envWarning?.includes('envRefs') && r.json.data.envWarning.includes('envFile'), `告警未提示 envRefs/envFile：${r.body}`);
       assert(!r.body.includes('ui-lifecycle-secret-value'), 'lifecycle 响应回显了敏感 env 值');
-      // 页面脚本必须消费返回的告警并展示在成功提示中。
-      assert(page.body.includes('lifecycleEnvWarning(r)'), '页面未渲染 lifecycle env 告警');
-      assert(page.body.includes('· 警告：${envWarning}'), '页面成功提示未拼接 env 告警');
+      // 页面脚本必须消费返回的告警并展示在成功提示中（脚本自 #56 起外置为 app.js）。
+      const js = await get('/app.js');
+      assert(js.body.includes('lifecycleEnvWarning(r)'), '页面未渲染 lifecycle env 告警');
+      assert(js.body.includes('· 警告：${envWarning}'), '页面成功提示未拼接 env 告警');
     } finally {
       if (started) await get('/api/lifecycle?app=envwarn&op=stop', { method: 'POST', headers });
     }
@@ -557,7 +563,13 @@ try {
       if (cap.result === 'ok') killTree(pid);
     } catch { /* 已退出/探针不可用 */ }
   }
-  fs.rmSync(base, { recursive: true, force: true });
+  // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。
+  let cleaned = false;
+  for (let i = 0; i < 150; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); cleaned = true; break; }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+  }
+  if (!cleaned) console.warn(`[warn] 临时目录清理超时，已跳过（不影响断言）：${base}`);
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }
 console.log('\nui smoke ok');

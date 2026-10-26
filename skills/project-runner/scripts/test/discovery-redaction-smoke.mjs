@@ -75,7 +75,12 @@ async function cleanupApps(appIds, extraPids = []) {
 
 if (isWindows && !hasProcessProbe()) {
   console.log('discovery redaction smoke skipped: 缺 pwsh 7');
-  fs.rmSync(base, { recursive: true, force: true });
+  let cleaned = false;
+  for (let i = 0; i < 150; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); cleaned = true; break; }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+  }
+  if (!cleaned) console.warn(`[warn] 临时目录清理超时，已跳过（不影响断言）：${base}`);
   process.exit(0);
 }
 
