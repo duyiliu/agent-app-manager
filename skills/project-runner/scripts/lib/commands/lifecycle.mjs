@@ -64,7 +64,7 @@ export async function cmdStartNew(ctx) {
 export async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), {
-    '--ack-unresolved': 'value', '--force': 'flag',
+    '--ack-unresolved': 'value', '--force': 'flag', '--dry-run': 'flag',
     '--wait-ready': 'flag', '--ready-timeout': 'value',
   });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
@@ -72,6 +72,7 @@ export async function cmdStart(ctx, ref) {
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
+  if (opts.has('--dry-run')) return startDryRun(ctx, appId, reg0.apps[appId], opts, ackRunId);
   return withLockAsync(ctx.home, appId, 'start', async () => {
     const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) {
@@ -153,9 +154,7 @@ function terminateTreeSnapshot(snapshot) {
 // opts.tree：连带终止目标后代进程（#39）；opts.graceMs：先发优雅信号等待，超时仍存活再强杀。
 function stopCurrent(home, appId, app, rt, opts = {}) {
   const cur = rt.current;
-  if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供停止`);
-  if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
-  if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
+  assertStoppable(cur, app);
   if (cur.phase === 'BACKOFF') {
     // 自动重启等待中：没有存活目标。落 STOPPED 即取消监督重启（timer/attempt 会复核 phase）。
     cur.phase = 'STOPPED';
@@ -331,6 +330,77 @@ function parseGraceMs(opts) {
   return parseGraceMsValue(opts.get('--grace'));
 }
 
+// stop 与 restart --dry-run 共用的可停止性判定：错误码/文案保持一致。
+function assertStoppable(cur, app) {
+  if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供停止`);
+  if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
+  if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
+}
+
+// 只读启动预览：与 start 共用 desc/exe 解析、未结记录保护和端口预检，但不取锁、
+// 不写 registry/runtime、不 spawn。envRefs 只输出名称与是否命中，绝不回显值。
+function buildLaunchPlan(appId, app, { cwd, exe, portEvidence, abandon }) {
+  return {
+    appId, alias: app.alias, entry: app.entry, mode: app.mode,
+    kind: app.command ? 'command' : 'direct',
+    source: 'saved-config',
+    cwd, exe,
+    ...(app.command
+      ? { command: app.command, expectedImage: app.expectedImage ?? null, discoverTimeoutMs: app.discoverTimeoutMs ?? null }
+      : { args: app.args ?? [] }),
+    envRefs: (app.envRefs ?? []).map((name) => ({ name, present: name in process.env })),
+    envNames: Object.keys(app.env ?? {}),
+    expectedPort: app.expectedPort ?? null,
+    port: portEvidence
+      ? { checked: true, conflict: true, forced: !!portEvidence.forced, occupants: portEvidence.occupants, note: portEvidence.note }
+      : { checked: Number.isInteger(app.expectedPort), conflict: false },
+    ...(abandon ? { abandonRunId: abandon.runId } : {}),
+  };
+}
+
+function startDryRun(ctx, appId, app, opts, ackRunId) {
+  if (!app.exe && !app.command) {
+    throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置；需 Skill 重新分析该项目并走 start-new`);
+  }
+  // 与 cmdStart 相同的结构检查顺序：cwd/exe → 未结记录 → 端口预检。
+  // 不核验“已运行”状态：dry-run 只预览解析结果，实际 start 时仍会由锁内检查拒绝重复实例。
+  const cwd = realpathOrConflict('cwd', app.cwd);
+  const exe = app.command ? null : resolveExe(app.exe, cwd);
+  const rt = readRuntimeStrict(ctx.home, appId);
+  const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
+  const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
+  const cur = rt?.current ?? null;
+  return {
+    dryRun: true,
+    ...buildLaunchPlan(appId, app, { cwd, exe, portEvidence, abandon }),
+    ...(cur ? { currentRun: { runId: cur.runId, phase: cur.phase, managed: cur.managed, pid: cur.pid ?? null } } : {}),
+    note: 'dry-run：仅解析与只读检查；未获取锁、未写 registry/runtime、未启动进程。确认后去掉 --dry-run 执行',
+  };
+}
+
+function restartDryRun(ctx, appId, app, opts, graceMs) {
+  if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
+  const rt = readRuntimeStrict(ctx.home, appId);
+  if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
+  const cur = rt.current;
+  assertStoppable(cur, app);
+  const cwd = realpathOrConflict('cwd', app.cwd);
+  const exe = app.command ? null : resolveExe(app.exe, cwd);
+  const portEvidence = portConflict(app.expectedPort, opts.has('--force'), cur.pid);
+  return {
+    dryRun: true,
+    appId, alias: app.alias,
+    currentRun: { runId: cur.runId, phase: cur.phase, managed: cur.managed, pid: cur.pid ?? null },
+    stop: {
+      planned: true, expected: cur.phase === 'STOPPED' ? 'alreadyStopped' : 'stopped',
+      runId: cur.runId, phase: cur.phase, pid: cur.pid ?? null,
+      tree: opts.has('--tree'), graceMs,
+    },
+    start: buildLaunchPlan(appId, app, { cwd, exe, portEvidence }),
+    note: 'dry-run：仅解析与只读检查；未停止旧实例、未获取锁、未写 registry/runtime、未启动新进程。确认后去掉 --dry-run 执行',
+  };
+}
+
 export function cmdStop(ctx, ref) {
   if (!ref) throw usageError('stop 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), { '--tree': 'flag', '--grace': 'value' });
@@ -351,7 +421,7 @@ export async function cmdRestart(ctx, ref) {
   if (!ref) throw usageError('restart 需要 <alias|appId>');
   // --tree/--grace 透传给停旧实例那一步：等价于 stop --tree/--grace + start 的组合。
   const opts = parseNamed(ctx.rest.slice(1), {
-    '--force': 'flag', '--tree': 'flag', '--grace': 'value',
+    '--force': 'flag', '--tree': 'flag', '--grace': 'value', '--dry-run': 'flag',
     '--wait-ready': 'flag', '--ready-timeout': 'value',
   });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
@@ -359,6 +429,7 @@ export async function cmdRestart(ctx, ref) {
   const readyOpts = parseReadyOptions(opts);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
+  if (opts.has('--dry-run')) return restartDryRun(ctx, appId, reg0.apps[appId], opts, graceMs);
   return withLockAsync(ctx.home, appId, 'restart', async () => {
     const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) throw conflictError('CONFIG_INVALID', `${app.alias} 为非受管登记，无可复用启动配置`);
