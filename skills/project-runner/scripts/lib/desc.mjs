@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { usageError, conflictError } from './errors.mjs';
 import { decodeText } from './decode.mjs';
+import { validateRestartFields, normalizeRestartFields } from './restart.mjs';
 
 export const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 export const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
@@ -83,6 +84,7 @@ export function loadManagedDesc(file) {
     else { try { new URL(d.readyUrl); } catch { errs.push('readyUrl 不是合法 URL'); } }
   }
   if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
+  validateRestartFields(d, errs);
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
   return {
     alias: d.alias,
@@ -103,6 +105,7 @@ export function loadManagedDesc(file) {
     readyLogPattern: d.readyLogPattern ?? null,
     readyUrl: d.readyUrl ?? null,
     logMaxBytes: d.logMaxBytes ?? RUN_LOG_MAX_BYTES,
+    ...normalizeRestartFields(d),
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
   };
 }
@@ -310,6 +313,9 @@ export function upsertApp(reg, appId, desc) {
     existing.readyLogPattern = desc.readyLogPattern ?? null;
     existing.readyUrl = desc.readyUrl ?? null;
     existing.logMaxBytes = desc.logMaxBytes ?? RUN_LOG_MAX_BYTES;
+    existing.restartPolicy = desc.restartPolicy ?? 'never';
+    existing.maxRestarts = desc.maxRestarts ?? null;
+    existing.backoffMs = desc.backoffMs ?? null;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
     existing.updatedAt = now;
@@ -323,6 +329,8 @@ export function upsertApp(reg, appId, desc) {
     envFile: desc.envFile ?? null, env: desc.env ?? {},
     expectedPort: desc.expectedPort ?? null, readyLogPattern: desc.readyLogPattern ?? null,
     readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
+    restartPolicy: desc.restartPolicy ?? 'never', maxRestarts: desc.maxRestarts ?? null,
+    backoffMs: desc.backoffMs ?? null,
     sourceFingerprint: desc.sourceFingerprint ?? null,
     configRevision: 1, createdAt: now, updatedAt: now,
   };

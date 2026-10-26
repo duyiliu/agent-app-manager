@@ -301,6 +301,10 @@ aside {
 .pill.st-STARTING::before { background:var(--warn); box-shadow:0 0 6px rgba(251,191,36,.7) }
 .pill.st-UNKNOWN { color:#ffb9b9; border-color:rgba(248,113,113,.4); background:var(--danger-soft) }
 .pill.st-UNKNOWN::before { background:var(--danger); box-shadow:0 0 6px rgba(248,113,113,.7) }
+.pill.st-BACKOFF { color:#ffe099; border-color:rgba(251,191,36,.4); background:var(--warn-soft) }
+.pill.st-BACKOFF::before { background:var(--warn); box-shadow:0 0 6px rgba(251,191,36,.7) }
+.pill.st-DEAD { color:#ffb9b9; border-color:rgba(248,113,113,.4); background:var(--danger-soft) }
+.pill.st-DEAD::before { background:var(--danger); box-shadow:0 0 6px rgba(248,113,113,.7) }
 .pill.unmanaged { color:#c9b18f; border-color:rgba(201,177,143,.35); background:rgba(201,177,143,.08) }
 .pill.unmanaged::before { display:none }
 .pill.mode { color:var(--text-faint); font-weight:500 }
@@ -824,7 +828,7 @@ function portAnchor(port, title) {
 function renderApps() {
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
-  const rank = { RUNNING: 0, STARTING: 1, UNKNOWN: 2, STOPPED: 3 };
+  const rank = { RUNNING: 0, STARTING: 1, BACKOFF: 2, UNKNOWN: 3, DEAD: 4, STOPPED: 5 };
   const filtered = appsCache
     .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state].some(v => String(v ?? '').toLowerCase().includes(q)))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
@@ -1105,12 +1109,12 @@ function renderDetail(d) {
         ops.appendChild(b);
       };
       const cur = d.run;
-      const unresolved = cur && cur.managed !== false && !['RUNNING', 'STOPPED'].includes(cur.phase);
+      const unresolved = cur && cur.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(cur.phase);
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
-      mk('停止', 'stop', st === 'RUNNING', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）');
-      mk('重启', 'restart', st === 'RUNNING', '确认旧实例退出后启动新实例（同 CLI restart）');
+      mk('停止', 'stop', st === 'RUNNING' || st === 'BACKOFF', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）；BACKOFF 时取消排程的重启（同 CLI stop）');
+      mk('重启', 'restart', ['RUNNING', 'BACKOFF', 'DEAD'].includes(st), '确认旧实例退出后启动新实例（同 CLI restart）');
       if (unresolved) mk('ack 并启动', 'start', true, `放弃未结记录 ${cur.runId} 并重新启动（同 start --ack-unresolved）`, `&ack=${encodeURIComponent(cur.runId)}`);
-      mk('移除', 'remove', st === 'STOPPED', '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）');
+      mk('移除', 'remove', st === 'STOPPED' || st === 'DEAD', '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）');
       return ops;
     };
     head.appendChild(makeOps());
@@ -1143,7 +1147,7 @@ function renderDetail(d) {
   if (d.managed !== false) card.appendChild(lifecycleOptions());
 
   const run = d.run;
-  const needsAttention = run && run.managed !== false && !['RUNNING', 'STOPPED'].includes(run.phase);
+  const needsAttention = run && run.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(run.phase);
   if (needsAttention) {
     const cmd = `start ${d.alias} --ack-unresolved ${run.runId}`;
     const alert = el('div', 'alert');
@@ -1202,6 +1206,11 @@ function renderDetail(d) {
   kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
   kvRow(grid, 'runId', run?.runId);
   kvRow(grid, 'phase', run?.phase);
+  if (run?.restartPolicy && run.restartPolicy !== 'never') {
+    kvRow(grid, '重启策略', `${run.restartPolicy} · 已重启 ${run.restartCount ?? 0}/${run.maxRestarts ?? '?'} 次 · backoff ${run.backoffMs ?? '?'}ms`, run.restartState === 'DEAD' ? 'bad' : 'dim');
+    kvRow(grid, '下次重启', fmtTime(run?.nextRestartAt), 'dim');
+    kvRow(grid, '最近退出', run?.lastExit ? `${run.lastExit.code != null ? `code=${run.lastExit.code}` : ''}${run.lastExit.signal ? ` signal=${run.lastExit.signal}` : ''} · ${fmtTime(run.lastExit.at)}` : null, 'dim');
+  }
   kvRow(grid, '启动时间', fmtTime(run?.startedAt));
   kvRow(grid, '结束时间', fmtTime(run?.endedAt));
   const runExit = run?.exit;

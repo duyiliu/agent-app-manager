@@ -43,6 +43,9 @@ export function cmdRecordUnmanaged(ctx) {
       existing.command = null;
       existing.expectedImage = null;
       existing.discoverTimeoutMs = null;
+      existing.restartPolicy = 'never';
+      existing.maxRestarts = null;
+      existing.backoffMs = null;
       existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
       existing.updatedAt = now;
     } else {
@@ -50,6 +53,7 @@ export function cmdRecordUnmanaged(ctx) {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
         cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
         exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
+        restartPolicy: 'never', maxRestarts: null, backoffMs: null,
         envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
       };
@@ -97,12 +101,28 @@ export function cmdRemove(ctx, ref) {
     if (rt && rt.current && rt.current.managed) {
       const st = computeStatus(ctx.home, appId, rt);
       if (st.writeback && rt.current) writeRuntime(ctx.home, appId, rt); // RUNNING→STOPPED 按 OS 事实落账（已在应用锁内）
+      if (st.status === 'BACKOFF') {
+        // 移除登记前先取消监督重启，避免 registry 删除后 timer 又把进程拉起。
+        rt.current.phase = 'STOPPED';
+        rt.current.stopRequested = true;
+        rt.current.endedAt = new Date().toISOString();
+        rt.current.exitNote = '人为 remove：已取消 BACKOFF 中的自动重启';
+        rt.current.restartState = null;
+        rt.current.nextRestartAt = null;
+        writeRuntime(ctx.home, appId, rt);
+      } else if (st.status === 'STOPPED' || st.status === 'DEAD') {
+        // 即使是 status 刚写回的 STOPPED，也显式压制可能尚未处理的监督重启。
+        if (!rt.current.stopRequested) {
+          rt.current.stopRequested = true;
+          writeRuntime(ctx.home, appId, rt);
+        }
+      }
       if (st.status === 'RUNNING') {
         throw conflictError('INSTANCE_RUNNING',
           `${app.alias} 有受管实例在运行（pid=${st.pid ?? rt.current.pid}），拒绝移除；先 stop 确认退出后再 remove`,
           { runId: rt.current.runId, pid: st.pid ?? rt.current.pid });
       }
-      if (st.status !== 'STOPPED') {
+      if (st.status !== 'STOPPED' && st.status !== 'DEAD' && st.status !== 'BACKOFF') {
         // STARTING/UNKNOWN/无法识别的 phase：未结记录，默认拒绝；显式 ack 且复核通过才归档旧账
         const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
         if (abandon) {
@@ -111,7 +131,7 @@ export function cmdRemove(ctx, ref) {
           abandonedRunId = abandon.runId;
         }
       } else if (ackRunId) {
-        // 已确认 STOPPED 的记录没有可 ack 的未结旧账：与 start 同一 ACK_MISMATCH 语义
+        // 已确认 STOPPED/DEAD（或刚取消 BACKOFF）的记录没有可 ack 的未结旧账
         throw conflictError('ACK_MISMATCH',
           `当前没有 STARTING/UNKNOWN 未结记录，--ack-unresolved=${ackRunId} 不适用；请去掉该参数`,
           { ackRunId, current: { runId: rt.current.runId, phase: rt.current.phase, managed: rt.current.managed } });

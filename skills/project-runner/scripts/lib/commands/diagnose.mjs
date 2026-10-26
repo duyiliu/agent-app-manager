@@ -13,6 +13,7 @@ import { RUN_LOG_MAX_BYTES } from '../desc.mjs';
 import { readinessTimeoutError, conflictError } from '../errors.mjs';
 import { bootId } from '../proc-linux.mjs';
 import { displayEnv } from '../env.mjs';
+import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from '../restart.mjs';
 
 // 实际监听端口去重排序：同一端口可能在 0.0.0.0 与 :: 各有一条监听记录。
 function uniqueListeningPorts(entries) {
@@ -167,6 +168,9 @@ export function cmdList(ctx) {
       status: st.status, managed: st.managed ?? (current?.managed ?? null),
       pid: st.status === 'RUNNING' ? (st.pid ?? current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
+      restartPolicy: app.restartPolicy ?? 'never',
+      restartState: current?.restartState ?? st.restartState ?? null,
+      restartCount: current?.restartCount ?? 0,
       exit: runExit, exitSummary: exitSummary(current),
       exitWatchError: current?.exitWatchError ?? null,
       exitNote: st.note ?? current?.exitNote ?? null,
@@ -508,6 +512,14 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
       exit: runExit, exitSummary: runExitSummary, wrapperExit: cur.wrapperExit ?? null,
       exitWatchError: cur.exitWatchError ?? null,
+      restartPolicy: cur.restartPolicy ?? app.restartPolicy ?? 'never',
+      maxRestarts: cur.maxRestarts ?? app.maxRestarts ?? DEFAULT_MAX_RESTARTS,
+      backoffMs: cur.backoffMs ?? app.backoffMs ?? DEFAULT_BACKOFF_MS,
+      restartCount: cur.restartCount ?? 0,
+      restartState: cur.restartState ?? null,
+      nextRestartAt: cur.nextRestartAt ?? null,
+      lastExit: cur.lastExit ?? null,
+      restartEvents: cur.restartEvents ?? [],
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),

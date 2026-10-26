@@ -171,6 +171,7 @@ STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核�
 | AC07 | 不改业务项目；普通 Java 模式无需 JRebel 配置；PR #5 单项目启动、JRebel 验证、只读日志查看（v2.2 起为 `manager ui`）、原 `.tmp` 日志继续可用 |
 | AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）、项目文件（路径白名单、拒绝穿越与符号链接）与端口诊断（`GET /api/port`，字段白名单、不暴露命令行），启停与移除仅 POST `/api/lifecycle`（与 CLI 同一实现，页面显式二次确认，跨站写一律拒绝，错误 detail 经白名单回传）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
 | AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；安全停止使用 pidfd 锚定进程身份，pidfd 不可用时明确拒绝；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
+| AC10 | `restartPolicy=never`（默认）行为不变；`on-failure` 下异常退出由 detached log-writer 在 `maxRestarts`/`backoffMs` 内有界重启并写回同一 run 记录，连续失败进入 `DEAD`（`BACKOFF`/`DEAD` 在 list/status/UI 可见）；人为 `stop`、正常 `code=0` 退出、`remove` 或换新 run 不触发重启；命令模式重启后重新发现并记录新目标身份 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
 
@@ -218,3 +219,6 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 - 其他：仓库根新增 `package.json`（engines + `npm test`/`npm run check` 聚合冒烟）；`decodeCmdOutput` 在无 GBK 解码器的 Node 上回退 lossy UTF-8。
 
 **v2.9（2026-10-25，实际监听端口，issue #107）**：新增跨平台 `listListeningPorts(pid)`（Windows `Get-NetTCPConnection -State Listen -OwningProcess`；Linux 解析 `/proc/<pid>/fd` 的 socket inode 与 `/proc/net/tcp{,6}` LISTEN 表），只返回本地地址与端口，不采集命令行。`status --probe` 新增 `actualPorts`（去重排序）与 `portMismatch`（配置 `expectedPort` 不在实际监听端口集合内时为 true；进程非 RUNNING 时不查询，避免 PID 复用误报旧端口）；`list` 以一次批量枚举为 RUNNING 应用附 `actualPorts`。`manager ui` 优先展示并链接实际端口，`expectedPort` 保留为启动前冲突检查与回退展示，端口漂移时给出显式提示。冒烟：`runtime-smoke` 覆盖「expectedPort 被外部占用、受管进程顺延到另一端口」以及停止后不再返回旧端口；`ui-src-follow` 覆盖列表/详情链接指向实际端口。
+
+**v2.10（2026-10-26，restartPolicy 监督重启，issue #109）**：desc 新增可选 `restartPolicy`（`never` 默认 / `on-failure`），`on-failure` 可配 `maxRestarts`（0–100，默认 3）与 `backoffMs`（0–600000，默认 1000）。manager 仍无常驻服务：命令模式与直连模式的 detached `log-writer` 同时承担看门狗——观察目标/Wrapper 退出、按退出码与信号判断是否异常、在同一 `runId` 的 runtime 记录中写入 `restartCount`/`restartState`/`nextRestartAt`/`lastExit`/`restartEvents`，等待 backoff 后按原启动描述重新拉起并重新采集目标身份（命令模式重新 discover）。异常退出后等待期 phase=`BACKOFF`，连续重启达到 `maxRestarts` 后 phase=`DEAD` 并停止监督；两者在 `list`/`status`/UI 可见。正常 `code=0` 退出、人为 `stop`/`remove`（写 `stopRequested`）以及运行记录被新 run 替换均不触发重启。`BACKOFF` 可被 `stop` 取消，`DEAD` 无存活进程可直接 `start`/`restart` 重新计数；监督失败仍保留证据，不伪造 RUNNING。回归：`runtime-smoke` 覆盖直连/命令模式自动重启、达上限 DEAD、人为 stop 与正常退出不重启，以及 desc 校验。
+

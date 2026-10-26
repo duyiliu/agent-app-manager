@@ -156,7 +156,28 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   if (!cur.managed) throw conflictError('NOT_MANAGED', `${app.alias} 为非受管记录，不提供停止`);
   if (cur.phase === 'STARTING') throw conflictError('IDENTITY_UNKNOWN', `启动阶段记录（runId=${cur.runId}），身份未采集完成，拒绝停止；证据已保留`);
   if (cur.phase === 'UNKNOWN') throw conflictError('IDENTITY_UNKNOWN', `状态 UNKNOWN（${cur.lastError ?? '原因不明'}），拒绝停止；人工核验后可重新 start`);
-  if (cur.phase === 'STOPPED') return { result: 'alreadyStopped', runId: cur.runId };
+  if (cur.phase === 'BACKOFF') {
+    // 自动重启等待中：没有存活目标。落 STOPPED 即取消监督重启（timer/attempt 会复核 phase）。
+    cur.phase = 'STOPPED';
+    cur.stopRequested = true;
+    cur.endedAt = new Date().toISOString();
+    cur.exitNote = '人为 stop：已取消 BACKOFF 中的自动重启';
+    cur.restartState = null;
+    cur.nextRestartAt = null;
+    writeRuntime(home, appId, rt);
+    return { result: 'stopped', runId: cur.runId, pid: cur.pid ?? null, restartCancelled: true };
+  }
+  if (cur.phase === 'DEAD') {
+    return { result: 'alreadyStopped', runId: cur.runId, pid: cur.pid ?? null, note: '重启策略已耗尽（DEAD），无自动重启进程' };
+  }
+  if (cur.phase === 'STOPPED') {
+    // status 查询可能先把崩溃落成 STOPPED；人为 stop 仍要显式压制待处理的自动重启。
+    if (!cur.stopRequested) {
+      cur.stopRequested = true;
+      writeRuntime(home, appId, rt);
+    }
+    return { result: 'alreadyStopped', runId: cur.runId };
+  }
   // --tree 必须在终止目标前快照后代（Linux 目标退出后会 reparent）。先核验目标身份再枚举，
   // 避免 PID 复用后把无关进程的后代当成目标后代；目标后续核验失败时不会触碰快照。
   let treeSnapshot = null;
@@ -167,6 +188,7 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   }
   const markStopped = (note, extra = {}, killTree = false, exitEvidence = null) => {
     cur.phase = 'STOPPED';
+    cur.stopRequested = true;
     cur.endedAt = new Date().toISOString();
     cur.exitNote = note;
     if (exitEvidence) cur.exit = { ...exitEvidence, at: cur.endedAt };
