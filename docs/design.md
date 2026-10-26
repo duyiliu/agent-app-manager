@@ -112,8 +112,8 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 统一入口为 `node <skill>/scripts/manager.mjs`（路径按安装位置解析，不要求 cd 到业务目录）。
 
 ~~~text
-list [--json]
-status <alias|appId|--tag <t>> [--probe] [--ready] [--resources] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；--resources 单次 RSS/CPU 采样（命令模式聚合目标后代）
+list [--watch [--interval <ms>]] [--json]
+status <alias|appId|--tag <t>> [--probe] [--ready] [--resources] [--watch [--interval <ms>]] [--json]  # --probe 附加本机 TCP 监听探测与 pid→实际监听端口（actualPorts/portMismatch）；--ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；--resources 单次 RSS/CPU 采样（命令模式聚合目标后代）；--watch 周期采样，JSON 模式为 NDJSON 帧流
 port <N> [--json]                        # 只读端口占用诊断（外部进程不接管、不停止）
 doctor [--json]                          # 只读自检（不修复）
 start <alias|appId|--tag <t>> [--force] [--ack-unresolved <runId>] [--json]   # 已登记应用，复用有效配置；expectedPort 被占用时 PORT_IN_USE 拒绝，--force 放行留证；--tag 批量启动
@@ -132,7 +132,7 @@ STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核�
 
 `list/status` 读取注册表，实时核验受管 JVM 身份；区分 RUNNING、STOPPED、STARTING、UNKNOWN，以及独立的 `managed` 状态。未注册项目不在列表；历史 Unmanaged 记录不得凭端口扫描宣称 STOPPED 或 RUNNING。输出项目别名、来源、状态、PID/端口（有证据才填写）、托管能力、日志位置。
 
-输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。资源用量为可选的单次快照：`status --resources` 与 `list` 的 `memoryBytes` 列、ui 应用表内存列均只做一次有界采样（Windows `GetProcessMemoryInfo`+`GetProcessTimes`，Linux `/proc/<pid>/status|stat`），不引入趋势图或常驻轮询；命令模式按目标+后代聚合，采样失败不影响状态与退出码。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
+输出默认简短，`--json` 采用单一稳定对象（schemaVersion、ok、command、data/error），明确退出码；stdout 不混入启动应用日志。`status`/`list` 支持 `--watch [--interval <ms>]`：默认 2000ms，允许 500-60000ms 的整数（越界为 usageError，`--interval` 不得脱离 `--watch` 单独使用）；`--json` 时一行一帧输出 NDJSON（`{ schemaVersion, ok, command, data }`），人类模式 TTY 清屏重绘、非 TTY 逐帧输出并注明；Ctrl+C 或 stdout 管道断开时退出，`--probe`/`--ready` 证据随每帧输出；watch 不持有应用锁，无 `--watch` 时输出与单次命令完全一致。日志仅读取受信运行记录内的路径，按批次/流区分，读取有大小/行数限制；`follow` 可中止。既有项目脚本在 `.tmp` 输出的日志**只关联原路径，不迁移/覆盖**；日志读取统一由 `manager ui`（网页，按登记路径与 `.tmp` 兼容扫描）与 `manager logs`（CLI；`--src`/`--list-sources` 复用与 ui 相同的统一日志源解析，覆盖受管批次、非受管线索与 `.tmp` 兼容日志；`--stream both` 合并双流输出，`--src` 与 `--run`/`--stream` 互斥）提供。资源用量为可选的单次快照：`status --resources` 与 `list` 的 `memoryBytes` 列、ui 应用表内存列均只做一次有界采样（Windows `GetProcessMemoryInfo`+`GetProcessTimes`，Linux `/proc/<pid>/status|stat`），不引入趋势图或常驻轮询；命令模式按目标+后代聚合，采样失败不影响状态与退出码。数据目录内的残留由 `prune` 有界回收：只删超出运行记录保留范围的批次日志、死锁回收残留与孤儿临时文件，绝不删 current 运行日志与 runtime/registry 证据，绝不触碰 home 之外的文件；运行记录损坏时按 DATA_* 契约整体拒绝。
 
 ## 5. 最小可靠性要求
 
@@ -173,6 +173,8 @@ STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核�
 | AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）、项目文件（路径白名单、拒绝穿越与符号链接）与端口诊断（`GET /api/port`，字段白名单、不暴露命令行），启停与移除仅 POST `/api/lifecycle`（与 CLI 同一实现，页面显式二次确认，跨站写一律拒绝，错误 detail 经白名单回传）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
 | AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；安全停止使用 pidfd 锚定进程身份，pidfd 不可用时明确拒绝；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
 | AC10 | `restartPolicy=never`（默认）行为不变；`on-failure` 下异常退出由 detached log-writer 在 `maxRestarts`/`backoffMs` 内有界重启并写回同一 run 记录，连续失败进入 `DEAD`（`BACKOFF`/`DEAD` 在 list/status/UI 可见）；人为 `stop`、正常 `code=0` 退出、`remove` 或换新 run 不触发重启；命令模式重启后重新发现并记录新目标身份 |
+=======
+| AC11 | `status <ref> --watch --json` 与 `list --watch --json` 输出可逐行消费的 NDJSON 帧流；`--interval` 越界为 usageError（默认 2000、下限 500、上限 60000）；Ctrl+C / stdout 管道断开干净退出且不残留锁；`--probe`/`--ready` 证据随帧输出；无 `--watch` 时输出与单次命令一致 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
 
@@ -225,3 +227,6 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 
 
 **v2.11（2026-10-26，资源用量可见性，issue #111）**：新增受管进程 RSS/CPU 单次采样，回应“内存膨胀只能自己开任务管理器对照 pid”的可观测性缺口。平台层：Windows 在 `ps/proc.ps1` 用 `GetProcessMemoryInfo` 取 WorkingSet/PagefileUsage、`GetProcessTimes` 两次计数算 CPU 利用率；Linux 读 `/proc/<pid>/status` 的 `VmRSS` 与 `/proc/<pid>/stat` 的 utime/stime，CLK_TCK 由 `getconf` 解析并缓存。接口层：`status <ref> --resources` 输出单次 `resources` 快照（scope=process|tree、rssBytes、privateBytes、cpuPercent、cpuTimeMs、逐进程明细）；`list` 新增 `memoryBytes`（另有 `cpuPercent`/`resourcesScope`），ui 应用表与详情卡展示内存列。命令模式（`kind=command`）按受管目标 + PPID 后代聚合，复用平台侧一次进程树快照，进程数上限 64；一次调用完成全部 pid 采样（Windows 仍只 1 次 pwsh）。边界：非 RUNNING 不采样；采样失败只降级为 `available:false`/`resourcesNote`，不改变状态、退出码，也不引入常驻轮询或趋势存储。
+=======
+
+**v2.12（2026-10-26，status/list 周期监控，issue #114）**：`status`/`list` 新增 `--watch [--interval <ms>]`。默认 2000ms，允许 500-60000ms 的整数，越界报 usageError（`--interval` 不得脱离 `--watch` 单独使用）。`--json` 模式输出 NDJSON 帧流（每行 `{ schemaVersion, ok, command, data }`，不做 pretty-print），便于 `jq -c`、`while read` 或 agent 条件等待；人类模式在 TTY 清屏重绘，非 TTY 退化为逐帧输出并在首行注明。`--probe`/`--ready` 的探测与就绪证据随每帧重新计算并输出。Ctrl+C 或 stdout 管道断开（EPIPE）时清理定时器并退出；watch 不持有应用锁，`status` 的退出落账仍在短锁内同步完成，不残留锁文件。无 `--watch` 时命令解析与输出保持原样。
