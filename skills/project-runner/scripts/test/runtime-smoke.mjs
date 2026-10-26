@@ -45,11 +45,12 @@ fs.writeFileSync(path.join(projAmb, 'srv.js'),
 fs.writeFileSync(path.join(projAmb, 'two.js'),
   'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1e3)"],{stdio:"ignore"});\nsetInterval(() => {}, 1000);\n', 'utf8');
 // #39 --tree 验收：命令模式目标 node 在发现 settle 之后 spawn 第二个 node 后代。
-// 默认 stop 应留后代存活；stop --tree 应两代都退出。延迟 spawn 避免被 discover 当成候选。
+// 默认 stop 应留后代存活；stop --tree 应两代都退出。延迟 spawn 避免被 discover 当成候选：
+// Windows 走 pwsh 采样，发现可能耗时数秒，10s 给慢机留足余量（4s 曾在 CI 上撞出 DISCOVERY_AMBIGUOUS）。
 fs.writeFileSync(path.join(projCmd, 'tree-parent.js'),
   'const{spawn}=require("node:child_process");\n'
   + 'console.log("tree-parent-ready");\n'
-  + 'setTimeout(()=>{const c=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"});c.unref();console.log("tree-child="+c.pid);},4000);\n'
+  + 'setTimeout(()=>{const c=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"});c.unref();console.log("tree-child="+c.pid);},10000);\n'
   + 'setInterval(()=>{},1000);\n', 'utf8');
 fs.writeFileSync(path.join(projPy, 'srv.py'),
   'import time\nprint("py-ready", flush=True)\nwhile True:\n    time.sleep(1)\n', 'utf8');
@@ -84,7 +85,9 @@ fs.writeFileSync(path.join(projRestart, 'clean.js'),
   'console.log("clean-start pid=" + process.pid);\nsetTimeout(() => { console.log("clean-exit"); process.exit(0); }, 1200);\n', 'utf8');
 fs.writeFileSync(path.join(projCmdRestart, 'cmd-crash.js'),
   'console.log("cmd-crash-start pid=" + process.pid);\n'
-  + 'setTimeout(() => { console.log("cmd-crash-exit pid=" + process.pid); process.exit(7); }, 6000);\n', 'utf8');
+  // 15s 后才崩溃：Windows 发现 + exit-watcher 就绪可能耗数秒，6s 会让目标在 watcher
+  // 就绪前退出（EXIT_WATCH_UNAVAILABLE），这不是产品缺陷而是夹具时机过紧。
+  + 'setTimeout(() => { console.log("cmd-crash-exit pid=" + process.pid); process.exit(7); }, 15000);\n', 'utf8');
 
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -424,7 +427,10 @@ try {
     // log-writer 不得把这个 wrapper 结果写成 target.exit。
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmddetach', root: projCmd, entry: 'detach', mode: 'node',
-      command: isWindows ? 'detach-wrapper.bat' : './detach-wrapper.sh', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
+      // 显式 .\ 相对路径：部分环境设置了 NoDefaultCurrentDirectoryInExePath=1
+      // （本机与 GitHub Windows runner 均有），cmd 不再搜索当前目录，裸文件名会报
+      // “不是内部或外部命令”，与产品行为无关。
+      command: isWindows ? '.\\detach-wrapper.bat' : './detach-wrapper.sh', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     if (r.code !== 0) strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
@@ -583,80 +589,102 @@ try {
   });
   await check('restartPolicy=on-failure：命令模式 wrapper 监督重启后代并进入 DEAD', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
-    const r = cli('start-new', '--desc', descFile({
-      alias: 'cmdrestart', root: projCmdRestart, mode: 'node',
-      command: 'node cmd-crash.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
-      restartPolicy: 'on-failure', maxRestarts: 1, backoffMs: 100,
-    }));
-    if (pwshMissing(r)) skip('缺 pwsh 7');
-    assert.equal(r.code, 0, r.text);
-    const firstPid = r.json.data.pid;
-    const firstWrapper = r.json.data.wrapperPid;
-    const dead = await waitStatus('cmdrestart', (d) => d.status === 'DEAD', 160);
-    assert(dead, '命令模式连续崩溃未进入 DEAD');
-    assert.equal(dead.run.restartCount, 1, `restartCount 异常：${dead.run.restartCount}`);
-    assert.notEqual(dead.run.pid, firstPid, '命令模式重启后目标 pid 未变化');
-    assert.notEqual(dead.run.wrapperPid, firstWrapper, '命令模式重启后 wrapper pid 未变化');
-    assert(dead.run.restartEvents?.some((e) => e.type === 'restarted'), 'restartEvents 缺少 restarted 事件');
-    assert(dead.run.restartEvents?.some((e) => e.type === 'dead'), 'restartEvents 缺少 dead 事件');
+    try {
+      const r = cli('start-new', '--desc', descFile({
+        alias: 'cmdrestart', root: projCmdRestart, mode: 'node',
+        command: 'node cmd-crash.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
+        restartPolicy: 'on-failure', maxRestarts: 1, backoffMs: 100,
+      }));
+      if (pwshMissing(r)) skip('缺 pwsh 7');
+      assert.equal(r.code, 0, r.text);
+      const firstPid = r.json.data.pid;
+      const firstWrapper = r.json.data.wrapperPid;
+      const dead = await waitStatus('cmdrestart', (d) => d.status === 'DEAD', 240);
+      assert(dead, '命令模式连续崩溃未进入 DEAD');
+      assert.equal(dead.run.restartCount, 1, `restartCount 异常：${dead.run.restartCount}`);
+      assert.notEqual(dead.run.pid, firstPid, '命令模式重启后目标 pid 未变化');
+      assert.notEqual(dead.run.wrapperPid, firstWrapper, '命令模式重启后 wrapper pid 未变化');
+      assert(dead.run.restartEvents?.some((e) => e.type === 'restarted'), 'restartEvents 缺少 restarted 事件');
+      assert(dead.run.restartEvents?.some((e) => e.type === 'dead'), 'restartEvents 缺少 dead 事件');
+    } finally {
+      // 启动/发现失败可能留下仍在运行的 wrapper 与后代；兜底清理，避免污染后续发现场景。
+      try { cli('stop', 'cmdrestart', '--tree'); } catch { /* best effort */ }
+    }
   });
   // ---------- stop --tree：命令模式 node 目标 + node 后代（#39） ----------
   await check('默认 stop 不触碰目标后代（存活留证）', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
-    const r = cli('start-new', '--desc', descFile({
-      alias: 'cmdtree', root: projCmd, entry: 'tree', mode: 'node',
-      command: 'node tree-parent.js', expectedImage: NODE_IMAGE,
-    }));
-    if (pwshMissing(r)) skip('缺 pwsh 7');
-    assert.equal(r.code, 0, r.text);
-    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
-    const childPid = await waitChildPid(rt.current.logPaths.stdout);
-    assert(childPid, '未从 stdout 日志读到 tree-child pid');
-    strayPids.push(childPid);
-    const childId = psProc('capture', { id: childPid });
-    assert.equal(childId.result, 'ok', `后代未存活：${JSON.stringify(childId)}`);
-    // 命令模式资源采样必须聚合目标 + 后代（tree），而不是只看受管目标自身。
-    const res = cli('status', 'cmdtree', '--resources').json.data.resources;
-    assert.equal(res?.available, true, JSON.stringify(res));
-    assert.equal(res.scope, 'tree');
-    assert(res.processCount >= 2, `tree 采样进程数不足：${JSON.stringify(res)}`);
-    const resPids = res.processes.map((p) => p.pid);
-    assert(resPids.includes(rt.current.pid), `未包含目标 ${rt.current.pid}：${resPids}`);
-    assert(resPids.includes(childPid), `未包含后代 ${childPid}：${resPids}`);
-    assert(Number.isFinite(res.rssBytes) && res.rssBytes > 0, `聚合 RSS 异常：${res.rssBytes}`);
-    const stop = cli('stop', 'cmdtree');
-    assert.equal(stop.code, 0, stop.text);
-    assert.equal(stop.json.data.result, 'stopped');
-    assert.ok(!stop.json.data.treeKilled?.length, '不带 --tree 不应返回 treeKilled 证据');
-    const cap = psProc('capture', { id: childPid });
-    assert.equal(cap.result, 'ok', `不带 --tree 时后代被误杀：${JSON.stringify(cap)}`);
-    assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
-    // 清理这一轮的后代，避免影响下一场景；按采集到的身份同句柄终止。
-    const cleaned = psProc('terminate', { id: childPid, creationFileTime: childId.creationFileTime, image: childId.image });
-    assert(['terminated', 'notfound', 'exited'].includes(cleaned.result), `后代清理失败：${JSON.stringify(cleaned)}`);
+    let childPid = null;
+    try {
+      const r = cli('start-new', '--desc', descFile({
+        alias: 'cmdtree', root: projCmd, entry: 'tree', mode: 'node',
+        command: 'node tree-parent.js', expectedImage: NODE_IMAGE,
+      }));
+      if (pwshMissing(r)) skip('缺 pwsh 7');
+      assert.equal(r.code, 0, r.text);
+      const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${r.json.data.appId}.json`), 'utf8'));
+      childPid = await waitChildPid(rt.current.logPaths.stdout);
+      assert(childPid, '未从 stdout 日志读到 tree-child pid');
+      strayPids.push(childPid);
+      const childId = psProc('capture', { id: childPid });
+      assert.equal(childId.result, 'ok', `后代未存活：${JSON.stringify(childId)}`);
+      // 命令模式资源采样必须聚合目标 + 后代（tree），而不是只看受管目标自身。
+      const res = cli('status', 'cmdtree', '--resources').json.data.resources;
+      assert.equal(res?.available, true, JSON.stringify(res));
+      assert.equal(res.scope, 'tree');
+      assert(res.processCount >= 2, `tree 采样进程数不足：${JSON.stringify(res)}`);
+      const resPids = res.processes.map((p) => p.pid);
+      assert(resPids.includes(rt.current.pid), `未包含目标 ${rt.current.pid}：${resPids}`);
+      assert(resPids.includes(childPid), `未包含后代 ${childPid}：${resPids}`);
+      assert(Number.isFinite(res.rssBytes) && res.rssBytes > 0, `聚合 RSS 异常：${res.rssBytes}`);
+      const stop = cli('stop', 'cmdtree');
+      assert.equal(stop.code, 0, stop.text);
+      assert.equal(stop.json.data.result, 'stopped');
+      assert.ok(!stop.json.data.treeKilled?.length, '不带 --tree 不应返回 treeKilled 证据');
+      const cap = psProc('capture', { id: childPid });
+      assert.equal(cap.result, 'ok', `不带 --tree 时后代被误杀：${JSON.stringify(cap)}`);
+      assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
+      // 清理这一轮的后代，避免影响下一场景；按采集到的身份同句柄终止。
+      const cleaned = psProc('terminate', { id: childPid, creationFileTime: childId.creationFileTime, image: childId.image });
+      assert(['terminated', 'notfound', 'exited'].includes(cleaned.result), `后代清理失败：${JSON.stringify(cleaned)}`);
+    } finally {
+      // 失败时 wrapper/后代可能仍在（DISCOVERY_AMBIGUOUS 会保留 wrapper），必须连带清理。
+      try { cli('stop', 'cmdtree', '--tree'); } catch { /* best effort */ }
+      if (childPid) {
+        try {
+          const cap = psProc('capture', { id: childPid });
+          if (cap.result === 'ok') psProc('terminate', { id: childPid, creationFileTime: cap.creationFileTime, image: cap.image });
+        } catch { /* best effort */ }
+      }
+    }
   });
   await check('stop --tree 连带终止目标与后代两代并留证', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
-    const rr = cli('restart', 'cmdtree');
-    assert.equal(rr.code, 0, rr.text);
-    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${rr.json.data.appId}.json`), 'utf8'));
-    const childPid = await waitChildPid(rt.current.logPaths.stdout);
-    assert(childPid, '重启后未从 stdout 日志读到 tree-child pid');
-    strayPids.push(childPid);
-    const childId = psProc('capture', { id: childPid });
-    assert.equal(childId.result, 'ok', `重启后后代未存活：${JSON.stringify(childId)}`);
-    const targetPid = rr.json.data.start.pid;
-    const stop = cli('stop', 'cmdtree', '--tree');
-    assert.equal(stop.code, 0, stop.text);
-    const killed = stop.json.data.treeKilled ?? [];
-    const entry = killed.find((k) => k.pid === childPid);
-    assert(entry, `treeKilled 未包含后代 ${childPid}：${JSON.stringify(stop.json.data)}`);
-    assert(entry.image, 'treeKilled 缺少后代映像证据');
-    for (const [label, pid] of [['目标', targetPid], ['后代', childPid]]) {
-      const cap = psProc('capture', { id: pid });
-      assert(cap.result === 'notfound' || cap.result === 'exited', `${label} ${pid} 仍存活：${JSON.stringify(cap)}`);
+    try {
+      const rr = cli('restart', 'cmdtree');
+      assert.equal(rr.code, 0, rr.text);
+      const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${rr.json.data.appId}.json`), 'utf8'));
+      const childPid = await waitChildPid(rt.current.logPaths.stdout);
+      assert(childPid, '重启后未从 stdout 日志读到 tree-child pid');
+      strayPids.push(childPid);
+      const childId = psProc('capture', { id: childPid });
+      assert.equal(childId.result, 'ok', `重启后后代未存活：${JSON.stringify(childId)}`);
+      const targetPid = rr.json.data.start.pid;
+      const stop = cli('stop', 'cmdtree', '--tree');
+      assert.equal(stop.code, 0, stop.text);
+      const killed = stop.json.data.treeKilled ?? [];
+      const entry = killed.find((k) => k.pid === childPid);
+      assert(entry, `treeKilled 未包含后代 ${childPid}：${JSON.stringify(stop.json.data)}`);
+      assert(entry.image, 'treeKilled 缺少后代映像证据');
+      for (const [label, pid] of [['目标', targetPid], ['后代', childPid]]) {
+        const cap = psProc('capture', { id: pid });
+        assert(cap.result === 'notfound' || cap.result === 'exited', `${label} ${pid} 仍存活：${JSON.stringify(cap)}`);
+      }
+      assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
+    } finally {
+      // restart 发现歧义时 wrapper 仍在运行；兜底 stop --tree 防止目标与后代残留。
+      try { cli('stop', 'cmdtree', '--tree'); } catch { /* best effort */ }
     }
-    assert.equal(cli('status', 'cmdtree').json.data.status, 'STOPPED');
   });
   // 回归：port 诊断单次调用给出占用者完整身份（与 capture 同源 image）
   await check('port 诊断：受管监听进程的 pid/身份与 status 一致', async () => {
