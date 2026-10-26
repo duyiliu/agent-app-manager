@@ -79,7 +79,7 @@ const get = (p, { method = 'GET', host, headers: extra } = {}) => new Promise((r
   const r = http.request(url, { method, headers }, (rs) => {
     let b = '';
     rs.on('data', (d) => { b += d; });
-    rs.on('end', () => res({ status: rs.statusCode, body: b, json: (() => { try { return JSON.parse(b); } catch { return null; } })() }));
+    rs.on('end', () => res({ status: rs.statusCode, headers: rs.headers, body: b, json: (() => { try { return JSON.parse(b); } catch { return null; } })() }));
   });
   r.on('error', rej);
   r.end();
@@ -113,6 +113,14 @@ try {
     for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"']) {
       assert(page.body.includes(marker), `页面缺少 ${marker}`);
     }
+  });
+  await check('管理台页面禁止被 iframe 嵌入（防点击劫持）', () => {
+    assert.equal(page.headers['x-frame-options'], 'DENY');
+    assert.match(page.headers['content-security-policy'] ?? '', /frame-ancestors 'none'/);
+  });
+  await check('Sec-Fetch-Dest: iframe 请求直接拒绝（403）', async () => {
+    const r = await get('/', { headers: { 'Sec-Fetch-Dest': 'iframe' } });
+    assert.equal(r.status, 403);
   });
   await check('管理台页面内嵌脚本语法有效', () => {
     const m = /<script>([\s\S]*?)<\/script>/.exec(page.body);
