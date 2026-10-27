@@ -186,6 +186,39 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   let appJsCache = null;
   const appJs = () => (appJsCache ??= fs.readFileSync(APP_JS_FILE));
 
+  // 采集接口单飞 + 短缓存：list/health 每次要 5-20s，而页面按 4s/15s 轮询，
+  // 不去重必然请求叠加（实测 /api/apps 从 8s 一路涨到 21s）。
+  // 采集在飞时后续请求复用同一个 Promise；刚出结果的短窗口内复用值。
+  // 失败不缓存，下次请求重新采集。
+  function singleFlight(fn, ttlMs) {
+    let at = 0, value, has = false, inflight = null;
+    return () => {
+      if (has && Date.now() - at < ttlMs) return Promise.resolve(value);
+      if (inflight) return inflight;
+      inflight = Promise.resolve()
+        .then(fn)
+        .then((v) => { value = v; at = Date.now(); has = true; return v; })
+        .finally(() => { inflight = null; });
+      return inflight;
+    };
+  }
+  const collectApps = singleFlight(() => api.list(), 1500);
+  const collectHealth = singleFlight(() => api.health(), 3000);
+  // status 按应用分别单飞：详情卡 4s 轮询，单次采集 3s 左右，去重避免叠加。
+  const statusFlights = new Map();
+  function collectStatus(ref) {
+    const hit = statusFlights.get(ref);
+    if (hit?.inflight) return hit.inflight;
+    if (hit && Date.now() - hit.at < 1500) return Promise.resolve(hit.value);
+    const entry = { at: 0, value: undefined, inflight: null };
+    entry.inflight = Promise.resolve()
+      .then(() => api.status(ref))
+      .then((v) => { entry.value = v; entry.at = Date.now(); return v; })
+      .finally(() => { entry.inflight = null; });
+    statusFlights.set(ref, entry);
+    return entry.inflight;
+  }
+
   async function route(res, u, method) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
       // 管理台无令牌，安全边界依赖「只允许本机用户直接访问」：禁止任何站点 iframe 嵌入，
@@ -227,13 +260,13 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { version: MANAGER_VERSION } });
     }
     if (u.pathname === '/api/apps') {
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...api.list(), home } });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...(await collectApps()), home } });
     }
     if (u.pathname === '/api/health') {
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.health() });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectHealth() });
     }
     if (u.pathname === '/api/status') {
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.status(u.searchParams.get('app') || '') });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectStatus(u.searchParams.get('app') || '') });
     }
     if (u.pathname === '/api/runs') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listRuns(u.searchParams.get('app') || '') });

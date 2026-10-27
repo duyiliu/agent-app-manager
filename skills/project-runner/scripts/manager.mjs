@@ -19,7 +19,7 @@ import { EXIT, SCHEMA_VERSION, MANAGER_VERSION, ManagerError } from './lib/const
 import { usageError } from './lib/errors.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
-  parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdStart, cmdStop, cmdRestart,
+  parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdHealth, cmdStart, cmdStop, cmdRestart,
   cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi, cmdCleanupWrapper,
   cmdStartByTags, cmdStopByTags, cmdRestartByTags, cmdStatusByTags,
 } from './lib/commands.mjs';
@@ -234,6 +234,11 @@ function renderHuman(command, data) {
       return [`端口 ${data.port}`, ...data.occupants.map((p) => `PID=${p.pid} process=${p.processName ?? '-'} path=${p.executablePath ?? '-'} started=${p.startedAt ?? '-'} identity=${p.identity?.result ?? 'unknown'}`), data.note].join('\n');
     case 'doctor':
       return JSON.stringify(data, null, 2);
+    case 'health':
+      return [
+        `health checkedAt=${data.checkedAt ?? '-'} total=${data.summary?.total ?? data.apps?.length ?? 0} running=${data.summary?.running ?? '-'}`,
+        ...(data.apps ?? []).map((a) => `  ${String(a.alias).padEnd(24)} status=${String(a.status).padEnd(8)} listening=${a.listening == null ? '-' : a.listening} ready=${a.state}`),
+      ].join('\n');
     case 'status':
       return [
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
@@ -403,6 +408,7 @@ function usageText() {
     '  status --tag <t> [--probe] [--ready]       按 tags 批量查询（逐条返回，单条失败不中断）',
     '  port <N>                           只读端口占用诊断（外部进程不接管、不停止）',
     '  doctor [--json]                    只读自检（不修复）',
+    '  health                             各应用进程状态/端口监听/就绪证据总览（只读；管理台同源接口）',
     '  detect --root <dir>                 只读扫描仓库并输出启动描述候选',
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] [--wait-ready [--ready-timeout <ms>]] [--dry-run]',
     '       用已保存配置启动（任意目录可用；--dry-run 只解析并打印启动计划，不取锁/不写 registry/runtime/不 spawn）',
@@ -515,6 +521,7 @@ async function main() {
     }
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
       case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;
+      case 'health': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdHealth(ctx); break;
       case 'detect': {
         const opts = parseNamed(ctx.rest, { '--root': 'value' });
         if (opts.positional.length || !opts.get('--root')) throw usageError('detect 需要 --root <dir>');

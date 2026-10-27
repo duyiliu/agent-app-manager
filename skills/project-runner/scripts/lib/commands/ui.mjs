@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { usageError, conflictError } from '../errors.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile } from '../log-sources.mjs';
 import { parseNamed } from './common.mjs';
-import { cmdList, cmdStatus, cmdDoctor, cmdHealth, portDiagnosis } from './diagnose.mjs';
+import { cmdDoctor, portDiagnosis } from './diagnose.mjs';
 import { parseGraceMsValue } from './lifecycle.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'manager.mjs');
@@ -96,6 +96,40 @@ function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = nu
   });
 }
 
+// 采集类命令（list/health）经 manager.mjs --json 子进程执行：
+// 二者内部用 spawnSync 调 pwsh 做全量进程/端口枚举，单次耗时 5-20s。
+// 在 ui 主进程里同步执行会冻结事件循环——连 /api/meta 这种零 IO 接口都要
+// 排队数秒，页面表现为「整体卡死」。下沉子进程后主进程只做 JSON 转交，
+// 事件循环始终可响应；再配合 server.mjs 的单飞+短缓存，避免请求叠加。
+function runManagerJson(home, args, { timeoutMs = 60000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [MANAGER_MJS, '--json', '--home', home, ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      reject(Object.assign(new Error(`${args[0]} 采集子进程超时（${timeoutMs}ms）已终止`), { code: 'COLLECT_TIMEOUT', exitCode: 4 }));
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(Object.assign(new Error(`manager 子进程拉起失败：${e.message}`), { code: 'COLLECT_SPAWN_FAILED', exitCode: 4 }));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      let j = null;
+      try { j = JSON.parse(out); } catch { /* stdout 非 JSON：走通用错误 */ }
+      if (j?.ok === true) return resolve(j.data ?? {});
+      const e2 = j?.error ?? {};
+      reject(Object.assign(
+        new Error(e2.message || err.trim() || `manager ${args[0]} 异常退出（code=${code}）`),
+        { code: e2.code ?? 'COLLECT_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 6 ? code : 4 },
+      ));
+    });
+  });
+}
+
 export async function cmdUi(ctx) {
   const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
@@ -111,9 +145,13 @@ export async function cmdUi(ctx) {
       port,
       open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
-        list: () => cmdList(ctx),
-        status: (ref) => cmdStatus(ctx, ref, false, false, true).then((data) => { delete data.portListening; delete data.portNote; return data; }),
-        health: () => cmdHealth(ctx),
+        // 这三项是重采集（每次 3 次全量 pwsh 枚举，3-20s），必须走子进程，
+        // 否则同步执行会阻塞 ui 事件循环（实测 /api/meta 也从 1ms 退化到 3-8s）。
+        list: () => runManagerJson(ctx.home, ['list']),
+        // UI 需要 actualPorts，CLI 侧对应 --probe（会顺带做 expectedPort 的 TCP 探测）。
+        status: (ref) => runManagerJson(ctx.home, ['status', ref, '--probe'], { timeoutMs: 30000 })
+          .then((data) => { delete data.portListening; delete data.portNote; return data; }),
+        health: () => runManagerJson(ctx.home, ['health'], { timeoutMs: 90000 }),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
         listSources: (ref) => listSources(ctx.home, ref),

@@ -74,7 +74,14 @@
 :root[data-theme="light"] .app-root { color:#93a2b5 }
 :root[data-theme="light"] .pill.st-RUNNING { color:#15803d; border-color:rgba(21,128,61,.4); background:rgba(21,128,61,.08) }
 :root[data-theme="light"] .pill.st-STARTING { color:#92610a; border-color:rgba(180,83,9,.4) }
-:root[data-theme="light"] .pill.st-UNKNOWN { color:#b91c1c; border-color:rgba(220,38,38,.4) }
+:root[data-theme="light"] .pill.st-UNKNOWN,
+:root[data-theme="light"] .pill.st-DEAD { color:#b91c1c; border-color:rgba(220,38,38,.4); background:rgba(220,38,38,.07) }
+:root[data-theme="light"] .pill.st-BACKOFF { color:#92610a; border-color:rgba(180,83,9,.4); background:rgba(180,83,9,.08) }
+:root[data-theme="light"] .pill.hl-READY { color:#15803d }
+:root[data-theme="light"] .pill.hl-NOT_READY { color:#b91c1c; border-color:rgba(220,38,38,.4); background:rgba(220,38,38,.07) }
+:root[data-theme="light"] .hl-dot { background:#15803d }
+:root[data-theme="light"] .pill.hl-UNTESTED { color:#92610a }
+:root[data-theme="light"] .pill.unmanaged { color:#7c5a2a; border-color:rgba(124,90,42,.35); background:rgba(124,90,42,.08) }
 :root[data-theme="light"] .kv .k, :root[data-theme="light"] .k { color:var(--text-faint) }
 :root[data-theme="light"] .empty { color:var(--text-faint) }
 :root[data-theme="light"] .banner.warn { background:rgba(180,83,9,.10); color:#8a5a10; border-color:rgba(180,83,9,.25) }
@@ -309,12 +316,18 @@ aside {
 .pill.unmanaged::before { display:none }
 .pill.mode { color:var(--text-faint); font-weight:500 }
 .pill.mode::before { display:none }
-.pill.hl-READY { color:#9df0c5; border-color:rgba(74,222,128,.4); background:rgba(74,222,128,.1) }
+.pill.hl-READY { color:#9df0c5 }
 .pill.hl-READY::before { background:var(--ok); box-shadow:0 0 6px rgba(74,222,128,.7) }
 .pill.hl-NOT_READY { color:#ffb9b9; border-color:rgba(248,113,113,.4); background:var(--danger-soft) }
 .pill.hl-NOT_READY::before { background:var(--danger); box-shadow:0 0 6px rgba(248,113,113,.7) }
-.pill.hl-UNTESTED { color:#ffe099; border-color:rgba(251,191,36,.4); background:var(--warn-soft) }
+.pill.hl-UNTESTED { color:#ffe099 }
 .pill.hl-UNTESTED::before { background:var(--warn); box-shadow:0 0 6px rgba(251,191,36,.7) }
+/* 卡片就绪态分形：READY=纯圆点（无文字），NOT_READY=醒目红胶囊，UNTESTED 不进卡片。
+   只有异常才占一个标签位置，常态不再与进程状态胶囊并列。 */
+.hl-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 5px rgba(74,222,128,.6) }
+/* 详情卡内的 READY/UNTESTED 仍用轻量注释样式，避免与状态胶囊同形。 */
+.pill.hl-READY,
+.pill.hl-UNTESTED { padding:1px 2px; border-color:transparent; background:transparent; font-weight:500; font-size:9.5px }
 .health {
   margin:0 13px 11px;
   padding:9px 11px;

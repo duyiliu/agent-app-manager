@@ -146,9 +146,18 @@ function renderApps() {
     const health = healthByAlias.get(a.appId);
     head.append(el('span', 'app-alias', a.alias), statusPill(a.status));
     if (health) {
-      const hp = healthPill(health.state);
-      hp.title = healthTitle(health);
-      head.appendChild(hp);
+      // 卡片只保留「异常」与「正常」两态：UNTESTED 多为未配置就绪条件，属未知而非故障，
+      // 常驻会与进程状态胶囊并列成噪音（Portainer 同理：没有 healthcheck 就不显示健康标）。
+      // 完整三态与证据在详情卡 healthBlock 里展示。
+      if (health.state === 'READY') {
+        const dot = el('span', 'hl-dot');
+        dot.title = healthTitle(health);
+        head.appendChild(dot);
+      } else if (health.state !== 'UNTESTED') {
+        const hp = healthPill(health.state);
+        hp.title = healthTitle(health);
+        head.appendChild(hp);
+      }
     }
     if (a.managed === false) head.appendChild(el('span', 'pill unmanaged', '非受管'));
     card.appendChild(head);
@@ -592,12 +601,15 @@ function renderDetail(d) {
 }
 let lifecycleBusy = false, lifecycleOpKey = null;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
-// 第一次点击把按钮变成“确认X”4 秒内有效，再点一次才执行。
+// 第一次点击把按钮变成“确认X”，10 秒内再点一次才执行。
+// 不能太短：armOp 会触发 loadStatus() 重绘（Windows 上单次采集 3s 左右），
+// 若窗口只有 4s，确认态实际只可见约 1s，用户来不及点第二次。
+const ARM_WINDOW_MS = 10000;
 let armedOp = null, armedTimer = null;
 function armOp(alias, op, extra = '') {
   disarmOp();
   armedOp = `${alias}:${op}:${extra}`;
-  armedTimer = setTimeout(() => { disarmOp(); if (selected) loadStatus(); }, 4000);
+  armedTimer = setTimeout(() => { disarmOp(); if (selected) loadStatus(); }, ARM_WINDOW_MS);
   loadStatus();
 }
 function disarmOp() { armedOp = null; if (armedTimer) { clearTimeout(armedTimer); armedTimer = null; } }
