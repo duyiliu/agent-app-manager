@@ -149,7 +149,9 @@ export async function cmdUi(ctx) {
         // 否则同步执行会阻塞 ui 事件循环（实测 /api/meta 也从 1ms 退化到 3-8s）。
         list: () => runManagerJson(ctx.home, ['list']),
         // UI 需要 actualPorts，CLI 侧对应 --probe（会顺带做 expectedPort 的 TCP 探测）。
-        status: (ref) => runManagerJson(ctx.home, ['status', ref, '--probe'], { timeoutMs: 30000 })
+        // sample=true 时追加 --resources：只在用户展开详情时做一次有界 RSS/CPU 采样，
+        // 4s 轮询不带，避免把按需采样变成常驻轮询。
+        status: (ref, sample) => runManagerJson(ctx.home, ['status', ref, '--probe', ...(sample ? ['--resources'] : [])], { timeoutMs: 30000 })
           .then((data) => { delete data.portListening; delete data.portNote; return data; }),
         health: () => runManagerJson(ctx.home, ['health'], { timeoutMs: 90000 }),
         listRuns: (ref) => listRuns(ctx.home, ref),

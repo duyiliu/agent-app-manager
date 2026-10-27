@@ -18,6 +18,31 @@ let wantedHistoryRun = null, selectedHistoryRun = null;
 let fatal = false;            // 403（非本机访问）后停止轮询
 let degrading = false;        // 数据损坏等持久性错误
 let appsBusy = false, statusBusy = false, healthBusy = false; // loadApps/loadStatus/loadHealth 在飞守卫：响应慢于轮询周期时不堆叠请求
+let statusSampleBusy = false; // 展开详情的按需资源采样：独立守卫，不能被轮询挡住
+
+// 资源告警：只看当前值，不记峰值。内存取 /api/apps 的单点采样；
+// CPU 需要连续高位才判定，避免 Java 启动/GC 的瞬时 100% 误报。
+const RES_RSS_WARN = 2 * 1024 ** 3;
+const RES_CPU_WARN = 80;
+const RES_CPU_STREAK_WARN = 3;
+const cpuStreaks = new Map(); // `${appId}:${runId}` → 连续 ≥ RES_CPU_WARN 的采样次数
+const resKey = (row) => `${row.appId}:${row.lastRunId ?? '-'}`;
+function trackCpuStreak(row) {
+  if (row.cpuPercent == null) return;
+  const key = resKey(row);
+  const n = Number(row.cpuPercent) >= RES_CPU_WARN ? (cpuStreaks.get(key) ?? 0) + 1 : 0;
+  if (n) cpuStreaks.set(key, n); else cpuStreaks.delete(key);
+}
+function resWarnOf(row) {
+  if (row?.memoryBytes != null && row.memoryBytes >= RES_RSS_WARN) return `当前内存 ${fmtSize(row.memoryBytes)}，超过 ${fmtSize(RES_RSS_WARN)}`;
+  const n = cpuStreaks.get(resKey(row)) ?? 0;
+  if (n >= RES_CPU_STREAK_WARN) return `CPU 连续 ${n} 次采样 ≥ ${RES_CPU_WARN}%`;
+  return null;
+}
+// 展开详情时那次实时采样的缓存：轮询重绘（不带 resources）时继续显示它，避免数字来回跳。
+// 按 runId 绑定而不是按时间过期——页面时钟在后台标签页会跳，TTL 判定不可靠；
+// runId 变了（重启）或切换应用时自动失效。
+let liveResources = null; // { alias, runId, rssBytes, cpuPercent, scope, reason?, at }
 
 async function api(path, signal, method = 'GET') {
   const u = new URL(path, location.origin);
@@ -119,6 +144,8 @@ function portAnchor(port, title) {
   return a;
 }
 function renderApps() {
+  // 未选中应用时收起整块日志区（含工具栏），避免右侧同时出现两个空状态
+  document.body.classList.toggle('no-selection', !selected);
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const rank = { RUNNING: 0, STARTING: 1, BACKOFF: 2, UNKNOWN: 3, DEAD: 4, STOPPED: 5 };
@@ -161,6 +188,14 @@ function renderApps() {
       }
     }
     if (a.managed === false) head.appendChild(el('span', 'pill unmanaged', '非受管'));
+    // 资源告警只在异常时出现（正常态无噪音）：当前内存超阈值，或 CPU 连续高位。
+    trackCpuStreak(a);
+    const resWarn = resWarnOf(a);
+    if (resWarn) {
+      const dot = el('span', 'res-warn');
+      dot.title = resWarn;
+      head.appendChild(dot);
+    }
     card.appendChild(head);
     const meta = el('div', 'app-meta');
     meta.append(el('span', null, a.mode ?? '?'));
@@ -195,6 +230,9 @@ function renderApps() {
   for (const stale of existing.values()) stale.remove();
   ordered.forEach((card, i) => { if (list.children[i] !== card) list.insertBefore(card, list.children[i] ?? null); });
   list.scrollTop = previousScroll;
+  // 清理已消失或已换 run 的 CPU 计数，避免 Map 随重启次数无限增长。
+  const liveKeys = new Set(appsCache.map(resKey));
+  for (const k of [...cpuStreaks.keys()]) if (!liveKeys.has(k)) cpuStreaks.delete(k);
 }
 async function copyText(text) {
   try {
@@ -517,14 +555,22 @@ function renderDetail(d) {
     grid.appendChild(pv);
   }
   kvRow(grid, 'pid', run?.pid ?? d.pid ?? null, run?.pid != null || d.pid != null ? 'good' : undefined);
-  // 内存列来自 /api/apps 的同一次单点采样（命令模式含后代聚合），不在 status 轮询中重复采样。
+  // 优先用展开时那次实时采样；轮询重绘时该字段不返回，回退到缓存值，再回退到 /api/apps 的单点值。
   const listRow = appsCache.find(a => a.alias === d.alias);
-  if (listRow?.memoryBytes != null) {
-    const cpu = listRow.cpuPercent != null ? ` · CPU ${Number(listRow.cpuPercent).toFixed(1)}%` : '';
-    const scope = listRow.resourcesScope === 'tree' ? '（含后代聚合）' : '';
-    kvRow(grid, '内存（RSS）', fmtSize(listRow.memoryBytes) + cpu + scope, 'dim');
-  } else if (listRow?.resourcesNote) {
+  const cached = liveResources && liveResources.alias === d.alias && (liveResources.runId ?? null) === (d.run?.runId ?? null) ? liveResources : null;
+  const live = d.resources?.available ? d.resources : (cached?.available ? cached : null);
+  const rss = live?.rssBytes ?? listRow?.memoryBytes ?? null;
+  const cpuPct = live?.cpuPercent ?? listRow?.cpuPercent ?? null;
+  if (rss != null) {
+    const cpu = cpuPct != null ? ` · CPU ${Number(cpuPct).toFixed(1)}%` : '';
+    const scope = (live?.scope ?? listRow?.resourcesScope) === 'tree' ? '含后代聚合' : '';
+    // 标明来源：展开时的精确采样，还是列表轮询的单点值。两者采样窗口相同，但时刻不同。
+    const src = live ? '展开时采样' : '轮询采样';
+    kvRow(grid, '内存（RSS）', `${fmtSize(rss)}${cpu}（${[scope, src].filter(Boolean).join(' · ')}）`, 'dim');
+  } else if (live === null && listRow?.resourcesNote) {
     kvRow(grid, '内存（RSS）', '不可用：' + listRow.resourcesNote, 'dim');
+  } else if (live && live.rssBytes == null) {
+    kvRow(grid, '内存（RSS）', '不可用：' + (live.reason ?? '采样失败'), 'dim');
   }
   kvRow(grid, 'runId', run?.runId);
   kvRow(grid, 'phase', run?.phase);
@@ -700,11 +746,19 @@ async function doLifecycle(alias, op, extra = '') {
   pollTail();
 }
 
-async function loadStatus() {
-  if (fatal || (paused && !manualRefresh) || !selected || statusBusy) return;
-  statusBusy = true;
+// sample=true 时服务端追加 --resources，做一次有界 RSS/CPU 采样。
+// 只在展开详情/首次选中时用；4s 轮询不带，避免变成常驻采样。
+async function loadStatus(opts = {}) {
+  // 采样请求不能被轮询的在飞守卫挡掉：展开是用户主动动作，此刻轮询大概率正在飞。
+  const busy = opts.sample ? statusSampleBusy : statusBusy;
+  if (fatal || (paused && !manualRefresh) || !selected || busy) return;
+  if (opts.sample) statusSampleBusy = true; else statusBusy = true;
   try {
-    const detail = await api('/api/status?app=' + encodeURIComponent(selected));
+    const detail = await api('/api/status?app=' + encodeURIComponent(selected) + (opts.sample ? '&sample=1' : ''));
+    // 实时采样结果留在本地：后续 4s 轮询不带 resources，靠它继续显示同一份"当前值"。
+    if (opts.sample && detail.alias === selected && detail.resources) {
+      liveResources = { alias: selected, runId: detail.run?.runId ?? null, at: Date.now(), ...detail.resources };
+    }
     const old = previousStatuses.get(selected);
     const runId = detail.run?.runId;
     if (old?.status === 'RUNNING' && old.runId === runId && ['STOPPED', 'UNKNOWN'].includes(detail.status)) {
@@ -715,7 +769,7 @@ async function loadStatus() {
   } catch (e) {
     if (e.status === 404) { detailMissing = true; renderDetail(null); return; }
     handlePollError(e);
-  } finally { statusBusy = false; }
+  } finally { if (opts.sample) statusSampleBusy = false; else statusBusy = false; }
 }
 async function loadHealth() {
   if (fatal || (paused && !manualRefresh) || healthBusy) return;
@@ -739,6 +793,7 @@ function selectApp(alias) {
   selectedHistoryRun = null; wantedHistoryRun = null;
   logSrcWasCurrent = false;
   detailOpen = false; detailTouched = false; detailInitialized = false;
+  liveResources = null; // 换应用后旧的采样值不再适用
   try {
     const u = new URL(location.href);
     u.searchParams.set('app', alias);
@@ -750,7 +805,7 @@ function selectApp(alias) {
   $('#filesBtn').disabled = false;
   if (!$('#fileDrawer').hidden) loadTree('', $('#fdTree'), ++treeVersion);
   loadSources();
-  loadStatus();
+  loadStatus({ sample: true }); // 首次选中可能自动展开详情，顺带做一次资源采样
 }
 
 // ---------- 日志 ----------
@@ -787,7 +842,7 @@ let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBu
 // 过滤在渲染层做：lines 数组始终保留全量，清空条件即恢复全视图；
 // errorsOnly 等价内置 errorPattern；自定义正则无效时给出提示而非静默失效（不过滤 + 输入框标红 + meta 提示）。
 let errorsOnly = false, filterRe = null, filterError = null;
-let logSize = 0, logFallbackLabel = '日志', renderedDomCount = 0;
+let logFallbackLabel = '日志', renderedDomCount = 0;
 
 function compileFilter() {
   const input = $('#logFilter');
@@ -810,7 +865,8 @@ function lineVisible(text) {
 }
 function visibleLines() { return lines.filter(l => lineVisible(l.text)); }
 function renderMeta() {
-  let text = `${logSrcLabel || logFallbackLabel} · ${fmtSize(logSize)} · 缓存 ${lines.length} 行`;
+  // 源名与大小已由左侧下拉展示，这里只保留下拉无法表达的运行时信息。
+  let text = `缓存 ${lines.length} 行`;
   if (logMerged) text += ' · 合并 stdout/stderr，顺序为近似顺序（无统一时间戳）';
   if (removed) text += ` · 已移除较早 ${removed} 行`;
   if (filterError) text += ` · 正则无效（${filterError}），已按未过滤显示`;
@@ -827,7 +883,7 @@ function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
   logMerged = isMergedSrc(logSrc); mergedTails = newMergedTails();
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true; srcDead = false;
-  logSize = 0; logFallbackLabel = '日志'; renderedDomCount = 0;
+  logFallbackLabel = '日志'; renderedDomCount = 0;
   updateFollow();
   renderMeta();
   if (selected) logHint('等待日志输出…'); else logHint('选择左侧应用后查看日志。');
@@ -908,7 +964,6 @@ async function pollTail() {
       renderLines();
     }
     offset = d.offset;
-    logSize = d.size;
     logFallbackLabel = d.runId ? `${d.runId}.${d.stream}` : '日志';
     renderMeta();
     conn('已连接 · ' + new Date().toLocaleTimeString());
@@ -997,7 +1052,6 @@ async function pollMergedTail() {
       }
       renderLines();
     }
-    logSize = (streams.stdout?.size ?? 0) + (streams.stderr?.size ?? 0);
     logFallbackLabel = d.runId ? `${d.runId}.both` : '合并日志';
     renderMeta();
     conn('已连接 · ' + new Date().toLocaleTimeString());
@@ -1148,7 +1202,13 @@ $('#runSel').addEventListener('change', e => {
   logSrcLabel = opt ? opt.textContent.replace(/^● /, '').replace(/ · [\d.]+ (KB|MB)$/, '') : '';
   resetLog();
 });
-$('#detailBar').addEventListener('click', () => { detailTouched = true; applyDetail(detailOpen = $('#detail').hidden); });
+$('#detailBar').addEventListener('click', () => {
+  detailTouched = true;
+  const open = $('#detail').hidden;
+  applyDetail(detailOpen = open);
+  // 展开时实时采样一次资源：用户此刻要看的是"现在占多少"，不是 4s 前轮询的快照。
+  if (open) loadStatus({ sample: true });
+});
 $('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
 $('#clearBtn').addEventListener('click', () => { lines = []; renderedId = 0; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(true); });
 $('#logFilter').addEventListener('input', () => { compileFilter(); renderLines(true); });

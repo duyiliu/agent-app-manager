@@ -53,7 +53,8 @@
 :root[data-theme="light"] body { background:linear-gradient(180deg,#eef2f6,#f7f9fb) }
 :root[data-theme="light"] #log,
 :root[data-theme="light"] .fd-content,
-:root[data-theme="light"] .fd-filter input { background:#fbfcfe }
+:root[data-theme="light"] .fd-filter input,
+:root[data-theme="light"] .lifecycle-grace { background:#fbfcfe }
 :root[data-theme="light"] .line { color:#3d4c61 }
 :root[data-theme="light"] .line.err { color:#b91c1c; background:rgba(220,38,38,.06) }
 :root[data-theme="light"] .line.warn { color:#92610a }
@@ -71,6 +72,7 @@
 :root[data-theme="light"] .app-card { background:#ffffff }
 :root[data-theme="light"] .app-card:hover { background:#f4f8fa; border-color:rgba(13,148,136,.45) }
 :root[data-theme="light"] .app-card.selected { background:#ecf9f7; border-color:rgba(13,148,136,.5) }
+:root[data-theme="light"] .card { background:#ffffff }
 :root[data-theme="light"] .app-root { color:#93a2b5 }
 :root[data-theme="light"] .pill.st-RUNNING { color:#15803d; border-color:rgba(21,128,61,.4); background:rgba(21,128,61,.08) }
 :root[data-theme="light"] .pill.st-STARTING { color:#92610a; border-color:rgba(180,83,9,.4) }
@@ -325,6 +327,8 @@ aside {
 /* 卡片就绪态分形：READY=纯圆点（无文字），NOT_READY=醒目红胶囊，UNTESTED 不进卡片。
    只有异常才占一个标签位置，常态不再与进程状态胶囊并列。 */
 .hl-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 5px rgba(74,222,128,.6) }
+/* 资源告警：方形+橙色，与绿色圆形健康点区分开，避免两个圆点并排时混淆。 */
+.res-warn { flex:none; width:7px; height:7px; border-radius:2px; background:#f59e0b; box-shadow:0 0 5px rgba(245,158,11,.6) }
 /* 详情卡内的 READY/UNTESTED 仍用轻量注释样式，避免与状态胶囊同形。 */
 .pill.hl-READY,
 .pill.hl-UNTESTED { padding:1px 2px; border-color:transparent; background:transparent; font-weight:500; font-size:9.5px }
@@ -361,6 +365,13 @@ aside {
 .detail-bar:hover { color:var(--text); background:#1a2431; border-color:var(--line) }
 .detail-bar .db-toggle { flex:none; color:var(--accent); font-size:9px; transition:transform .12s ease }
 .detail-bar[aria-expanded="true"] .db-toggle { transform:rotate(90deg) }
+/* 详情展开时隐藏摘要栏上的操作组：详情卡内已有同一组按钮，两处并存属重复。 */
+#detailBar[aria-expanded="true"] + #detailOps { display:none }
+/* 详情展开时摘要栏只留别名与进程状态：模式、受管、健康、pid/端口/runId/时间详情卡内都有。 */
+#detailBar[aria-expanded="true"] .db-summary > span:not(.db-name):not([class*=" st-"]) { display:none }
+/* 未选中应用时不保留空的日志区与整排禁用按钮，右侧只留一条居中引导。 */
+body.no-selection .log-panel { display:none }
+body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-items:center; justify-content:center }
 .detail-bar .db-summary { flex:1; min-width:0; display:flex; align-items:center; gap:8px; overflow:hidden; white-space:nowrap }
 .detail-bar .db-name { font:600 12px var(--ui-font); color:var(--text) }
 .detail-bar .db-info { min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--text-faint) }
@@ -577,11 +588,14 @@ aside {
   background:
     linear-gradient(180deg,rgba(45,212,191,.018),transparent 120px),
     #0b1016;
-  white-space:pre-wrap;
-  word-break:break-all;
+  /* 日志按原样保留单行：折行会把堆栈/配置行拆成多段，缩进丢失后与真实换行无法区分。
+     超长行改为横向滚动（与 IDE/终端一致），行背景随内容宽度延伸。 */
+  white-space:pre;
+  word-break:normal;
   font-family:var(--mono-font);
   font-size:12.5px;
   outline:none}
+#log .line { width:max-content; min-width:100% }
 #log>.empty { margin:30px auto }
 .line {
   padding:1px 16px 1px 13px;
@@ -657,7 +671,7 @@ aside {
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记且证据保留（均与 manager CLI 同一实现，操作需二次确认）；stop 默认有界强制终止、不杀进程树，详情卡可勾选「同时终止子进程」（--tree）并设置优雅退出毫秒（--grace）。</div>
+<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记；危险操作需二次确认，stop 参数在详情卡内调整。</div>
 <div class="banner" id="fatalBanner" hidden></div>
 <div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">

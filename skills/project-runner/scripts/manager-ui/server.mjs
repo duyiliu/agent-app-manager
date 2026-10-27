@@ -206,16 +206,19 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   const collectHealth = singleFlight(() => api.health(), 3000);
   // status 按应用分别单飞：详情卡 4s 轮询，单次采集 3s 左右，去重避免叠加。
   const statusFlights = new Map();
-  function collectStatus(ref) {
-    const hit = statusFlights.get(ref);
+  // sample=true 走独立 key：展开详情时的按需资源采样不复用轮询缓存，否则拿到的还是上一次的快照。
+  // 但 in-flight 去重仍生效，避免连点展开时叠起多次 pwsh 采样。
+  function collectStatus(ref, sample = false) {
+    const key = sample ? `${ref}#sample` : ref;
+    const hit = statusFlights.get(key);
     if (hit?.inflight) return hit.inflight;
-    if (hit && Date.now() - hit.at < 1500) return Promise.resolve(hit.value);
+    if (!sample && hit && Date.now() - hit.at < 1500) return Promise.resolve(hit.value);
     const entry = { at: 0, value: undefined, inflight: null };
     entry.inflight = Promise.resolve()
-      .then(() => api.status(ref))
+      .then(() => api.status(ref, sample))
       .then((v) => { entry.value = v; entry.at = Date.now(); return v; })
       .finally(() => { entry.inflight = null; });
-    statusFlights.set(ref, entry);
+    statusFlights.set(key, entry);
     return entry.inflight;
   }
 
@@ -266,7 +269,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectHealth() });
     }
     if (u.pathname === '/api/status') {
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectStatus(u.searchParams.get('app') || '') });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectStatus(u.searchParams.get('app') || '', u.searchParams.get('sample') === '1') });
     }
     if (u.pathname === '/api/runs') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listRuns(u.searchParams.get('app') || '') });
