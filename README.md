@@ -35,7 +35,8 @@ npx skills add duyiliu/project-runner --skill project-runner -g
 README.md
 docs/design.md                   # 跨项目管理设计与验收基线（P0 已实现）
 skills/project-runner/
-├── SKILL.md
+├── SKILL.md                     # 路由与通用边界；按语言/场景指向 references
+├── references/                  # 按需加载：java/python/node/other-stacks/manager/jrebel-setup
 └── scripts/
     ├── manager.mjs              # 跨项目运行管理 P0（CLI 入口）
     ├── log-writer.mjs           # detached 日志转发/轮转

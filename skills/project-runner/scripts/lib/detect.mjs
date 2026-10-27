@@ -59,7 +59,7 @@ export function detectProjects(root) {
   };
   const quoteArg = (value) => (/^[A-Za-z0-9._:/\\-]+$/.test(value) ? value : shellArg(value));
 
-  // 项目内解释器优先（SKILL 1A Python 第 2 条）：只在文件真实存在时采用，
+  // 项目内解释器优先（SKILL 1A → references/python.md 第 2 条）：只在文件真实存在时采用，
   // 不把缺失 venv 当作已就绪；venv 目录本身被 walk 忽略，这里直接检查固定路径。
   const venvParts = process.platform === 'win32'
     ? [['.venv', 'Scripts', 'python.exe'], ['venv', 'Scripts', 'python.exe']]

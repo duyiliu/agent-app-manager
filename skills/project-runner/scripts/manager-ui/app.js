@@ -7,6 +7,7 @@ let selected = null;          // 当前选中的 alias
 let appsCache = [];
 let healthByAlias = new Map(); // GET /api/health 结果：appId -> 健康总览行
 let currentDetail = null;     // 最近一次 /api/status 结果，供健康刷新/诊断结果异步返回后原地重绘
+let detailMissing = false;    // /api/status 返回 404：选中项确实不在注册表；否则详情区显示「正在加载」而非误报
 let portDiag = null;          // { alias, port, loading, auto, data?, error? }
 let lastLifecycleError = null; // { alias, op, code, message, detail? }：启停失败的可见详情（仅当前选择展示）
 let paused = false, manualRefresh = false;
@@ -273,6 +274,7 @@ function kvRow(grid, k, v, cls) {
   grid.append(el('div', 'k', k), el('div', 'v' + (cls ? ' ' + cls : ''), String(v)));
 }
 let detailOpen = false, detailTouched = false;
+let detailInitialized = false; // 该应用的详情是否已按「首次」规则决定过展开状态
 // 停止/重启的附加参数：控件在详情卡内，值跨轮询重绘保留；启动/移除不使用。
 let lifecycleTree = false, lifecycleGrace = '';
 function applyDetail(open) {
@@ -385,7 +387,9 @@ function renderDetail(d) {
     $('#detailOps').hidden = true;
     $('#detailOps').replaceChildren();
     box.hidden = false;
-    box.appendChild(el('div', 'empty', selected ? '该应用已不在注册表中。' : '从左侧选择应用查看状态与日志。'));
+    box.appendChild(el('div', 'empty', selected
+      ? (detailMissing ? '该应用已不在注册表中。' : '正在加载应用详情…')
+      : '从左侧选择应用查看状态与日志。'));
     return;
   }
   const card = el('div', 'card');
@@ -597,7 +601,10 @@ function renderDetail(d) {
     el('span', 'db-info', bits));
   bar.hidden = false;
   const hasDiagnostics = lastLifecycleError?.alias === d.alias || portDiag?.alias === d.alias;
-  applyDetail(detailTouched ? detailOpen : (needsAttention || hasDiagnostics));
+  // 只在首次渲染该应用时自动决定展开/收起；之后保持现状。
+  // 否则每 4s 轮询重绘都会按「当前无异常」重新收起，用户正看着详情却被折叠。
+  if (detailTouched) applyDetail(detailOpen);
+  else if (!detailInitialized) { detailInitialized = true; applyDetail(needsAttention || hasDiagnostics); }
 }
 let lifecycleBusy = false, lifecycleOpKey = null;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
@@ -610,6 +617,9 @@ function armOp(alias, op, extra = '') {
   disarmOp();
   armedOp = `${alias}:${op}:${extra}`;
   armedTimer = setTimeout(() => { disarmOp(); if (selected) loadStatus(); }, ARM_WINDOW_MS);
+  // 先用当前详情本地重绘出"确认X"，不要等 loadStatus（Windows 上采集 3s 起）：
+  // 否则点击后数秒内按钮毫无变化，用户会以为没响应而重复点击。
+  rerenderDetail();
   loadStatus();
 }
 function disarmOp() { armedOp = null; if (armedTimer) { clearTimeout(armedTimer); armedTimer = null; } }
@@ -703,7 +713,7 @@ async function loadStatus() {
     previousStatuses.set(selected, { status: detail.status, runId });
     renderDetail(detail);
   } catch (e) {
-    if (e.status === 404) { renderDetail(null); return; }
+    if (e.status === 404) { detailMissing = true; renderDetail(null); return; }
     handlePollError(e);
   } finally { statusBusy = false; }
 }
@@ -723,11 +733,12 @@ function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
   currentDetail = null;
+  detailMissing = false; // 详情加载中用「正在加载」，只有真正 404 才提示不在注册表
   portDiag = null;
   lastLifecycleError = null;
   selectedHistoryRun = null; wantedHistoryRun = null;
   logSrcWasCurrent = false;
-  detailOpen = false; detailTouched = false;
+  detailOpen = false; detailTouched = false; detailInitialized = false;
   try {
     const u = new URL(location.href);
     u.searchParams.set('app', alias);
