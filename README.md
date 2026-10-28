@@ -12,13 +12,13 @@
 
 ### 1. 安装
 
-本仓库是 `project-runner` Skill 的唯一维护源；原 `duyiliu/agent-skills` 中的 `jrebel-start` 副本已不再维护。
-
 ```bash
 npx skills add duyiliu/project-runner --skill project-runner -g
 ```
 
-安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录不必相同。重新安装或更新不会清理旧的 `jrebel-start` 本地副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
+安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。更新时重新执行安装命令；版本号可通过 `manager.mjs version` 或管理台顶栏查看。
+
+原 `jrebel-start` 已由 `project-runner` 取代。安装不会自动清理旧副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
 
 ### 2. 让 Agent 启动项目
 
@@ -125,15 +125,32 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 ## 本地 Web 管理台
 
-`manager ui` 按需启动，前台常驻，Ctrl+C 即退出；不注册开机自启、不拉起守护进程。默认固定 `127.0.0.1:8199`（`--port 0` 为随机端口），仅本机可访问、无令牌。
+`manager ui` 按需启动，前台常驻，Ctrl+C 即退出；不注册开机自启、不拉起守护进程。默认固定 `127.0.0.1:8199`（`--port 0` 为随机端口），仅本机可访问、无令牌。界面只展示已登记应用（含非受管记录）；IDEA / 手工启动且未登记的进程不会出现。
 
-- 全局应用状态、未结记录证据与 `prevRuns`、资源曲线（详情展开时按需采样）。
-- 日志：受管批次、非受管线索、项目 `.tmp` 兼容日志；支持合并 stdout / stderr、跟随、正则过滤、只看错误、暂停 / 下载。
-- 项目文件只读浏览：隐藏 `.git`、`node_modules`、`.env*`、常见私钥与许可文件，拒绝路径穿越与符号链接。
-- 生命周期按钮：启动 / 停止 / 重启 / 移除，页面二次确认，与 CLI 同一实现和安全边界。
-- 端口诊断：只读查询占用；`PORT_IN_USE` 时展示 PID、名称、路径等白名单字段。
+![运行管理台总览](docs/images/manager-overview.png)
 
-原单项目 Viewer 已移除，能力并入本台。管理台地址仅本机可达，**不要转发**；日志可能含敏感信息，外发前先检查。
+*总览：左侧为已登记应用，右侧为选中应用的详情与按批次日志。*
+
+### 使用细节
+
+1. **连接与刷新**：打开地址后，顶栏显示数据目录与最近连接时间；列表 / 状态约 4 秒、日志尾部约 1 秒自动刷新，页面隐藏时统一降频至 30 秒，也可点列表右上角手动刷新。Ctrl+C 退出 `ui` 后地址即不可用，仅关闭浏览器页面不会停止该进程。
+2. **选择与筛选应用**：点击卡片切换应用。卡片展示进程状态、受管 / 非受管、就绪状态、模式、标签、pid、端口和内存快照；搜索框支持别名、显示名、ID、模式、端口、路径与标签。`STARTING` / `UNKNOWN` 等未结记录会在卡片和详情中标出，不能直接重复启动。
+3. **详情与资源曲线**：点右上角「详情」展开。健康区给出端口监听、业务就绪证据（`readyLogPattern` / `readyUrl`）与诊断信息；`prevRuns` 与未结记录证据也在这里核对。详情展开后每 5 秒采样一次 CPU / RSS，绘制最近 5 分钟的曲线，收起详情即停止采样。
+
+   ![详情与资源曲线](docs/images/manager-detail.png)
+
+4. **查看日志**：日志源下拉可选当前 / 历史受管批次、非受管线索和项目 `.tmp` 兼容日志。工具栏支持合并 stdout / stderr、正则过滤、只看错误、暂停 / 恢复跟随、清屏和下载；过滤激活时只下载命中行。首次加载时顶部可能出现「从文件起始读取」提示，跟随滚动后移出视口。
+
+   ![日志过滤](docs/images/manager-logs.png)
+
+5. **只读文件浏览**：点顶部「文件」打开当前应用根目录，可逐层展开、过滤和分页预览文本文件。`.git`、`node_modules`、`.env*`、常见私钥与许可文件不会显示，路径穿越与符号链接会被拒绝。
+
+   ![只读文件浏览](docs/images/manager-files.png)
+
+6. **启动 / 停止 / 重启 / 移除**：详情卡按钮与 CLI 同一实现和安全边界，所有生命周期操作都要在 10 秒内再次点击「确认…」才执行；`--tree` 与优雅退出毫秒数在详情卡内设置，只作用于 stop / restart。非受管应用仅允许移除 STOPPED 登记；`STARTING` / `UNKNOWN` 未结记录需人工核验进程已退出后，点「ack 并启动」并再次确认。
+7. **端口诊断与自检**：预期端口旁的「诊断」只读查询占用信息（同 `manager port`），不接管外部进程；顶部「诊断」执行 `manager doctor` 并原样展示结果，不自动修复。
+
+原单项目 Viewer 已移除，能力并入本台。管理台地址仅本机可达，**不要转发**；日志与文件预览可能含敏感信息，外发前先检查。
 
 ## 数据目录
 
@@ -153,6 +170,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 README.md
 docs/
 ├── design.md                      # 跨项目管理设计与验收基线
+├── images/                        # README 管理台截图
 ├── ops/                           # 运维记录
 └── verification/                  # 验收证据
 skills/project-runner/
@@ -172,7 +190,13 @@ examples/spring-boot-demo/         # 本地测试项目
 
 ## 本地测试项目
 
-仓库内置 [Spring Boot 测试项目](examples/spring-boot-demo/README.md)：Java 17、Spring Boot 3.3.5，不依赖数据库 / Nacos / Redis，默认只监听 `127.0.0.1:18273`。用于验证项目识别、受管启动、管理台日志、健康检查与 JRebel 热加载；构建和接口检查步骤见该项目 README。
+仓库内置三个本地示例，分别用于验证项目识别、受管启动、管理台日志和健康检查：
+
+- [Spring Boot](examples/spring-boot-demo/README.md)：Java 17，端口 `18273`，还可验证 JRebel 热加载。
+- [Python / Flask](examples/python-demo/README.md)：端口 `18274`，需安装 Flask。
+- [Node.js](examples/node-demo/README.md)：端口 `18275`，只使用 Node.js 内置模块。
+
+三个示例仅监听本机，不依赖数据库；启动和接口检查步骤见各自的 README。
 
 ## 开发与测试
 
@@ -184,15 +208,6 @@ npm run check     # 全部 .mjs 语法检查 + 脱敏 / 健康 / 环境 / 运行
 ```
 
 `npm test` 依次覆盖：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期。CI 在 `windows-latest` 与 `ubuntu-latest` 上运行语法检查与核心冒烟；macOS 未纳入支持范围。
-
-## 来源与兼容性
-
-从 [duyiliu/agent-skills](https://github.com/duyiliu/agent-skills) 的 `skills/engineering/jrebel-start/` 和 `work/任务/JRebel跨项目统一运行管理/design.md` 迁移，基础能力来自 [PR #5](https://github.com/duyiliu/agent-skills/pull/5)，跨项目管理设计来自 [PR #6](https://github.com/duyiliu/agent-skills/pull/6)。
-
-- Skill 名称 `project-runner`；保留原项目日志命名 `jrebel-local-*.log`（`manager ui` 兼容扫描），不要求改业务仓库。
-- 运行数据目录为 `~/.project-runner/`（2026-10-17 由设计初稿的 `~/.jrebel-start/` 更名；更名时尚无真实数据，无迁移问题）。
-- 版本号见 `manager.mjs version` 或管理台顶栏徽标，与 Git 标签 `vX.Y.Z` 同步。更新 = 重跑安装命令拉取最新 `main`；固定版本则检出对应 tag 后安装。
-- 项目启动、构建、许可证配置及服务停止遵循 Skill 的授权边界；安装 Skill 不等于获得修改业务项目的授权。
 
 ## 开发边界
 
