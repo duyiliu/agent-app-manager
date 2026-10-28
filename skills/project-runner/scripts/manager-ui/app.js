@@ -39,10 +39,10 @@ function resWarnOf(row) {
   if (n >= RES_CPU_STREAK_WARN) return `CPU 连续 ${n} 次采样 ≥ ${RES_CPU_WARN}%`;
   return null;
 }
-// 资源时间序列：只在详情展开时按 2s 采样，收起即停。60 点 = 2 分钟窗口。
-// 采样走 /api/sample（CLI sample 子进程），单次约 1.3s；in-flight 去重避免叠加。
+// 资源时间序列：只在详情展开时按 5s 采样，收起即停。60 点 = 5 分钟窗口。
+// 采样走 /api/sample（CLI sample 子进程），单次约 1.3s；5s 间隔下单核占用约 26%。
 const RES_SERIES_MAX = 60;
-const RES_SAMPLE_INTERVAL_MS = 2000;
+const RES_SAMPLE_INTERVAL_MS = 5000;
 let resSeries = [];          // [{ t, cpu, rss }]
 let resSeriesAlias = null;   // 曲线归属的应用：换应用必须清空
 let resTimer = null, resSampling = false;
