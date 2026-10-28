@@ -4,7 +4,7 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port', 'listening', 'listening-batch', 'resources')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port', 'listening', 'listening-batch', 'resources', 'probe')]
   [string]$Action,
 
   [int]$Id = 0,
@@ -44,6 +44,17 @@ public static class ProcUtil {
   static extern bool CloseHandle(IntPtr h);
   [DllImport("psapi.dll", SetLastError = true)]
   static extern bool GetProcessMemoryInfo(IntPtr h, out PROCESS_MEMORY_COUNTERS counters, uint size);
+  // GetExtendedTcpTable + Toolhelp32：轮询路径（listening/port/resources）之前用
+  // Get-NetTCPConnection 与 Get-CimInstance，单次各约 1-2s；P/Invoke 直读内核表
+  // 与进程快照后单次在几十毫秒内完成，且全部可以在一次 pwsh 里组合执行。
+  [DllImport("iphlpapi.dll", SetLastError = true)]
+  static extern uint GetExtendedTcpTable(IntPtr pTcpTable, ref uint pdwSize, bool bOrder, uint ulAf, int tableClass, uint reserved);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 entry);
 
   const uint QUERY = 0x1000;       // PROCESS_QUERY_LIMITED_INFORMATION
   const uint TERMINATE = 0x1;      // PROCESS_TERMINATE
@@ -63,6 +74,105 @@ public static class ProcUtil {
     public UIntPtr QuotaNonPagedPoolUsage;
     public UIntPtr PagefileUsage;
     public UIntPtr PeakPagefileUsage;
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct PROCESSENTRY32 {
+    public uint dwSize;
+    public uint cntUsage;
+    public uint th32ProcessID;
+    public UIntPtr th32DefaultHeapID;
+    public uint th32ModuleID;
+    public uint cntThreads;
+    public uint th32ParentProcessID;
+    public int pcPriClassBase;
+    public uint dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string szExeFile;
+  }
+
+  public class TcpRow { public int Pid; public string LocalAddress; public int LocalPort; }
+  public class ProcRow { public int Pid; public int Ppid; public string Image; }
+
+  const int TCP_TABLE_OWNER_PID_LISTENER = 3;
+  const uint AF_INET = 2;
+  const uint AF_INET6 = 23;
+  const uint ERROR_INSUFFICIENT_BUFFER = 122;
+  const uint MIB_TCP_STATE_LISTEN = 2;
+
+  static ushort SwapUshort(ushort v) { return (ushort)((v >> 8) | (v << 8)); }
+
+  static void ReadTcpListenerTable(uint af, System.Collections.Generic.List<TcpRow> rows) {
+    // GetExtendedTcpTable(OWNER_PID_LISTENER)：等价 Get-NetTCPConnection -State Listen，
+    // 但直接读内核 TCP 表（内核返回的是按表类过滤后的结果，几十毫秒 vs WMI 秒级）。
+    uint len = 0;
+    uint rc = GetExtendedTcpTable(IntPtr.Zero, ref len, false, af, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    if (rc == 0) return; // 空表
+    if (rc != ERROR_INSUFFICIENT_BUFFER) throw new System.ComponentModel.Win32Exception((int)rc);
+    IntPtr buf = Marshal.AllocHGlobal((int)len);
+    try {
+      rc = GetExtendedTcpTable(buf, ref len, false, af, TCP_TABLE_OWNER_PID_LISTENER, 0);
+      if (rc != 0) throw new System.ComponentModel.Win32Exception((int)rc);
+      int count = Marshal.ReadInt32(buf);
+      int rowSize = (af == AF_INET) ? 24 : 56;
+      IntPtr p = IntPtr.Add(buf, 4);
+      for (int i = 0; i < count; i++, p = IntPtr.Add(p, rowSize)) {
+        if (af == AF_INET) {
+          // MIB_TCPROW_OWNER_PID: dwState, dwLocalAddr, dwLocalPort, dwRemoteAddr, dwRemotePort, dwOwningPid
+          if ((uint)Marshal.ReadInt32(p, 0) != MIB_TCP_STATE_LISTEN) continue;
+          uint addr = (uint)Marshal.ReadInt32(p, 4);
+          ushort port = SwapUshort((ushort)Marshal.ReadInt16(p, 8));
+          rows.Add(new TcpRow {
+            Pid = Marshal.ReadInt32(p, 20),
+            LocalAddress = new System.Net.IPAddress(BitConverter.GetBytes(addr)).ToString(),
+            LocalPort = port,
+          });
+        } else {
+          // MIB_TCP6ROW_OWNER_PID: ucLocalAddr[16], dwLocalScopeId, dwLocalPort,
+          // ucRemoteAddr[16], dwRemoteScopeId, dwRemotePort, dwState, dwOwningPid
+          if ((uint)Marshal.ReadInt32(p, 48) != MIB_TCP_STATE_LISTEN) continue;
+          byte[] addr6 = new byte[16];
+          Marshal.Copy(p, addr6, 0, 16);
+          ushort port = SwapUshort((ushort)Marshal.ReadInt16(p, 20));
+          rows.Add(new TcpRow {
+            Pid = Marshal.ReadInt32(p, 52),
+            LocalAddress = new System.Net.IPAddress(addr6).ToString(),
+            LocalPort = port,
+          });
+        }
+      }
+    }
+    finally { Marshal.FreeHGlobal(buf); }
+  }
+
+  public static System.Collections.Generic.List<TcpRow> TcpListeners() {
+    var rows = new System.Collections.Generic.List<TcpRow>();
+    ReadTcpListenerTable(AF_INET, rows);
+    ReadTcpListenerTable(AF_INET6, rows);
+    return rows;
+  }
+
+  // CreateToolhelp32Snapshot：等价 Win32_Process 的 pid/ppid/映像名拓扑，
+  // 供后代展开使用；一次快照毫秒级，不再起 WMI 查询。szExeFile 仅映像基名。
+  public static System.Collections.Generic.List<ProcRow> ProcessTable() {
+    var rows = new System.Collections.Generic.List<ProcRow>();
+    const uint TH32CS_SNAPPROCESS = 0x2;
+    IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == new IntPtr(-1)) return rows;
+    try {
+      var e = new PROCESSENTRY32();
+      e.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+      if (!Process32First(snap, ref e)) return rows;
+      do {
+        rows.Add(new ProcRow {
+          Pid = (int)e.th32ProcessID,
+          Ppid = (int)e.th32ParentProcessID,
+          Image = e.szExeFile,
+        });
+      } while (Process32Next(snap, ref e));
+      return rows;
+    }
+    finally { CloseHandle(snap); }
   }
 
   static string Err(string code, int win32) { return "ERR\t" + code + "\t" + win32.ToString(); }
@@ -311,32 +421,21 @@ if ($Action -eq 'verify-batch') {
   exit 0
 }
 
-# resources：单次有界资源采样（RSS/CPU）。items 为 [{ id, tree }]；tree=true 时
-# 在后代 PPID 树中聚合目标 + 后代（命令模式的真实用量）。整个采样只 spawn 一次 pwsh，
-# 后代枚举（CIM）与两次 CPU 计数都在同一进程内完成，不引入常驻轮询。
-if ($Action -eq 'resources') {
-  if (-not $Json) {
-    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
-    exit 0
-  }
-  $items = @()
+# 单次有界资源采样（RSS/CPU）。items 为 [{ id, tree }]；tree=true 时
+# 在后代 PPID 树中聚合目标 + 后代（命令模式的真实用量）。
+# 后代枚举用 Toolhelp 快照（毫秒级，替代原 Win32_Process WMI 查询），
+# 与两次 CPU 计数都在同一 pwsh 内完成，不引入常驻轮询。
+function Invoke-ResourceSample($items, [int]$intervalMs) {
+  # 一次快照取全量拓扑，供所有 tree 项复用；失败时退化为只采样目标自身。
+  $procRows = @()
   try {
-    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
-    $items = @($jsonText | ConvertFrom-Json)
-  } catch {
-    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
-    exit 0
-  }
-  # 一次 CIM 查询取全量拓扑，供所有 tree 项复用；失败时退化为只采样目标自身。
-  $rows = @()
-  try {
-    $rows = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)
-  } catch { $rows = @() }
+    $procRows = @([ProcUtil]::ProcessTable())
+  } catch { $procRows = @() }
   $byParent = @{}
-  foreach ($p in $rows) {
-    $pp = [int64]$p.ParentProcessId
+  foreach ($p in $procRows) {
+    $pp = [int64]$p.Ppid
     if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
-    [void]$byParent[$pp].Add([int64]$p.ProcessId)
+    [void]$byParent[$pp].Add([int64]$p.Pid)
   }
   $maxPids = 64
   $expanded = @()
@@ -370,7 +469,7 @@ if ($Action -eq 'resources') {
       if (-not $seen.ContainsKey($p)) { $seen[$p] = $true; [void]$unique.Add([int]$p) }
     }
   }
-  $lines = @([ProcUtil]::SampleResources([int[]]$unique.ToArray(), [int]$IntervalMs))
+  $lines = @([ProcUtil]::SampleResources([int[]]$unique.ToArray(), $intervalMs))
   $procs = @()
   foreach ($line in $lines) {
     $parts = $line -split "`t", 6
@@ -389,12 +488,100 @@ if ($Action -eq 'resources') {
       $procs += [pscustomobject]@{ pid = [int]$parts[1]; result = 'error'; code = [string]$parts[2] }
     }
   }
-  [pscustomobject]@{
+  return [pscustomobject]@{
     result = 'ok'
-    intervalMs = [int]$IntervalMs
+    intervalMs = $intervalMs
     items = @($expanded)
     processes = @($procs)
-  } | ConvertTo-Json -Compress -Depth 6
+  }
+}
+
+if ($Action -eq 'resources') {
+  if (-not $Json) {
+    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $items = @()
+  try {
+    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
+    $items = @($jsonText | ConvertFrom-Json)
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  Invoke-ResourceSample $items $IntervalMs | ConvertTo-Json -Compress -Depth 6
+  exit 0
+}
+
+# probe：轮询路径组合探针——一次 pwsh 完成 verify/capture/listening/resources 任意组合，
+# 避免 status/list 每次各起 3-5 个 pwsh 冷启动（Windows 上每次含 Add-Type 编译约 0.5-1s）。
+# 输入 JSON：{ verify:[{id,creationFileTime,image}], capture:[pid..], listening:[pid..],
+#             resources:{items:[{id,tree}],intervalMs} }；各段独立 try，单段失败不拖垮整体。
+if ($Action -eq 'probe') {
+  if (-not $Json) {
+    [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $spec = $null
+  try {
+    $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
+    $spec = $jsonText | ConvertFrom-Json
+  } catch {
+    [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $out = [ordered]@{ result = 'ok'; verify = $null; capture = $null; listening = $null; resources = $null }
+  if ($null -ne $spec.verify) {
+    $vout = @()
+    foreach ($it in @($spec.verify)) {
+      $vout += (Parse-Result ([ProcUtil]::Verify([int]$it.id, [long]$it.creationFileTime, [string]$it.image)))
+    }
+    $out.verify = @($vout)
+  }
+  if ($null -ne $spec.capture) {
+    $cout = @()
+    foreach ($p in @($spec.capture)) {
+      $pidv = [int]$p
+      if ($pidv -le 0) { continue }
+      $raw = [ProcUtil]::Capture($pidv)
+      $parts = $raw -split "`t", 3
+      switch ($parts[0]) {
+        'OK' { $cout += [pscustomobject]@{ pid = $pidv; result = 'ok'; creationFileTime = [string]$parts[1]; image = [string]$parts[2] } }
+        'EXITED' { $cout += [pscustomobject]@{ pid = $pidv; result = 'exited' } }
+        'NOTFOUND' { $cout += [pscustomobject]@{ pid = $pidv; result = 'notfound' } }
+        'ERR' { $cout += [pscustomobject]@{ pid = $pidv; result = 'error'; code = [string]$parts[1] } }
+        default { $cout += [pscustomobject]@{ pid = $pidv; result = 'error'; code = 'unexpected' } }
+      }
+    }
+    $out.capture = @($cout)
+  }
+  if ($null -ne $spec.listening) {
+    try {
+      $wanted = @{}
+      foreach ($p in @($spec.listening)) { if ([int]$p -gt 0) { $wanted[[int]$p] = $true } }
+      $lrows = @()
+      if ($wanted.Count -gt 0) {
+        foreach ($c in [ProcUtil]::TcpListeners()) {
+          if (-not $wanted.ContainsKey([int]$c.Pid)) { continue }
+          $lrows += [pscustomobject]@{ pid = [int]$c.Pid; localAddress = [string]$c.LocalAddress; localPort = [int]$c.LocalPort }
+        }
+      }
+      $out.listening = [pscustomobject]@{ result = 'ok'; rows = @($lrows) }
+    } catch {
+      $out.listening = [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message }
+    }
+  }
+  if ($null -ne $spec.resources) {
+    try {
+      $resItems = @($spec.resources.items)
+      $resInterval = [int]$spec.resources.intervalMs
+      if ($resInterval -le 0) { $resInterval = $IntervalMs }
+      $out.resources = Invoke-ResourceSample $resItems $resInterval
+    } catch {
+      $out.resources = [pscustomobject]@{ result = 'error'; code = 'sampleFailed'; message = $_.Exception.Message }
+    }
+  }
+  $out | ConvertTo-Json -Compress -Depth 7
   exit 0
 }
 
@@ -429,14 +616,14 @@ if (($Action -eq 'listening') -and ($Id -le 0)) {
 if ($Action -eq 'port') {
   $rows = @()
   try {
-    $rows = @(Get-NetTCPConnection -State Listen -LocalPort $Id -ErrorAction SilentlyContinue)
+    $rows = @([ProcUtil]::TcpListeners() | Where-Object { $_.LocalPort -eq $Id })
   } catch {
     [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
     exit 0
   }
   $out = @()
   foreach ($conn in $rows) {
-    $ownerPid = [int]$conn.OwningProcess
+    $ownerPid = [int]$conn.Pid
     $identity = $null
     $processName = $null
     $executablePath = $null
@@ -473,12 +660,12 @@ if ($Action -eq 'port') {
   exit 0
 }
 
-# listening：pid→实际监听端口（#107）。Get-NetTCPConnection 按 OwningProcess 过滤，
+# listening：pid→实际监听端口（#107）。GetExtendedTcpTable 按 OwningProcess 过滤，
 # 只输出本机地址与端口，不采集命令行。权限不足/进程已退出时返回空数组，不臆造。
 if ($Action -eq 'listening') {
   $out = @()
   try {
-    $rows = @(Get-NetTCPConnection -State Listen -OwningProcess $Id -ErrorAction SilentlyContinue)
+    $rows = @([ProcUtil]::TcpListeners() | Where-Object { $_.Pid -eq $Id })
   } catch {
     [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
     exit 0
@@ -490,8 +677,8 @@ if ($Action -eq 'listening') {
   exit 0
 }
 
-# listening-batch：一次 pwsh 调用枚举多个 pid 的监听端口（ui list 轮询用），
-# 避免每个运行中应用各起一次 pwsh。输入同 verify-batch：UTF-8 JSON 数组的 base64。
+# listening-batch：一次调用枚举多个 pid 的监听端口（ui list 轮询用）。
+# 输入同 verify-batch：UTF-8 JSON 数组的 base64。
 if ($Action -eq 'listening-batch') {
   $pids = @()
   try {
@@ -506,13 +693,13 @@ if ($Action -eq 'listening-batch') {
   if ($wanted.Count -eq 0) { '[]'; exit 0 }
   $out = @()
   try {
-    $conns = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue)
+    $conns = @([ProcUtil]::TcpListeners())
   } catch {
     [pscustomobject]@{ result = 'error'; code = 'netFailed'; message = $_.Exception.Message } | ConvertTo-Json -Compress
     exit 0
   }
   foreach ($conn in $conns) {
-    $owner = [int]$conn.OwningProcess
+    $owner = [int]$conn.Pid
     if (-not $wanted.ContainsKey($owner)) { continue }
     $out += [pscustomobject]@{ pid = $owner; localAddress = [string]$conn.LocalAddress; localPort = [int]$conn.LocalPort }
   }

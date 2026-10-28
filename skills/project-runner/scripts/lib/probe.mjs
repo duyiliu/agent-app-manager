@@ -32,15 +32,13 @@ function psProcOnce(action, params) {
   if (params.creationFileTime != null) args.push('-CreationFileTime', String(params.creationFileTime));
   if (params.image != null) args.push('-Image', params.image);
   if (action === 'terminate' || action === 'terminate-tree' || action === 'grace' || action === 'discover') args.push('-WaitMs', String(params.waitMs ?? (action === 'discover' ? COMMAND_DISCOVER_TIMEOUT_MS : TERMINATE_WAIT_MS)));
-  if (action === 'resources') {
-    if (params.json != null) args.push('-Json', params.json);
-    args.push('-IntervalMs', String(params.intervalMs ?? 200));
-  }
+  if (params.json != null) args.push('-Json', params.json);
+  if (action === 'resources' || action === 'probe') args.push('-IntervalMs', String(params.intervalMs ?? 200));
   // discover 在单个 pwsh 进程内轮询等待目标出现，超时上限 = 发现窗口 + 启动余量
   // grace 内部要轮询 waitMs 才能给出 stillAlive，pwsh 超时需覆盖
   const timeout = action === 'discover' ? (params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS) + 15000
     : action === 'grace' ? (params.waitMs ?? TERMINATE_WAIT_MS) + 15000
-    : action === 'resources' ? (params.intervalMs ?? 200) + 15000 : 30000;
+    : action === 'resources' || action === 'probe' ? (params.intervalMs ?? 200) + 15000 : 30000;
   const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
@@ -376,4 +374,56 @@ export function sampleResources(items, opts = {}) {
   if (IS_LINUX) return normalizeResourceSample(linuxProc.resources(norm, intervalMs), intervalMs);
   const payload = Buffer.from(JSON.stringify(norm), 'utf8').toString('base64');
   return retryProcessProbe('resources', () => normalizeResourceSample(psProcOnce('resources', { json: payload, intervalMs }), intervalMs));
+}
+
+// ---------- 组合探针（proc.ps1 -Action probe） ----------
+// status/list 轮询一次需要 verify + logger capture + listening + resources 四类结果，
+// Windows 上各起一次 pwsh 冷启动合计 4-5s。合并后单次 pwsh 完成全部只读采集（约 1s）；
+// 未请求的段传 null。Linux 无 spawn 开销，同函数内顺序读 /proc 保持同形返回。
+// spec: { verify: [{pid,creationFileTime,image}], capture: [pid],
+//         listening: [pid], resources: { items: [{id,tree}], intervalMs } }
+// 返回: { verify: [..]|null, capture: [{pid,result,..}]|null,
+//         listening: {result,rows}|null, resources: normalized|null }
+export function probeComposite(spec = {}) {
+  ensureSupported();
+  const hasVerify = spec.verify != null;
+  const verify = (spec.verify ?? [])
+    .filter((r) => r && Number.isInteger(r.pid) && r.creationFileTime && r.image)
+    .map((r) => ({ id: r.pid, creationFileTime: r.creationFileTime, image: r.image }));
+  const hasCapture = spec.capture != null;
+  const capture = [...new Set((spec.capture ?? []).map(Number).filter((p) => Number.isInteger(p) && p > 0))];
+  const hasListening = spec.listening != null;
+  const listening = [...new Set((spec.listening ?? []).map(Number).filter((p) => Number.isInteger(p) && p > 0))];
+  const resSpec = spec.resources ?? null;
+  const intervalMs = Number.isInteger(resSpec?.intervalMs) && resSpec.intervalMs > 0
+    ? Math.min(resSpec.intervalMs, 5000) : RESOURCE_SAMPLE_INTERVAL_MS;
+  const resItems = (resSpec?.items ?? [])
+    .map((it) => ({ id: Number(it?.id ?? it), tree: !!it?.tree }))
+    .filter((it) => Number.isInteger(it.id) && it.id > 0);
+
+  if (IS_LINUX) {
+    return {
+      verify: hasVerify ? linuxProc.verifyBatch(verify) : null,
+      capture: hasCapture ? capture.map((pid) => ({ pid, ...linuxProc.capture(pid) })) : null,
+      listening: hasListening
+        ? { result: 'ok', rows: linuxProc.listeningPortsBatch(listening).map(({ pid, localAddress, localPort }) => ({ pid, localAddress, localPort })) }
+        : null,
+      resources: resSpec ? normalizeResourceSample(linuxProc.resources(resItems, intervalMs), intervalMs) : null,
+    };
+  }
+  const payload = Buffer.from(JSON.stringify({
+    verify: hasVerify ? verify : null,
+    capture: hasCapture ? capture : null,
+    listening: hasListening ? listening : null,
+    resources: resSpec ? { items: resItems, intervalMs } : null,
+  }), 'utf8').toString('base64');
+  const raw = retryProcessProbe('probe', () => psProcOnce('probe', { json: payload, intervalMs }));
+  return {
+    verify: raw?.verify ?? null,
+    capture: raw?.capture ?? null,
+    listening: raw?.listening ?? null,
+    resources: resSpec
+      ? normalizeResourceSample(raw?.resources ?? { result: 'error', code: 'missing' }, intervalMs)
+      : null,
+  };
 }

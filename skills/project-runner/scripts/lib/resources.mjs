@@ -61,14 +61,19 @@ export function sampleRunResources(runs, opts = {}) {
 
   const intervalMs = opts.intervalMs ?? RESOURCE_SAMPLE_INTERVAL_MS;
   let sampled;
-  try {
-    sampled = sampleResources(
-      candidates.map(({ run }) => ({ id: run.pid, tree: run.kind === 'command' })),
-      { intervalMs },
-    );
-  } catch (e) {
-    for (const { index } of candidates) out[index] = { available: false, reason: `资源采样失败：${e.code ?? e.message}` };
-    return out;
+  if (opts.sampled !== undefined) {
+    // 组合探针已预取的平台采样（一次 pwsh 内完成）：跳过重复调用，仅做聚合解释。
+    sampled = opts.sampled;
+  } else {
+    try {
+      sampled = sampleResources(
+        candidates.map(({ run }) => ({ id: run.pid, tree: run.kind === 'command' })),
+        { intervalMs },
+      );
+    } catch (e) {
+      for (const { index } of candidates) out[index] = { available: false, reason: `资源采样失败：${e.code ?? e.message}` };
+      return out;
+    }
   }
   if (sampled?.result && sampled.result !== 'ok') {
     for (const { index } of candidates) out[index] = { available: false, reason: `资源采样失败：${sampled.code ?? sampled.result}` };

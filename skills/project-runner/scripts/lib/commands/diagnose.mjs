@@ -5,7 +5,7 @@ import http from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict } from '../store.mjs';
 import { usageError } from '../errors.mjs';
-import { verifyRun, verifyRuns, portOccupants, tcpListening, listListeningPorts, listListeningPortsBatch, cacheVerifyResult, interpretVerifyResult } from '../probe.mjs';
+import { verifyRun, verifyRuns, portOccupants, tcpListening, listListeningPorts, listListeningPortsBatch, cacheVerifyResult, interpretVerifyResult, probeComposite } from '../probe.mjs';
 import { resolveAppId, statusWithFacts, exitSummary } from '../runtime.mjs';
 import { readTailLines, MAX_LOG_LINES } from '../logs.mjs';
 import { decodeText } from '../decode.mjs';
@@ -120,11 +120,38 @@ export function cmdDoctor(ctx) {
   }));
 }
 
+// 运行记录里需要组合探针采集的证据：身份核验项 + loggerPid 身份采集 + 监听枚举 + 资源采样。
+// 各段只读且按 pid 独立；核验结果返回前不知道进程是否真 RUNNING，按记录投机采集、
+// 消费端再按核验后的 status 取舍——多余采集只是几次只读调用，语义与逐路调用一致。
+function pendingProbeSpec(pending) {
+  const capture = [];
+  for (const p of pending) {
+    if (Number.isInteger(p.loggerPid) && p.loggerPid > 0 && p.loggerCreationFileTime) capture.push(p.loggerPid);
+  }
+  return {
+    verify: pending,
+    capture,
+    listening: pending.map((p) => p.pid),
+    resources: { items: pending.map((p) => ({ id: p.pid, tree: p.kind === 'command' })) },
+  };
+}
+
+// 预取的 logger capture 结果按 pid 索引；只有确实预取过的记录才返回值（否则 undefined，
+// loggerAliveNote 走原有按需探测路径）。
+function loggerCapLookup(probe) {
+  const byPid = new Map((probe?.capture ?? []).map((c) => [c.pid, c]));
+  return (cur) => {
+    if (!probe || !Number.isInteger(cur?.loggerPid) || cur.loggerPid <= 0 || !cur.loggerCreationFileTime) return undefined;
+    return byPid.get(cur.loggerPid) ?? { result: 'error', code: 'missing' };
+  };
+}
+
 export function cmdList(ctx) {
   const reg = readRegistry(ctx.home);
   const apps = Object.values(reg.apps);
-  // 一次批量核验所有 RUNNING 记录（#15/#51）：N 个受管应用只产生 1 次 pwsh 调用；
-  // 批量失败时回退逐条核验，语义与结果不变。
+  // 批量核验所有 RUNNING 记录（#15/#51）：N 个受管应用只产生 1 次 pwsh 调用；
+  // 现已并入组合探针（核验+logger 采集+监听枚举+资源采样同一 pwsh）；
+  // 组合失败时回退原逐路调用，语义与结果不变。
   const prefetched = new Map();
   const pending = [];
   const runtimes = new Map();
@@ -134,31 +161,46 @@ export function cmdList(ctx) {
       runtimes.set(app.appId, rt);
       const cur = rt?.current;
       if (cur && cur.managed && cur.phase === 'RUNNING' && cur.pid != null && cur.creationFileTime && cur.image) {
-        pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+        pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, kind: cur.kind, loggerPid: cur.loggerPid, loggerCreationFileTime: cur.loggerCreationFileTime });
       }
     } catch (e) {
       // 损坏/不兼容记录：保留错误供下方按 DATA_* 呈现
       runtimes.set(app.appId, e);
     }
   }
+  let probe = null;
   if (pending.length) {
+    try {
+      probe = probeComposite(pendingProbeSpec(pending));
+    } catch { probe = null; /* 组合探针失败：回退下方逐路调用 */ }
+  }
+  const verifyResults = probe?.verify ?? null;
+  if (verifyResults) {
+    pending.forEach((p, i) => {
+      const result = verifyResults[i];
+      if (!result) return;
+      prefetched.set(p.appId, result);
+      // 填充单条核验缓存：同一轮询周期内 /api/status 的 verifyRun 直接命中，不再多起 pwsh
+      try { cacheVerifyResult(p, interpretVerifyResult(result)); } catch { /* error 结果不缓存 */ }
+    });
+  } else if (pending.length) {
     try {
       const results = verifyRuns(pending);
       pending.forEach((p, i) => {
         if (!results[i]) return;
         prefetched.set(p.appId, results[i]);
-        // 填充单条核验缓存：同一轮询周期内 /api/status 的 verifyRun 直接命中，不再多起 pwsh
         try { cacheVerifyResult(p, interpretVerifyResult(results[i])); } catch { /* error 结果不缓存 */ }
       });
     } catch { /* 回退逐条 */ }
   }
+  const loggerCapOf = loggerCapLookup(probe);
   const rows = apps.map((app) => {
     let rt;
     let st;
     try {
       const cached = runtimes.get(app.appId);
       if (cached instanceof Error) throw cached;
-      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
+      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached, loggerCapOf(cached?.current)));
     } catch (e) {
       return { alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root, tags: app.tags ?? [], memoryBytes: null };
     }
@@ -192,7 +234,8 @@ export function cmdList(ctx) {
     candidates.push({ index, pid: row.pid, kind: cur.kind ?? 'direct', verified: true, creationFileTime: cur.creationFileTime, image: cur.image });
   });
   if (candidates.length) {
-    const samples = sampleRunResources(candidates.map(({ pid, kind }) => ({ pid, kind, verified: true })));
+    const runs = candidates.map(({ pid, kind }) => ({ pid, kind, verified: true }));
+    const samples = probe?.resources ? sampleRunResources(runs, { sampled: probe.resources }) : sampleRunResources(runs);
     candidates.forEach((c, i) => {
       const s = samples[i];
       if (s?.available) {
@@ -208,13 +251,28 @@ export function cmdList(ctx) {
   // 枚举失败不回退到 expectedPort 冒充实际端口；UI 会按无 actualPorts 处理。
   const runningPids = [...new Set(rows.filter((r) => r.status === 'RUNNING' && Number.isInteger(r.pid)).map((r) => r.pid))];
   if (runningPids.length) {
-    try {
-      const byPid = listListeningPortsBatch(runningPids);
-      for (const row of rows) {
-        if (row.status !== 'RUNNING' || !Number.isInteger(row.pid)) continue;
-        row.actualPorts = uniqueListeningPorts(byPid.get(row.pid) ?? []);
+    if (probe) {
+      // 组合探针已枚举全部 pending pid（RUNNING 记录的投机采集），按核验后的 RUNNING 行取用。
+      if (probe.listening?.result === 'ok') {
+        const byPid = new Map();
+        for (const row of probe.listening.rows ?? []) {
+          if (!byPid.has(row.pid)) byPid.set(row.pid, []);
+          byPid.get(row.pid).push(row);
+        }
+        for (const row of rows) {
+          if (row.status !== 'RUNNING' || !Number.isInteger(row.pid)) continue;
+          row.actualPorts = uniqueListeningPorts(byPid.get(row.pid) ?? []);
+        }
       }
-    } catch { /* 端口枚举失败不阻断 list；UI 回退 expectedPort */ }
+    } else {
+      try {
+        const byPid = listListeningPortsBatch(runningPids);
+        for (const row of rows) {
+          if (row.status !== 'RUNNING' || !Number.isInteger(row.pid)) continue;
+          row.actualPorts = uniqueListeningPorts(byPid.get(row.pid) ?? []);
+        }
+      } catch { /* 端口枚举失败不阻断 list；UI 回退 expectedPort */ }
+    }
   }
   if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
   return { apps: rows };
@@ -419,13 +477,29 @@ export async function cmdHealth(ctx) {
       runtimes.set(app.appId, rt);
       const cur = rt?.current;
       if (cur && cur.managed && cur.phase === 'RUNNING' && cur.pid != null && cur.creationFileTime && cur.image) {
-        pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
+        pending.push({ appId: app.appId, pid: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, kind: cur.kind, loggerPid: cur.loggerPid, loggerCreationFileTime: cur.loggerCreationFileTime });
       }
     } catch (e) {
       runtimes.set(app.appId, e);
     }
   }
+  // 组合探针一次完成核验 + logger 采集（health 不需要监听/资源段）；
+  // 失败回退批量核验 + logger 按需探测，语义不变。
+  let probe = null;
   if (pending.length) {
+    try {
+      probe = probeComposite({ verify: pending, capture: pendingProbeSpec(pending).capture });
+    } catch { probe = null; }
+  }
+  const verifyResults = probe?.verify ?? null;
+  if (verifyResults) {
+    pending.forEach((p, i) => {
+      const result = verifyResults[i];
+      if (!result) return;
+      prefetched.set(p.appId, result);
+      try { cacheVerifyResult(p, interpretVerifyResult(result)); } catch { /* error 结果不缓存 */ }
+    });
+  } else if (pending.length) {
     try {
       const results = verifyRuns(pending);
       pending.forEach((p, i) => {
@@ -435,6 +509,7 @@ export async function cmdHealth(ctx) {
       });
     } catch { /* 批量失败回退逐条核验 */ }
   }
+  const loggerCapOf = loggerCapLookup(probe);
 
   const rows = await Promise.all(apps.map(async (app) => {
     const base = {
@@ -445,7 +520,7 @@ export async function cmdHealth(ctx) {
     try {
       const cached = runtimes.get(app.appId);
       if (cached instanceof Error) throw cached;
-      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
+      ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached, loggerCapOf(cached?.current)));
     } catch (e) {
       return {
         ...base, status: 'UNKNOWN', managed: null, listening: null, state: 'UNTESTED',
@@ -483,13 +558,17 @@ export async function cmdHealth(ctx) {
 }
 
 // status --resources（#111）：只对 RUNNING 受管实例做一次有界采样；非 RUNNING 明确说明不采样，
-// 绝不因采样失败改变状态或退出码。
-function statusResources(st, cur) {
+// 绝不因采样失败改变状态或退出码。sampled 为组合探针预取的平台采样（undefined = 未预取，
+// 走原有单独采样路径）。
+function statusResources(st, cur, sampled) {
   const pid = st.status === 'RUNNING' ? (st.pid ?? cur?.pid) : null;
   if (!Number.isInteger(pid) || pid <= 0) {
     return { available: false, reason: `非 RUNNING（${st.status}），不采样资源用量` };
   }
-  const [result] = sampleRunResources([{ pid, kind: cur?.kind ?? 'direct', verified: true, creationFileTime: cur?.creationFileTime, image: cur?.image }]);
+  const [result] = sampleRunResources(
+    [{ pid, kind: cur?.kind ?? 'direct', verified: true, creationFileTime: cur?.creationFileTime, image: cur?.image }],
+    sampled !== undefined && sampled !== null ? { sampled } : {},
+  );
   return result ?? { available: false, reason: '资源采样不可用' };
 }
 
@@ -514,21 +593,55 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
   const app = reg.apps[appId];
-  const { rt, st } = statusWithFacts(ctx.home, appId);
+  const collectPorts = probeRequested || portsRequested;
+  // 组合探针：RUNNING 记录需要的 核验 + logger 采集 + 监听枚举 + 资源采样 合并为一次
+  // pwsh（Windows）。核验完成前不知道进程是否真 RUNNING——按记录投机采集（全部只读），
+  // 消费端仍按核验后的 st.status 取舍；已退出/复用 pid 的多余结果直接丢弃，输出语义不变。
+  const rt0 = readRuntimeStrict(ctx.home, appId);
+  const cur0 = rt0?.current;
+  const spec = {};
+  // 全部投机段限定在记录 phase=RUNNING：只有 RUNNING 记录才可能核验为 RUNNING、
+  // 才可能消费 logger/端口/资源段；STOPPED 记录投机采集只会白白多起一次 pwsh。
+  const runningRecord = cur0?.managed && cur0.phase === 'RUNNING' && Number.isInteger(cur0.pid);
+  if (runningRecord && cur0.creationFileTime && cur0.image) {
+    spec.verify = [{ pid: cur0.pid, creationFileTime: cur0.creationFileTime, image: cur0.image }];
+  }
+  if (runningRecord && Number.isInteger(cur0?.loggerPid) && cur0.loggerPid > 0 && cur0.loggerCreationFileTime) {
+    spec.capture = [cur0.loggerPid];
+  }
+  if (runningRecord && collectPorts) {
+    spec.listening = [cur0.pid];
+  }
+  if (runningRecord && resourcesRequested) {
+    spec.resources = { items: [{ id: cur0.pid, tree: (cur0.kind ?? 'direct') === 'command' }] };
+  }
+  const probe = Object.keys(spec).length ? probeComposite(spec) : null;
+  // 只有确实预取过 logger 身份（有 loggerCreationFileTime 才进 spec.capture）才传预取结果；
+  // 否则保持 undefined，loggerAliveNote 走原 kill(0)+按需 capture 路径，语义不回退。
+  const loggerCapture = probe && spec.capture
+    ? ((probe.capture ?? []).find((c) => c.pid === cur0.loggerPid) ?? { result: 'error', code: 'missing' })
+    : undefined;
+  const { rt, st } = statusWithFacts(ctx.home, appId, probe?.verify?.[0] ?? null, rt0, loggerCapture);
   const cur = rt && rt.current;
   const evidenceFile = runtimePath(ctx.home, appId);
   const portListening = probeRequested && Number.isInteger(app.expectedPort) ? await tcpListening(app.expectedPort) : null;
   // 实际端口是 pid→监听端口枚举（#107），只在进程被核验为 RUNNING 时查询：
   // 已停止的旧记录不会因 PID 复用而误报新进程的端口。
-  const collectPorts = probeRequested || portsRequested;
   let actualPorts = null;
   let actualPortsError = null;
   if (collectPorts) {
     actualPorts = [];
     const probePid = st.status === 'RUNNING' ? (st.pid ?? cur?.pid ?? null) : null;
     if (Number.isInteger(probePid)) {
-      try { actualPorts = uniqueListeningPorts(listListeningPorts(probePid)); }
-      catch (e) { actualPortsError = `${e.code ?? 'PORT_PROBE_FAILED'}: ${e.message}`; }
+      const section = probe?.listening;
+      if (section?.result === 'ok') {
+        actualPorts = uniqueListeningPorts((section.rows ?? []).filter((r) => r.pid === probePid));
+      } else if (section != null) {
+        actualPortsError = `${section.code ?? 'PORT_PROBE_FAILED'}: ${section.message ?? '端口探测失败'}`;
+      } else {
+        try { actualPorts = uniqueListeningPorts(listListeningPorts(probePid)); }
+        catch (e) { actualPortsError = `${e.code ?? 'PORT_PROBE_FAILED'}: ${e.message}`; }
+      }
     }
   }
   const portMismatch = collectPorts && Number.isInteger(app.expectedPort)
@@ -537,7 +650,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
-  const resources = resourcesRequested ? statusResources(st, cur) : null;
+  const resources = resourcesRequested ? statusResources(st, cur, probe?.resources ?? undefined) : null;
   const runExit = cur?.exit ?? null;
   const runExitSummary = exitSummary(cur);
   return {
