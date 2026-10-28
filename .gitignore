@@ -2,3 +2,22 @@
 work/
 # 本地测试/运行产物（e2e 截图、临时日志）
 .tmp/
+# JRebel 商业二进制 / 许可 / 激活文件：不入库（版权与 token 风险）
+jrebel.lic
+jrebel.properties
+jrebel.prefs
+**/.jrebel/
+**/jrebel*.jar
+**/jrebel*.log
+**/libjrebel*.so
+**/libjrebel*.dylib
+**/jrebel64.dll
+**/jrebel32.dll
+**/jrebel-activation.jar
+**/JrebelBrains*.jar
+**/license-server*.jar
+**/jrebel-stable*.zip
+**/activate.cmd
+**/activate.sh
+**/activate-gui.cmd
+**/activate-gui.sh
