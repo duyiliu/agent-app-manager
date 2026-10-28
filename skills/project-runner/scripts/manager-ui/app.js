@@ -92,8 +92,8 @@ function buildResChart() {
   now.id = 'resChartNow';
   head.append(
     el('span', 'res-chart-title', '资源曲线'),
-    resChartLegend('CPU %', '#f59e0b'),
-    resChartLegend('内存 MB', '#38bdf8'),
+    resChartLegend('CPU %', '#ff8a30'),
+    resChartLegend('内存 MB', '#4099ff'),
     now,
     el('span', 'res-chart-hint', `${RES_SAMPLE_INTERVAL_MS / 1000}s 采样 · 近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟`),
   );
@@ -145,8 +145,8 @@ function drawResChart() {
     resSeries.forEach((p, i) => { const x = xOf(i), y = yOf(pick(p)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.stroke();
   };
-  drawLine(p => p.cpu, yOfCpu, '#f59e0b');
-  drawLine(p => p.rss, yOfRss, '#38bdf8');
+  drawLine(p => p.cpu, yOfCpu, '#ff8a30');
+  drawLine(p => p.rss, yOfRss, '#4099ff');
   // 当前值放到头部图例旁：画在线上会随曲线移动，两条线接近时文字互相压住。
   const last = resSeries[resSeries.length - 1];
   const now = $('#resChartNow');
