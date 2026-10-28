@@ -39,6 +39,125 @@ function resWarnOf(row) {
   if (n >= RES_CPU_STREAK_WARN) return `CPU 连续 ${n} 次采样 ≥ ${RES_CPU_WARN}%`;
   return null;
 }
+// 资源时间序列：只在详情展开时按 2s 采样，收起即停。60 点 = 2 分钟窗口。
+// 采样走 /api/sample（CLI sample 子进程），单次约 1.3s；in-flight 去重避免叠加。
+const RES_SERIES_MAX = 60;
+const RES_SAMPLE_INTERVAL_MS = 2000;
+let resSeries = [];          // [{ t, cpu, rss }]
+let resSeriesAlias = null;   // 曲线归属的应用：换应用必须清空
+let resTimer = null, resSampling = false;
+
+function stopResSampling() {
+  if (resTimer) clearInterval(resTimer);
+  resTimer = null;
+}
+function resetResSeries(alias) {
+  stopResSampling();
+  resSeries = [];
+  resSeriesAlias = alias ?? null;
+}
+function startResSampling(alias) {
+  // 幂等：renderDetail 每 4s 重绘都会走 applyDetail，重复启动会把定时器不断重置、永远采不到点。
+  if (resTimer && resSeriesAlias === alias) return;
+  stopResSampling();
+  if (!alias) return;
+  if (resSeriesAlias !== alias) { resSeries = []; resSeriesAlias = alias; }
+  const tick = async () => {
+    if (resSampling || !selected || selected !== alias) return;
+    resSampling = true;
+    try {
+      const d = await api('/api/sample?app=' + encodeURIComponent(alias));
+      if (selected !== alias) return;
+      if (!d?.available) return;
+      resSeries.push({ t: Date.now(), cpu: Number(d.cpuPercent ?? 0), rss: Number(d.rssBytes ?? 0) });
+      if (resSeries.length > RES_SERIES_MAX) resSeries.splice(0, resSeries.length - RES_SERIES_MAX);
+      drawResChart();
+    } catch { /* 单次采样失败不断曲线 */ }
+    finally { resSampling = false; }
+  };
+  tick();
+  resTimer = setInterval(tick, RES_SAMPLE_INTERVAL_MS);
+}
+function resChartLegend(label, color) {
+  const span = el('span', 'res-chart-legend');
+  const swatch = el('span', 'res-chart-swatch');
+  swatch.style.background = color;
+  span.append(swatch, el('span', null, label));
+  return span;
+}
+function buildResChart() {
+  const wrap = el('div', 'res-chart-wrap');
+  const head = el('div', 'res-chart-head');
+  const now = el('span', 'res-chart-now');
+  now.id = 'resChartNow';
+  head.append(
+    el('span', 'res-chart-title', '资源曲线'),
+    resChartLegend('CPU %', '#f59e0b'),
+    resChartLegend('内存 MB', '#38bdf8'),
+    now,
+    el('span', 'res-chart-hint', `${RES_SAMPLE_INTERVAL_MS / 1000}s 采样 · 近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟`),
+  );
+  const canvas = document.createElement('canvas');
+  canvas.className = 'res-chart';
+  canvas.id = 'resChart';
+  wrap.append(head, canvas);
+  return wrap;
+}
+function drawResChart() {
+  const canvas = $('#resChart');
+  if (!canvas) return;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement);
+  const gridColor = css.getPropertyValue('--line-soft').trim() || 'rgba(148,163,184,.15)';
+  const dimColor = css.getPropertyValue('--text-faint').trim() || '#71829a';
+  const padR = 44, padB = 12, padT = 6;
+  const plotW = Math.max(1, w - padR), plotH = Math.max(1, h - padT - padB);
+  // CPU 轴自适应：命令模式聚合后代后 CPU% 可超过 100，固定 0-100 会把峰值裁掉。
+  const maxCpu = Math.max(100, ...resSeries.map(p => p.cpu));
+  // 网格 + 右侧刻度（CPU 0 / 中值 / 上限）
+  ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
+  ctx.font = '9px "Cascadia Code", Consolas, monospace'; ctx.fillStyle = dimColor; ctx.textAlign = 'left';
+  for (const pct of [0, 0.5, 1]) {
+    const y = padT + plotH * (1 - pct);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke();
+    ctx.fillText(String(Math.round(pct * maxCpu)), plotW + 6, y + 3);
+  }
+  if (resSeries.length < 2) {
+    ctx.textAlign = 'center';
+    ctx.fillText('采样中…', plotW / 2, padT + plotH / 2);
+    return;
+  }
+  // 留 15% 余量，否则窗口内最大值总贴顶、小波动被放大成满屏起伏。
+  const maxRss = Math.max(...resSeries.map(p => p.rss), 1) * 1.15;
+  // 最新点贴右边缘、旧点向左滚出（任务管理器同款），窗口未满时左侧留空而不是从左往右爬。
+  const offset = RES_SERIES_MAX - resSeries.length;
+  const xOf = (i) => ((i + offset) / (RES_SERIES_MAX - 1)) * plotW;
+  const yOfCpu = (v) => padT + plotH * (1 - Math.min(v, maxCpu) / maxCpu);
+  const yOfRss = (v) => padT + plotH * (1 - v / maxRss);
+  const drawLine = (pick, yOf, color) => {
+    ctx.beginPath();
+    resSeries.forEach((p, i) => { const x = xOf(i), y = yOf(pick(p)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.stroke();
+  };
+  drawLine(p => p.cpu, yOfCpu, '#f59e0b');
+  drawLine(p => p.rss, yOfRss, '#38bdf8');
+  // 当前值放到头部图例旁：画在线上会随曲线移动，两条线接近时文字互相压住。
+  const last = resSeries[resSeries.length - 1];
+  const now = $('#resChartNow');
+  if (now) {
+    now.replaceChildren(
+      el('span', 'res-chart-value cpu', `CPU ${last.cpu.toFixed(0)}%`),
+      el('span', 'res-chart-value rss', `内存 ${fmtSize(last.rss)}`),
+    );
+  }
+}
+
 // 展开详情时那次实时采样的缓存：轮询重绘（不带 resources）时继续显示它，避免数字来回跳。
 // 按 runId 绑定而不是按时间过期——页面时钟在后台标签页会跳，TTL 判定不可靠；
 // runId 变了（重启）或切换应用时自动失效。
@@ -318,6 +437,9 @@ let lifecycleTree = false, lifecycleGrace = '';
 function applyDetail(open) {
   $('#detail').hidden = !open;
   $('#detailBar').setAttribute('aria-expanded', String(open));
+  // 曲线只在详情展开时采样：收起即停，避免后台常驻 pwsh。
+  if (open && selected) { startResSampling(selected); requestAnimationFrame(drawResChart); }
+  else stopResSampling();
 }
 function rerenderDetail() {
   if (currentDetail && selected && currentDetail.alias === selected) renderDetail(currentDetail);
@@ -604,6 +726,12 @@ function renderDetail(d) {
   kvRow(grid, '日志轮转', run?.logRotated ? `已轮转（${(run.logRotatedStreams ?? []).join('/') || '未知流'}）· 源列表可选「轮转前」版本` : null, 'dim');
   kvRow(grid, '记录文件', d.runtimeFile, 'dim');
   if (d.managed === false) kvRow(grid, '能力', '非受管登记：仅记录启动尝试与日志线索，不提供跨会话启停', 'dim');
+  // 曲线放在字段表之前：详情卡有 max-height + 滚动，放底部会被裁到可视区外。
+  // 只有运行中的受管实例才有曲线；非 RUNNING 不建 canvas，避免空图占位。
+  if (d.status === 'RUNNING' && d.managed !== false) {
+    body.appendChild(buildResChart());
+    requestAnimationFrame(drawResChart);
+  }
   body.appendChild(grid);
   card.appendChild(body);
   appendLifecycleError(card, d);
@@ -794,6 +922,7 @@ function selectApp(alias) {
   logSrcWasCurrent = false;
   detailOpen = false; detailTouched = false; detailInitialized = false;
   liveResources = null; // 换应用后旧的采样值不再适用
+  resetResSeries(alias); // 曲线属于单个应用，换应用必须清空
   try {
     const u = new URL(location.href);
     u.searchParams.set('app', alias);

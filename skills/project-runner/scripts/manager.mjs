@@ -19,7 +19,7 @@ import { EXIT, SCHEMA_VERSION, MANAGER_VERSION, ManagerError } from './lib/const
 import { usageError } from './lib/errors.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
-  parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdHealth, cmdStart, cmdStop, cmdRestart,
+  parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdHealth, sampleAppUsage, cmdStart, cmdStop, cmdRestart,
   cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi, cmdCleanupWrapper,
   cmdStartByTags, cmdStopByTags, cmdRestartByTags, cmdStatusByTags,
 } from './lib/commands.mjs';
@@ -522,6 +522,11 @@ async function main() {
       case 'port': data = cmdPort(ctx, ctx.rest[0]); break;
       case 'doctor': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdDoctor(ctx); break;
       case 'health': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = await cmdHealth(ctx); break;
+      // 管理台曲线专用：只读 runtime + 一次资源采样，跳过状态核验与端口探测。
+      case 'sample':
+        if (ctx.rest.length !== 1) throw usageError('sample 需要 <alias|appId>');
+        data = sampleAppUsage(ctx.home, ctx.rest[0]);
+        break;
       case 'detect': {
         const opts = parseNamed(ctx.rest, { '--root': 'value' });
         if (opts.positional.length || !opts.get('--root')) throw usageError('detect 需要 --root <dir>');

@@ -222,6 +222,21 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     return entry.inflight;
   }
 
+  // 曲线采样：2s 一次，单次约 1s。in-flight 去重避免请求叠加；短 TTL 让同一周期内的重复请求复用。
+  const sampleFlights = new Map();
+  function collectSample(ref) {
+    const hit = sampleFlights.get(ref);
+    if (hit?.inflight) return hit.inflight;
+    if (hit && Date.now() - hit.at < 800) return Promise.resolve(hit.value);
+    const entry = { at: 0, value: undefined, inflight: null };
+    entry.inflight = Promise.resolve()
+      .then(() => api.sample(ref))
+      .then((v) => { entry.value = v; entry.at = Date.now(); return v; })
+      .finally(() => { entry.inflight = null; });
+    sampleFlights.set(ref, entry);
+    return entry.inflight;
+  }
+
   async function route(res, u, method) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
       // 管理台无令牌，安全边界依赖「只允许本机用户直接访问」：禁止任何站点 iframe 嵌入，
@@ -270,6 +285,9 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     }
     if (u.pathname === '/api/status') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectStatus(u.searchParams.get('app') || '', u.searchParams.get('sample') === '1') });
+    }
+    if (u.pathname === '/api/sample') {
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectSample(u.searchParams.get('app') || '') });
     }
     if (u.pathname === '/api/runs') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: api.listRuns(u.searchParams.get('app') || '') });

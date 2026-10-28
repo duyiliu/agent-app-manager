@@ -154,6 +154,8 @@ export async function cmdUi(ctx) {
         status: (ref, sample) => runManagerJson(ctx.home, ['status', ref, '--probe', ...(sample ? ['--resources'] : [])], { timeoutMs: 30000 })
           .then((data) => { delete data.portListening; delete data.portNote; return data; }),
         health: () => runManagerJson(ctx.home, ['health'], { timeoutMs: 90000 }),
+        // 时间序列曲线专用：采样是同步 pwsh，必须走子进程，否则 2s 一次的采样会冻结事件循环。
+        sample: (ref) => runManagerJson(ctx.home, ['sample', ref], { timeoutMs: 15000 }),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
         listSources: (ref) => listSources(ctx.home, ref),
