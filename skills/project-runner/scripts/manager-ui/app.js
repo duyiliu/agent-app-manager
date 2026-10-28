@@ -235,11 +235,18 @@ function healthBlock(h) {
   const head = el('div', 'health-head');
   head.append(el('span', 'health-title', '健康'), healthPill(h.state),
     el('span', null, h.state === 'READY' ? '就绪证据命中' : h.state === 'NOT_READY' ? '就绪证据未命中' : '未做就绪探测'));
+  // 说明文字收进悬停提示：它是概念解释，不需要每张详情卡常驻一行。
+  head.title = '监听（TCP）≠ 业务就绪：READY 仅代表配置的 readyUrl/readyLogPattern 证据命中。';
   box.appendChild(head);
   const ev = el('div', 'health-ev');
-  for (const line of healthEvidenceLines(h)) ev.appendChild(el('div', null, line));
+  for (const line of healthEvidenceLines(h)) {
+    // 日志证据常是整行启动日志，截断显示、全文放 title，避免一行撑满详情宽度。
+    const short = line.length > 84 ? line.slice(0, 82) + '…' : line;
+    const row = el('div', null, short);
+    if (short !== line) row.title = line;
+    ev.appendChild(row);
+  }
   box.appendChild(ev);
-  box.appendChild(el('div', 'health-note', '监听（TCP）≠ 业务就绪：READY 仅代表配置的 readyUrl/readyLogPattern 证据命中。'));
   return box;
 }
 function exitLabel(exit) {
@@ -431,6 +438,7 @@ function kvRow(grid, k, v, cls) {
   grid.append(el('div', 'k', k), el('div', 'v' + (cls ? ' ' + cls : ''), String(v)));
 }
 let detailOpen = false, detailTouched = false;
+let detailMoreOpen = false; // 「更多诊断信息」折叠区是否展开，跨轮询重绘保留
 let detailInitialized = false; // 该应用的详情是否已按「首次」规则决定过展开状态
 // 停止/重启的附加参数：控件在详情卡内，值跨轮询重绘保留；启动/移除不使用。
 let lifecycleTree = false, lifecycleGrace = '';
@@ -646,9 +654,6 @@ function renderDetail(d) {
 
   const body = el('div', 'card-body');
   const grid = el('div', 'kv');
-  kvRow(grid, '仓库', d.root);
-  kvRow(grid, '入口', d.entry);
-  kvRow(grid, 'tags', d.tags?.length ? d.tags.join(', ') : null, 'dim');
   const actualLinked = st === 'RUNNING' && actualPorts.length > 0;
   if (d.expectedPort != null) {
     grid.appendChild(el('div', 'k', '预期端口'));
@@ -716,16 +721,28 @@ function renderDetail(d) {
   kvRow(grid, '退出说明', run?.exitNote, run?.exitNote ? 'dim' : undefined);
   kvRow(grid, '退出证据', run?.exitWatchError?.reason ? `不可用：${run.exitWatchError.reason}` : null, 'bad');
   kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
-  kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
-  kvRow(grid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
-  const envRows = Object.entries(d.env ?? {});
-  kvRow(grid, '环境变量', envRows.length ? envRows.map(([k, v]) => `${k}=${v}`).join('\n') : null, 'dim');
-  kvRow(grid, 'stdout', run?.logPaths?.stdout);
-  kvRow(grid, 'stderr', run?.logPaths?.stderr);
-  kvRow(grid, '日志线索', run?.logHints?.length ? run.logHints.join('\n') : null, 'dim');
-  kvRow(grid, '日志轮转', run?.logRotated ? `已轮转（${(run.logRotatedStreams ?? []).join('/') || '未知流'}）· 源列表可选「轮转前」版本` : null, 'dim');
-  kvRow(grid, '记录文件', d.runtimeFile, 'dim');
   if (d.managed === false) kvRow(grid, '能力', '非受管登记：仅记录启动尝试与日志线索，不提供跨会话启停', 'dim');
+  // 低频诊断字段收进折叠区：常态只留状态/端口/资源，排查时再展开。
+  const more = document.createElement('details');
+  more.className = 'kv-more';
+  more.open = detailMoreOpen; // 每 4s 重绘会重建节点，展开状态必须跨渲染保留
+  more.addEventListener('toggle', () => { detailMoreOpen = more.open; });
+  more.appendChild(el('summary', null, '更多诊断信息'));
+  const moreGrid = el('div', 'kv');
+  // 静态配置与低频诊断放一起：仓库/入口只在确认对象时看一次，不必常驻。
+  kvRow(moreGrid, '仓库', d.root, 'dim');
+  kvRow(moreGrid, '入口', d.entry, 'dim');
+  kvRow(moreGrid, 'tags', d.tags?.length ? d.tags.join(', ') : null, 'dim');
+  kvRow(moreGrid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
+  kvRow(moreGrid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
+  const envRows = Object.entries(d.env ?? {});
+  kvRow(moreGrid, '环境变量', envRows.length ? envRows.map(([k, v]) => `${k}=${v}`).join('\n') : null, 'dim');
+  kvRow(moreGrid, 'stdout', run?.logPaths?.stdout);
+  kvRow(moreGrid, 'stderr', run?.logPaths?.stderr);
+  kvRow(moreGrid, '日志线索', run?.logHints?.length ? run.logHints.join('\n') : null, 'dim');
+  kvRow(moreGrid, '日志轮转', run?.logRotated ? `已轮转（${(run.logRotatedStreams ?? []).join('/') || '未知流'}）· 源列表可选「轮转前」版本` : null, 'dim');
+  kvRow(moreGrid, '记录文件', d.runtimeFile, 'dim');
+  more.appendChild(moreGrid);
   // 曲线放在字段表之前：详情卡有 max-height + 滚动，放底部会被裁到可视区外。
   // 只有运行中的受管实例才有曲线；非 RUNNING 不建 canvas，避免空图占位。
   if (d.status === 'RUNNING' && d.managed !== false) {
@@ -733,6 +750,7 @@ function renderDetail(d) {
     requestAnimationFrame(drawResChart);
   }
   body.appendChild(grid);
+  body.appendChild(more);
   card.appendChild(body);
   appendLifecycleError(card, d);
   appendPortDiagnosis(card, d);
@@ -921,6 +939,7 @@ function selectApp(alias) {
   selectedHistoryRun = null; wantedHistoryRun = null;
   logSrcWasCurrent = false;
   detailOpen = false; detailTouched = false; detailInitialized = false;
+  detailMoreOpen = false; // 换应用后诊断折叠区回到默认收起
   liveResources = null; // 换应用后旧的采样值不再适用
   resetResSeries(alias); // 曲线属于单个应用，换应用必须清空
   try {

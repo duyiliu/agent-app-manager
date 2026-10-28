@@ -184,6 +184,8 @@ const ctx = vm.createContext({
   Option: Opt,
   fetch, URL, URLSearchParams, TextDecoder, AbortController, AbortSignal, Blob, crypto, atob,
   setInterval, setTimeout, clearInterval, clearTimeout,
+  // 本测试不检查 canvas 绘制；浏览器会在下一帧调用此回调。
+  requestAnimationFrame: () => 0,
   console, alert: () => {},
 });
 new vm.Script(scriptSrc, { filename: 'index.html<script>' }).runInContext(ctx);
@@ -453,12 +455,15 @@ try {
     await run('loadApps()'); // 前序用例覆盖了 appsCache，先从服务端恢复真实应用列表
     run(`healthByAlias = new Map([['ahis', { appId:'ahis', status:'RUNNING', state:'READY', expectedPort:8080, listening:true, readiness:{ state:'READY', configured:true, evidence:[{ kind:'http', url:'http://127.0.0.1:8080/ready', status:200 }] } }]])`);
     run(`renderApps()`);
-    assert(elFor('appList').textContent.includes('READY'), '应用列表缺少健康状态');
+    const healthDot = elFor('appList').querySelector('.hl-dot');
+    assert(healthDot, '应用列表缺少就绪圆点');
+    assert(healthDot.title.includes('HTTP 200'), '就绪圆点缺少 HTTP 证据');
     run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:8080, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:123, logPaths:{} } })`);
     const text = elFor('detail').textContent;
-    for (const marker of ['健康', 'READY', '监听 127.0.0.1:8080 → 是', 'HTTP 200', '监听（TCP）≠ 业务就绪']) {
+    for (const marker of ['健康', 'READY', '监听 127.0.0.1:8080 → 是', 'HTTP 200']) {
       assert(text.includes(marker), `详情健康区块缺少 ${marker}：${text}`);
     }
+    assert(elFor('detail').querySelector('.health-head')?.title.includes('监听（TCP）≠ 业务就绪'), '健康说明提示缺失');
     assert(elFor('detailSummary').querySelectorAll('.hl-READY').length >= 1, '摘要栏缺少健康状态 pill');
   });
 
