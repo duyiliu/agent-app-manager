@@ -262,8 +262,16 @@ try {
     await check('跨 node 进程 start 在 PORT 未设置时仍传递持久化值', async () => {
       const childEnv = { ...process.env };
       delete childEnv.PORT;
-      const start = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', 'start', 'nodeapp'],
-        { encoding: 'utf8', windowsHide: true, timeout: 60000, env: childEnv });
+      let start;
+      const deadline = Date.now() + 5000;
+      do {
+        start = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', 'start', 'nodeapp'],
+          { encoding: 'utf8', windowsHide: true, timeout: 60000, env: childEnv });
+        let code;
+        try { code = JSON.parse(start.stdout).error?.code; } catch { /* 保留原始错误用于断言 */ }
+        if (code !== 'LOCK_BUSY' || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } while (true);
       assert.equal(start.status, 0, `${start.stdout}${start.stderr}`);
       assert.equal(cli('status', 'nodeapp').json.data.env.PORT, '3001');
       const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${cli('status', 'nodeapp').json.data.appId}.json`), 'utf8'));
