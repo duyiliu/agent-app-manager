@@ -4,17 +4,11 @@
 // 死锁清理刻意不做自动化：「判断持有者是否已死」在 Windows 上要起 PowerShell（数百毫秒），
 // 判断与动手之间锁可能已被释放并重建，自动回收会把活锁抢走、制造两个持有者。
 // 因此残留锁只报 LOCK_BUSY 并给出确切文件路径，由人（或 Agent）确认后删除。
+// 忙时同样不重试：锁只负责陈述事实，等待或重试由调用方决定。
 import fs from 'node:fs';
 import { lockPath } from './store.mjs';
 import { psProc } from './probe.mjs';
-import { sleepSync } from './proc.mjs';
 import { conflictError, dataError } from './errors.mjs';
-
-// 并发抢锁时的短暂重试：EEXIST 可能只是持有者刚释放；
-// 重试 open 不依赖对锁内容的任何解释，因此不会引入误判。
-const ACQUIRE_ATTEMPTS = 4;
-const ACQUIRE_RETRY_MS = 5;
-const REGISTRY_RETRIES = 40;
 
 export function readLockHolder(file) {
   let raw;
@@ -43,30 +37,31 @@ function releaseLock(file) {
 
 function acquireLock(home, name, op) {
   const file = lockPath(home, name);
-  for (let attempt = 0; attempt < ACQUIRE_ATTEMPTS; attempt++) {
-    let fd;
-    try {
-      fd = fs.openSync(file, 'wx');
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
-      if (attempt < ACQUIRE_ATTEMPTS - 1) {
-        sleepSync(ACQUIRE_RETRY_MS);
-        continue;
-      }
-      const holder = readLockHolder(file);
-      const who = holder ? `pid=${holder.pid}，op=${holder.op ?? '?'}` : '持有者信息不可读';
-      throw conflictError('LOCK_BUSY',
-        `另一 manager 正在操作（${who}）；确认该进程已退出后删除 ${file} 再重试`,
-        { pid: holder?.pid ?? null, op: holder?.op ?? null, file });
+  let fd;
+  try {
+    fd = fs.openSync(file, 'wx');
+  } catch (e) {
+    if (e.code !== 'EEXIST') {
+      // Windows：文件处于删除挂起（持有者刚 unlink）时创建会报 EPERM/EACCES/EBUSY，
+      // 这是瞬时竞争，按 LOCK_BUSY 交给调用方重试，而不是报环境错误。
+      const transient = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code);
+      if (!transient) throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
+      throw conflictError('LOCK_BUSY', `锁文件正在重建（${e.code}）；稍后重试`, { code: e.code, file });
     }
-    try {
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
-    } finally {
-      try { fs.closeSync(fd); } catch { /* 忽略 */ }
-    }
-    return () => releaseLock(file);
+    const holder = readLockHolder(file);
+    const who = holder ? `pid=${holder.pid}，op=${holder.op ?? '?'}` : '持有者信息不可读';
+    // 忙就报错，不在锁内部退避重试：等待/重试由调用方（人或 Agent）决定，
+    // 锁本身不做任何"判断持有者是否还活着"的动作。
+    throw conflictError('LOCK_BUSY',
+      `另一 manager 正在操作（${who}）；稍后重试。若确认该进程已退出，删除 ${file} 后重试`,
+      { pid: holder?.pid ?? null, op: holder?.op ?? null, file });
   }
-  throw conflictError('LOCK_BUSY', '锁竞争失败');
+  try {
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
+  } finally {
+    try { fs.closeSync(fd); } catch { /* 忽略 */ }
+  }
+  return () => releaseLock(file);
 }
 
 export function withLock(home, name, op, fn) {
@@ -94,17 +89,9 @@ export function withLogEvidenceLock(home, name, op, fn) {
 }
 
 // 注册表全局锁：读改写序列必须串行，否则并发写入会丢更新（#22）。
-// 锁顺序固定为 app 锁 → registry 锁；忙时退避重试，不直接拒绝并发启动。
+// 锁顺序固定为 app 锁 → registry 锁；忙时同样直接报 LOCK_BUSY，由调用方决定是否重试。
 export function withRegistryLock(home, op, fn) {
-  for (let i = 0; i < REGISTRY_RETRIES; i++) {
-    try {
-      return withLock(home, 'registry', op, fn);
-    } catch (e) {
-      if (e.code !== 'LOCK_BUSY') throw e;
-      sleepSync(50 + Math.floor(Math.random() * 50));
-    }
-  }
-  throw conflictError('LOCK_BUSY', '注册表锁竞争超时，拒绝执行');
+  return withLock(home, 'registry', op, fn);
 }
 
 export function lockHeld(home, name) {

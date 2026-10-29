@@ -68,29 +68,23 @@ check('释放时不删别人的锁', () => {
   fs.unlinkSync(file);
 });
 
-// 抢锁瞬间持有者恰好释放：重试 open 即可成功，不依赖对内容的任何解释。
-check('EEXIST 后持有者立刻释放 → 重试成功', () => {
-  const file = lockOf('gone');
+// 忙就报错，不在锁内部退避：等待/重试是调用方（人或 Agent）的决定。
+check('抢锁失败不在锁内重试：一次 open 失败即返回 LOCK_BUSY', () => {
+  const file = lockOf('no-retry');
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, op: 'other' }) + '\n');
   const realOpen = fs.openSync;
-  let injected = false;
+  let opens = 0;
   fs.openSync = function (p, flags, ...rest) {
-    if (!injected && String(flags) === 'wx' && path.resolve(String(p)) === path.resolve(file)) {
-      injected = true;
-      fs.writeFileSync(file, JSON.stringify({ pid: process.pid, op: 'other' }) + '\n');
-      fs.unlinkSync(file); // 持有者在我们 open 失败后释放
-      const e = new Error('EEXIST: file already exists, open');
-      e.code = 'EEXIST';
-      throw e;
-    }
+    if (String(flags) === 'wx' && path.resolve(String(p)) === path.resolve(file)) opens++;
     return realOpen.call(fs, p, flags, ...rest);
   };
   try {
-    const out = withLock(home, 'gone', 'probe', () => 'acquired');
-    assert.equal(out, 'acquired');
-    assert.ok(injected, '未注入 EEXIST 场景，用例失效');
-    assert.ok(!fs.existsSync(file), 'fn 结束后锁应释放');
+    assert.throws(() => withLock(home, 'no-retry', 'probe', () => {}),
+      (e) => e.code === 'LOCK_BUSY', '期望 LOCK_BUSY');
+    assert.equal(opens, 1, `锁内不应重试：open 实际调用 ${opens} 次`);
   } finally {
     fs.openSync = realOpen;
+    fs.unlinkSync(file);
   }
 });
 

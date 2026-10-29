@@ -441,7 +441,7 @@ export async function cmdRestart(ctx, ref) {
     // 环境校验必须在停止旧实例之前：缺失 envRefs/envFile 不可读时不得先停后败。
     const preparedEnv = prepareLaunchEnv({ ...app, cwd });
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
-    const stopResult = stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }); // 必须确认退出才继续；抛错则中止，绝不先起后停
+    // 注册表写入必须先于停止旧实例：锁忙时直接报错，不能把旧实例停了才发现写不进登记表。
     const appForLaunch = withRegistryLock(ctx.home, 'restart', () => {
       const reg = readRegistry(ctx.home);
       const a = reg.apps[appId];
@@ -451,6 +451,7 @@ export async function cmdRestart(ctx, ref) {
       atomicWriteJson(registryPath(ctx.home), reg);
       return a;
     });
+    const stopResult = stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }); // 必须确认退出才继续；抛错则中止，绝不先起后停
     const cur = await launchManaged(ctx.home, appId, appForLaunch, { preparedEnv });
     const readiness = readyOpts.waitReady
       ? await waitForReady(ctx.home, appForLaunch, cur, readyOpts.timeoutMs)

@@ -478,13 +478,18 @@ try {
     };
     const files = [mkDesc('conc-a'), mkDesc('conc-b')];
     const driver = path.join(base, 'concurrent-driver.cjs');
+    // 锁本身不重试：调用方（这里模拟 Agent）遇到 LOCK_BUSY 自己退避重试。
     fs.writeFileSync(driver,
       `const {spawn}=require('child_process');`
       + `const M=${JSON.stringify(MANAGER)},H=${JSON.stringify(home)},F=${JSON.stringify(files)};`
-      + 'Promise.all(F.map((f)=>new Promise((res)=>{'
+      + 'const once=(f)=>new Promise((res)=>{'
       + "const c=spawn(process.execPath,[M,'--home',H,'--json','start-new','--desc',f]);"
       + "let o='';c.stdout.on('data',(d)=>{o+=d;});"
-      + "c.on('close',(code)=>res({code,out:o}));}))).then((rs)=>console.log(JSON.stringify(rs)));");
+      + "c.on('close',(code)=>res({code,out:o}));});"
+      + 'const retry=async(f)=>{let r;for(let i=0;i<60;i++){r=await once(f);'
+      + "if(r.code===0||!r.out.includes('LOCK_BUSY'))return r;"
+      + 'await new Promise((s)=>setTimeout(s,50));}return r;};'
+      + 'Promise.all(F.map(retry)).then((rs)=>console.log(JSON.stringify(rs)));');
     const r = spawnSync(process.execPath, [driver], { encoding: 'utf8', timeout: 120000 });
     const rs = JSON.parse(r.stdout);
     assert.equal(rs.length, 2, `驱动输出异常：${r.stdout}${r.stderr}`);

@@ -9,13 +9,15 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { withRegistryLock } from '../lib/locks.mjs';
+import { sleepSync } from '../lib/proc.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const WORKERS = Number(process.env.PR_LOCK_STRESS_WORKERS ?? 4);
 const ROUNDS = Number(process.env.PR_LOCK_STRESS_ROUNDS ?? 1500);
 const TIMEOUT_MS = Number(process.env.PR_LOCK_STRESS_TIMEOUT_MS ?? 180000);
-// 锁在纯竞争场景下不应出现任何错误；LOCK_BUSY 由 withRegistryLock 有界重试。
-const BAD_CODES = new Set(['LOCK_UNWRITABLE', 'LOCK_BUSY']);
+// 锁本身不重试：忙就报 LOCK_BUSY。压测里的 worker 扮演调用方，自己退避重归。
+const BAD_CODES = new Set(['LOCK_UNWRITABLE']);
+const BUSY_DEADLINE_MS = 60000;
 
 // 子进程模式：反复抢锁，临界区内记录「锁文件当前写着谁」。
 // 只要 owner 不是自己，就证明互斥被破坏（锁被别人占着，我却进来了）。
@@ -23,7 +25,9 @@ function runWorker(home, rounds) {
   const lockLog = path.join(home, 'mutex.log');
   const lockFile = path.join(home, 'locks', 'registry.lock');
   const fails = [];
-  for (let i = 0; i < rounds; i++) {
+  let busyRetries = 0;
+  const deadline = Date.now() + BUSY_DEADLINE_MS;
+  for (let i = 0; i < rounds;) {
     try {
       withRegistryLock(home, 'stress', () => {
         let owner;
@@ -31,11 +35,14 @@ function runWorker(home, rounds) {
         fs.appendFileSync(lockLog, `+ ${process.pid} owner=${owner} ${process.hrtime.bigint()}\n`);
         fs.appendFileSync(lockLog, `- ${process.pid} owner=${owner} ${process.hrtime.bigint()}\n`);
       });
+      i++;
     } catch (e) {
+      if (e.code === 'LOCK_BUSY' && Date.now() < deadline) { busyRetries++; sleepSync(1); continue; }
       fails.push(e.code ?? 'UNKNOWN');
+      i++;
     }
   }
-  process.stdout.write(JSON.stringify({ pid: process.pid, rounds, fails }));
+  process.stdout.write(JSON.stringify({ pid: process.pid, rounds, fails, busyRetries }));
 }
 
 function spawnWorker(home, rounds) {
@@ -84,11 +91,13 @@ async function main() {
 
   const problems = [];
   let totalRounds = 0;
+  let totalBusy = 0;
   for (const r of results) {
     if (r.code !== 0) { problems.push(`worker 退出码 ${r.code}：${r.stderr.trim().slice(0, 400)}`); continue; }
     let parsed;
     try { parsed = JSON.parse(r.stdout); } catch { problems.push(`worker 输出无法解析：${r.stdout.slice(0, 200)}`); continue; }
     totalRounds += parsed.rounds;
+    totalBusy += parsed.busyRetries ?? 0;
     for (const code of parsed.fails) {
       if (BAD_CODES.has(code)) problems.push(`${code}（pid=${parsed.pid}）`);
     }
@@ -104,7 +113,7 @@ async function main() {
     process.exit(1);
   }
   fs.rmSync(base, { recursive: true, force: true });
-  console.log(`ok  锁并发压测：${WORKERS} 进程 × ${ROUNDS} 次，共 ${totalRounds} 次抢锁，无锁错误、无互斥破坏（${elapsed}ms）`);
+  console.log(`ok  锁并发压测：${WORKERS} 进程 × ${ROUNDS} 次，共 ${totalRounds} 次抢锁（调用方重试 ${totalBusy} 次），无锁错误、无互斥破坏（${elapsed}ms）`);
 }
 
 if (process.argv[2] === '--worker') {
