@@ -97,6 +97,7 @@ Standalone JRebel 不依赖 IDE 插件；安装路径、`REBEL_HOME`/`REBEL_BASE
 ## 6. 已知边界与故障处理
 
 - 任何未知脚本在执行前都应阅读检查；“文件名像启动脚本”不代表其安全、正确或适用于当前 profile。
+- **锁冲突 `LOCK_BUSY`（退出码 3）要重试**：另一个 manager 正在操作同一应用或注册表，通常毫秒级结束。退避重试（0.5s / 1s / 2s，最多 3 次），不要直接当失败报给用户；3 次仍忙再看 `error.detail`（含 `pid`/`op`/`file`），确认该进程已退出后删除锁文件再重试。`LOCK_UNWRITABLE`（退出码 5）、`ALREADY_RUNNING`、`PORT_IN_USE` 不重试。
 - Java/JRebel 的 `rebel.xml`、agent、资源同步、mapper XML 与 lambda 缓存问题见 [Java 启动参考](references/java.md) 第 4 节。
 
 ## 7. AI 输出要求

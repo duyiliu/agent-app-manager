@@ -49,3 +49,4 @@ Agent 使用规程：
 - **边界**：仅绑 `127.0.0.1`、无令牌，供本机可信用户使用；地址不得转发、写入文件或聊天记录；日志可能含敏感信息，外发前按既有规则检查。`8199` 被占用时按启动提示复用已有实例或换 `--port`。
 
 8. **退出码**：0 成功；1 用法；2 未找到；3 状态冲突（已运行/别名占用/身份不明/配置失效/`UNRESOLVED_RUN`/`ACK_MISMATCH`/就绪前进程已退出等）；4 环境依赖（缺 pwsh 7、`/proc` 不可读、Linux 安全停止缺 Python 3.9+/pidfd 或平台不支持）；5 数据损坏；6 就绪超时（`READY_TIMEOUT`，进程保持 RUNNING）。`--json` 输出单一稳定对象（`schemaVersion/ok/command/data|error`），脚本化调用优先用它。
+9. **可重试错误**：`LOCK_BUSY`（退出码 3，`error.detail` 含 `pid`/`op`/`file`）表示另一个 manager 正在操作同一应用或注册表，通常几毫秒结束——应退避重试 3 次（0.5s / 1s / 2s）；仍忙时核对 `detail.pid` 是否已退出，确认后删除 `detail.file` 再重试。进程被强杀会留下锁文件，manager 不再自动回收（自动判断持有者死活会在判定窗口内误抢活锁）；只删自己确认过的残留锁。`LOCK_UNWRITABLE`（5）、`CONFIG_INVALID`、`NOT_FOUND`、`ALREADY_RUNNING`、`PORT_IN_USE` 不可重试。
