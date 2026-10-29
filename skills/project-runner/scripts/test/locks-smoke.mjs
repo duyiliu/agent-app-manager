@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-// 锁回归：EEXIST 之后持有者恰好释放属于正常竞争，不能被误判成 LOCK_CORRUPT；
-// 真正的损坏锁仍必须拒绝静默处理。不触碰真实 ~/.project-runner/。
+// 锁回归：只覆盖「创建即互斥」这条主路径。
+// 死锁残留不再自动回收（那正是双持有者的来源），由 LOCK_BUSY 提示人工删除。
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { withLock, lockState } from '../lib/locks.mjs';
+import { withLock, lockState, readLockHolder } from '../lib/locks.mjs';
 import { hasProcessProbe } from './platform.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-locks-smoke-'));
@@ -24,99 +23,91 @@ const check = (name, fn) => {
 const skip = (name, why) => { skipped.push(name); console.log(`  skip  ${name}（${why}）`); };
 const hasProbe = hasProcessProbe();
 
-// #22 回归：open(file,'wx') 拿到 EEXIST 后，持有者在我们读锁文件之前 release（unlink）。
-// 旧实现会在同一路径上空读 4 次并判 LOCK_CORRUPT；正确行为是回到 openSync 重试创建。
-check('EEXIST 后锁被释放：重试创建成功，不误判 LOCK_CORRUPT', () => {
+check('获取后写入自己的 pid，fn 结束后释放', () => {
+  const file = lockOf('basic');
+  const seen = withLock(home, 'basic', 'probe', () => readLockHolder(file));
+  assert.equal(seen?.pid, process.pid, `锁内应记录持有者 pid：${JSON.stringify(seen)}`);
+  assert.equal(seen?.op, 'probe');
+  assert.ok(!fs.existsSync(file), 'fn 结束后锁应释放');
+});
+
+// 并发抢锁：EEXIST 只是「有人先到」，不能删别人的锁，也不能静默当成自己拿到。
+check('持有者存活 → LOCK_BUSY，且不动别人的锁', () => {
+  const file = lockOf('held');
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, op: 'other', at: new Date().toISOString() }) + '\n');
+  assert.throws(() => withLock(home, 'held', 'probe', () => {}),
+    (e) => e.code === 'LOCK_BUSY', '期望 LOCK_BUSY');
+  assert.equal(readLockHolder(file)?.pid, process.pid, '持有者的锁不得被删除或改写');
+  fs.unlinkSync(file);
+});
+
+// 内容不可读时同样只报冲突：不猜、不删、不自动修复。
+check('锁内容不可读 → LOCK_BUSY，保留现场', () => {
+  const file = lockOf('unreadable');
+  fs.writeFileSync(file, 'not-json\n');
+  let err;
+  assert.throws(() => withLock(home, 'unreadable', 'probe', () => {}), (e) => {
+    err = e;
+    return e.code === 'LOCK_BUSY';
+  });
+  assert.ok(err.message.includes('不可读'), `错误信息应说明持有者不可读：${err.message}`);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'not-json\n', '不可读的锁不得被静默删除');
+  fs.unlinkSync(file);
+});
+
+// 释放只删自己的：持有期间锁被替换（人工清理后重建、PID 复用）时不能误删。
+check('释放时不删别人的锁', () => {
+  const file = lockOf('replaced');
+  const out = withLock(home, 'replaced', 'probe', () => {
+    fs.writeFileSync(file, JSON.stringify({ pid: 999999, op: 'other' }) + '\n');
+    return 'ok';
+  });
+  assert.equal(out, 'ok');
+  assert.ok(fs.existsSync(file), '锁已被替换时不得删除别人的锁');
+  assert.equal(readLockHolder(file)?.pid, 999999);
+  fs.unlinkSync(file);
+});
+
+// 抢锁瞬间持有者恰好释放：重试 open 即可成功，不依赖对内容的任何解释。
+check('EEXIST 后持有者立刻释放 → 重试成功', () => {
   const file = lockOf('gone');
-  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, creationFileTime: 'x', op: 'other' }) + '\n');
-  const realRead = fs.readFileSync;
+  const realOpen = fs.openSync;
   let injected = false;
-  fs.readFileSync = function (p, ...rest) {
-    if (!injected && path.resolve(String(p)) === path.resolve(file)) {
+  fs.openSync = function (p, flags, ...rest) {
+    if (!injected && String(flags) === 'wx' && path.resolve(String(p)) === path.resolve(file)) {
       injected = true;
-      fs.unlinkSync(file); // 持有者紧跟着释放
-      const e = new Error('ENOENT: no such file or directory, open');
-      e.code = 'ENOENT';
+      fs.writeFileSync(file, JSON.stringify({ pid: process.pid, op: 'other' }) + '\n');
+      fs.unlinkSync(file); // 持有者在我们 open 失败后释放
+      const e = new Error('EEXIST: file already exists, open');
+      e.code = 'EEXIST';
       throw e;
     }
-    return realRead.call(fs, p, ...rest);
+    return realOpen.call(fs, p, flags, ...rest);
   };
   try {
     const out = withLock(home, 'gone', 'probe', () => 'acquired');
     assert.equal(out, 'acquired');
-    assert.ok(injected, '未注入「锁消失」场景，用例失效');
-    assert.ok(!fs.existsSync(file), 'fn 结束后锁应已释放');
+    assert.ok(injected, '未注入 EEXIST 场景，用例失效');
+    assert.ok(!fs.existsSync(file), 'fn 结束后锁应释放');
   } finally {
-    fs.readFileSync = realRead;
+    fs.openSync = realOpen;
   }
 });
 
-// 语义保持：内容始终不可解析才是真损坏，必须拒绝并保留现场。
-check('锁内容始终非法：拒绝为 LOCK_CORRUPT 且不改写现场', () => {
-  const file = lockOf('corrupt');
-  fs.writeFileSync(file, 'not-json\n');
-  assert.throws(() => withLock(home, 'corrupt', 'probe', () => {}),
-    (e) => e.code === 'LOCK_CORRUPT', '期望 LOCK_CORRUPT');
-  assert.equal(fs.readFileSync(file, 'utf8'), 'not-json\n', '损坏锁不得被静默删除或改写');
+check('lockState：文件不存在 → 未持有', () => {
+  const st = lockState(home, 'absent');
+  assert.equal(st.held, false);
+  assert.equal(st.alive, false);
 });
 
-// 只读查询与 acquire 同口径：查询期间锁被释放属于正常竞争，
-// 不能返回 corrupt，否则 status 会把已释放的启动锁一直显示成「启动中」。
-check('lockState：查询期间锁被释放 → 未持有，不误报 corrupt', () => {
-  const file = lockOf('state-gone');
-  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, creationFileTime: 'x', op: 'other' }) + '\n');
-  const realRead = fs.readFileSync;
-  let injected = false;
-  fs.readFileSync = function (p, ...rest) {
-    if (!injected && path.resolve(String(p)) === path.resolve(file)) {
-      injected = true;
-      fs.unlinkSync(file);
-      const e = new Error('ENOENT: no such file or directory, open');
-      e.code = 'ENOENT';
-      throw e;
-    }
-    return realRead.call(fs, p, ...rest);
-  };
-  try {
-    const st = lockState(home, 'state-gone');
-    assert.equal(st.held, false, `期望未持有：${JSON.stringify(st)}`);
-    assert.equal(st.alive, false, `期望 alive=false：${JSON.stringify(st)}`);
-  } finally {
-    fs.readFileSync = realRead;
-  }
-});
-
-// 真损坏仍然保守：查询方不能把无法解释的内容当成「锁已释放」。
-check('lockState：内容持续非法 → corrupt 且保守视为持有', () => {
-  const file = lockOf('state-corrupt');
-  fs.writeFileSync(file, 'not-json\n');
-  const st = lockState(home, 'state-corrupt');
+if (!hasProbe) skip('lockState：持有者已退出 → alive=false', '缺进程探针');
+else check('lockState：持有者已退出 → alive=false', () => {
+  const file = lockOf('state-dead');
+  fs.writeFileSync(file, JSON.stringify({ pid: 999999, op: 'other' }) + '\n');
+  const st = lockState(home, 'state-dead');
   assert.equal(st.held, true);
-  assert.equal(st.alive, true);
-  assert.equal(st.corrupt, true, JSON.stringify(st));
-});
-
-// 占位持有者（pid-only）仍存活：保守视为占用，不能回收也不能判损坏。
-if (!hasProbe) skip('占位持有者存活 → LOCK_BUSY', '缺进程探针');
-else check('占位持有者存活 → LOCK_BUSY', () => {
-  const file = lockOf('busy');
-  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, op: 'other', at: new Date().toISOString() }) + '\n');
-  assert.throws(() => withLock(home, 'busy', 'probe', () => {}),
-    (e) => e.code === 'LOCK_BUSY', '期望 LOCK_BUSY');
-  assert.ok(fs.existsSync(file), '存活者的锁不得被回收');
-});
-
-// 死锁回收：持有者已退出 → 回收并把现场留成 .stale-*。
-if (!hasProbe) skip('死锁持有者已退出 → 回收并保留现场', '缺进程探针');
-else check('死锁持有者已退出 → 回收并保留现场', () => {
-  const dead = spawnSync(process.execPath, ['-e', '0']);
-  assert.ok(dead.pid > 0, `未能取得已退出进程 pid：${dead.error?.message ?? dead.status}`);
-  const file = lockOf('stale');
-  fs.writeFileSync(file, JSON.stringify({ pid: dead.pid, creationFileTime: '1', op: 'dead' }) + '\n');
-  assert.equal(withLock(home, 'stale', 'probe', () => 'acquired'), 'acquired');
-  assert.ok(!fs.existsSync(file), '回收后新锁应在 fn 结束时释放');
-  assert.ok(fs.readdirSync(locksDir).some((n) => n.startsWith('stale.lock.stale-')),
-    `未保留回收现场：${JSON.stringify(fs.readdirSync(locksDir))}`);
+  assert.equal(st.alive, false, JSON.stringify(st));
+  fs.unlinkSync(file);
 });
 
 console.log(failed ? `\n${failed} 项失败` : `\nlocks smoke ok${skipped.length ? `（跳过 ${skipped.length} 项）` : ''}`);

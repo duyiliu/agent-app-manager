@@ -418,10 +418,14 @@ try {
       const st = expectOk(run(['status', 'smoke']));
       assert.equal(st.data.status, 'UNKNOWN');
       assert(st.data.note.includes('启动中断'), `note 未提示启动中断：${st.data.note}`);
+      // 残留锁不再自动回收：先报 LOCK_BUSY 并给出确切文件，人工清理后才轮到未结记录判定
+      const busy = expectFail(run(['start', 'smoke']), 3, 'LOCK_BUSY');
+      assert(busy.error.message.includes(path.basename(lockFile)), `错误信息未给出残留锁路径：${busy.error.message}`);
+      fs.unlinkSync(lockFile);
       expectFail(run(['start', 'smoke']), 3, 'UNRESOLVED_RUN');
     } finally {
       fs.writeFileSync(rtFile(), saved);
-      try { fs.unlinkSync(lockFile); } catch { /* start 已回收死锁 */ }
+      try { fs.unlinkSync(lockFile); } catch { /* 已删除 */ }
     }
   });
   lifecycle('伪造 STARTING 未结记录 → start 默认拒绝（UNRESOLVED_RUN）', () => {

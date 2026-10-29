@@ -14,8 +14,8 @@ const SELF = fileURLToPath(import.meta.url);
 const WORKERS = Number(process.env.PR_LOCK_STRESS_WORKERS ?? 4);
 const ROUNDS = Number(process.env.PR_LOCK_STRESS_ROUNDS ?? 1500);
 const TIMEOUT_MS = Number(process.env.PR_LOCK_STRESS_TIMEOUT_MS ?? 180000);
-// 这些错误码在纯竞争场景下出现即实现缺陷；LOCK_BUSY 由 withRegistryLock 有界重试。
-const BAD_CODES = new Set(['LOCK_CORRUPT', 'LOCK_STEAL_FAILED', 'LOCK_UNWRITABLE']);
+// 锁在纯竞争场景下不应出现任何错误；LOCK_BUSY 由 withRegistryLock 有界重试。
+const BAD_CODES = new Set(['LOCK_UNWRITABLE', 'LOCK_BUSY']);
 
 // 子进程模式：反复抢锁，临界区内记录「锁文件当前写着谁」。
 // 只要 owner 不是自己，就证明互斥被破坏（锁被别人占着，我却进来了）。
