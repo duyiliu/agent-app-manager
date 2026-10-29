@@ -24,6 +24,8 @@ jobs:
         run: node skills/project-runner/scripts/test/log-rotation.mjs
       - name: UI smoke test
         run: node skills/project-runner/scripts/test/ui-smoke.mjs
+      - name: Workbench smoke test
+        run: node skills/project-runner/scripts/test/workbench-smoke.mjs
       - name: UI source-follow test
         run: node skills/project-runner/scripts/test/ui-src-follow.mjs
       - name: Locks smoke test
