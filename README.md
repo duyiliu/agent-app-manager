@@ -12,9 +12,19 @@
 
 ### 1. 安装
 
+**官方安装：**
+
 ```bash
 npx skills add duyiliu/project-runner --skill project-runner -g
 ```
+
+**国内网络加速安装（第三方 `skills-cn`）：**
+
+```bash
+npx skills-cn@latest add duyiliu/project-runner --skill project-runner -g -y
+```
+
+两种方式均从本仓库安装相同的 `project-runner` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。
 
 安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。更新时重新执行安装命令；版本号可通过 `manager.mjs version` 或管理台顶栏查看。
 
