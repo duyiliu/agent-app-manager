@@ -15,6 +15,18 @@ import { psProc, listListeningPorts } from '../lib/probe.mjs';
 import { persistableDiscovery } from '../lib/launch.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
+const processPattern = 'two\\.js|srv\\.js|multi\\.js|lsn\\.js|crash\\.js|stable\\.js|clean\\.js|cmd-crash\\.js|npm-cli\\.js run dev|setInterval|sleep 30';
+const existingProcesses = new Map(findProcesses(processPattern).filter((pid) => pid !== process.pid).map((pid) => {
+  try { const info = psProc('capture', { id: pid }); return [pid, info.result === 'ok' ? info.creationFileTime : null]; }
+  catch { return [pid, null]; }
+}));
+function isExistingProcess(pid) {
+  if (!existingProcesses.has(pid)) return false;
+  const creation = existingProcesses.get(pid);
+  if (creation == null) return false;
+  try { const info = psProc('capture', { id: pid }); return info.result === 'ok' && info.creationFileTime === creation; }
+  catch { return false; }
+}
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-runtime-smoke-'));
 const home = path.join(base, 'home');
 const projNode = path.join(base, 'node-app');
@@ -865,7 +877,7 @@ try {
   // 回归断言：本轮启动的临时进程都已退出（kill 后进程退出需要一点时间，轮询等待）
   let leftover = [];
   for (let i = 0; i < 20; i++) {
-    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|lsn\\.js|crash\\.js|stable\\.js|clean\\.js|cmd-crash\\.js|npm-cli\\.js run dev|setInterval|sleep 30').filter((pid) => pid !== process.pid);
+    leftover = findProcesses(processPattern).filter((pid) => pid !== process.pid && !isExistingProcess(pid));
     if (!leftover.length) break;
     await wait(250);
   }
