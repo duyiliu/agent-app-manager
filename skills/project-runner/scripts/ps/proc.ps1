@@ -773,8 +773,13 @@ if ($Action -eq 'discover') {
       $ancestorSet = @{}
       foreach ($f in $found) {
         $cur2 = $parentOf[[int64]$f.pid]
-        while ($cur2 -gt 0) {
+        # PID 复用可使系统快照的父链出现环；只需追溯到本次 wrapper，
+        # 并为损坏或竞态快照保留 visited 防护，避免 discover 永久循环。
+        $ancestorSeen = @{}
+        while ($cur2 -gt 0 -and -not $ancestorSeen.ContainsKey($cur2)) {
+          $ancestorSeen[$cur2] = $true
           $ancestorSet[$cur2] = $true
+          if ($cur2 -eq $Id) { break }
           if (-not $parentOf.ContainsKey($cur2)) { break }
           $cur2 = $parentOf[$cur2]
         }

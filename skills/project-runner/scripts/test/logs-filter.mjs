@@ -86,7 +86,7 @@ const run = (args) => new Promise((res) => {
   let err = '';
   c.stdout.on('data', (d) => { out += d; });
   c.stderr.on('data', (d) => { err += d; });
-  c.on('exit', (code) => res({ code, text: out + err, json: (() => { try { return JSON.parse(out); } catch { return null; } })() }));
+  c.on('exit', (code) => res({ code, text: out + err, out, err, json: (() => { try { return JSON.parse(out); } catch { return null; } })() }));
 });
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (fn, ms = 8000) => {
@@ -193,7 +193,7 @@ try {
   await check('--grep 人类可读输出保持命中段与 -- 分隔', async () => {
     const r = await run(['logs', 'filter', '--lines', '50', '--grep', 'ERROR|FATAL', '--context', '1']);
     assert.equal(r.code, 0, r.text);
-    assert.equal(r.text.trimEnd(), [
+    assert.equal(r.out.trimEnd(), [
       fixtureLines[1], fixtureLines[2], fixtureLines[3],
       '--',
       fixtureLines[5], fixtureLines[6], fixtureLines[7],
