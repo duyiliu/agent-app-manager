@@ -12,21 +12,21 @@
 
 ### 1. 安装
 
-**官方安装：**
+**官方安装（固定版本 `v0.5.0`）：**
 
 ```bash
-npx skills add duyiliu/project-runner --skill project-runner -g
+npx skills add duyiliu/project-runner#v0.5.0 --skill project-runner -g
 ```
 
 **国内网络加速安装（第三方 `skills-cn`）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/project-runner --skill project-runner -g -y
+npx skills-cn@latest add duyiliu/project-runner#v0.5.0 --skill project-runner -g -y
 ```
 
-两种方式均从本仓库安装相同的 `project-runner` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。
+两种方式均从本仓库安装相同的 `project-runner` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
 
-安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。更新时重新执行安装命令；版本号可通过 `manager.mjs version` 或管理台顶栏查看。
+安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对；去掉 `#vX.Y.Z` 则安装 `main` 最新提交，升级后重跑安装命令即可。
 
 原 `jrebel-start` 已由 `project-runner` 取代。安装不会自动清理旧副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
 
