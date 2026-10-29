@@ -245,18 +245,20 @@ export function lockHeld(home, name) {
   return fs.existsSync(lockPath(home, name));
 }
 
-// 只读查询锁状态：文件不存在 → 未持有；持有者已退出/PID 复用 → alive=false。
-// 锁损坏或权限不足时保守视为仍持有（alive=true），不把无法核验误判成启动中断。
+// 只读查询锁状态：
+// - 文件不存在 / 查询期间被持有者释放 → 未持有（不能把正常释放误报成损坏，
+//   否则 status 会在「启动中」和「启动中断」之间来回跳）；
+// - 内容持续非法 → 保守视为仍持有并标记 corrupt；
+// - 占位持有者（pid-only）与 acquire 同口径，按 pid 存活判断。
 export function lockState(home, name) {
-  const file = lockPath(home, name);
-  if (!fs.existsSync(file)) return { held: false, alive: false };
-  let holder;
-  try { holder = JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch { return { held: true, alive: true, corrupt: true }; }
-  if (!holder || typeof holder !== 'object') return { held: true, alive: true, corrupt: true };
+  const read = readHolder(lockPath(home, name));
+  if (read.state === 'gone') return { held: false, alive: false };
+  if (read.state !== 'ok') return { held: true, alive: true, corrupt: true };
+  const holder = read.holder;
   holder.name = name;
   try {
-    return { held: true, alive: holderAlive(holder), pid: holder.pid, op: holder.op ?? null };
+    const alive = holder.creationFileTime ? holderAlive(holder) : placeholderAlive(holder);
+    return { held: true, alive, pid: holder.pid, op: holder.op ?? null };
   } catch (e) {
     return { held: true, alive: true, error: e.code ?? 'UNKNOWN' };
   }

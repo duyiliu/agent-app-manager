@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { withLock } from '../lib/locks.mjs';
+import { withLock, lockState } from '../lib/locks.mjs';
 import { hasProcessProbe } from './platform.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-locks-smoke-'));
@@ -58,6 +58,42 @@ check('锁内容始终非法：拒绝为 LOCK_CORRUPT 且不改写现场', () =>
   assert.throws(() => withLock(home, 'corrupt', 'probe', () => {}),
     (e) => e.code === 'LOCK_CORRUPT', '期望 LOCK_CORRUPT');
   assert.equal(fs.readFileSync(file, 'utf8'), 'not-json\n', '损坏锁不得被静默删除或改写');
+});
+
+// 只读查询与 acquire 同口径：查询期间锁被释放属于正常竞争，
+// 不能返回 corrupt，否则 status 会把已释放的启动锁一直显示成「启动中」。
+check('lockState：查询期间锁被释放 → 未持有，不误报 corrupt', () => {
+  const file = lockOf('state-gone');
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, creationFileTime: 'x', op: 'other' }) + '\n');
+  const realRead = fs.readFileSync;
+  let injected = false;
+  fs.readFileSync = function (p, ...rest) {
+    if (!injected && path.resolve(String(p)) === path.resolve(file)) {
+      injected = true;
+      fs.unlinkSync(file);
+      const e = new Error('ENOENT: no such file or directory, open');
+      e.code = 'ENOENT';
+      throw e;
+    }
+    return realRead.call(fs, p, ...rest);
+  };
+  try {
+    const st = lockState(home, 'state-gone');
+    assert.equal(st.held, false, `期望未持有：${JSON.stringify(st)}`);
+    assert.equal(st.alive, false, `期望 alive=false：${JSON.stringify(st)}`);
+  } finally {
+    fs.readFileSync = realRead;
+  }
+});
+
+// 真损坏仍然保守：查询方不能把无法解释的内容当成「锁已释放」。
+check('lockState：内容持续非法 → corrupt 且保守视为持有', () => {
+  const file = lockOf('state-corrupt');
+  fs.writeFileSync(file, 'not-json\n');
+  const st = lockState(home, 'state-corrupt');
+  assert.equal(st.held, true);
+  assert.equal(st.alive, true);
+  assert.equal(st.corrupt, true, JSON.stringify(st));
 });
 
 // 占位持有者（pid-only）仍存活：保守视为占用，不能回收也不能判损坏。
