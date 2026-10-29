@@ -17,17 +17,17 @@ const cli = (...args) => {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
   return result.data;
 };
-function project(name) {
-  const root = path.join(base, name), dir = path.join(root, 'scenario-test');
-  fs.mkdirSync(path.join(dir, '.scenario-test'), { recursive: true });
+function project(name, dir = 'scenario-test') {
+  const root = path.join(base, name), dirPath = path.join(root, dir);
+  fs.mkdirSync(path.join(dirPath, '.scenario-test'), { recursive: true });
   if (process.env.SCENARIO_TEST_REPO) {
     const repo = process.env.SCENARIO_TEST_REPO;
-    fs.cpSync(path.join(repo, 'examples', 'basic'), dir, { recursive: true });
-    fs.cpSync(path.join(repo, 'dist'), path.join(dir, '.scenario-test'), { recursive: true });
+    fs.cpSync(path.join(repo, 'examples', 'basic'), dirPath, { recursive: true });
+    fs.cpSync(path.join(repo, 'dist'), path.join(dirPath, '.scenario-test'), { recursive: true });
   } else {
-    fs.writeFileSync(path.join(dir, 'scenario.config.js'), 'throw new Error("discovery must not execute config")');
-    fs.writeFileSync(path.join(dir, 'index.html'), name);
-    fs.writeFileSync(path.join(dir, '.scenario-test', 'scenario-test-cli.cjs'), `const http=require('http'); const p=Number(process.argv[process.argv.indexOf('--port')+1]); http.createServer((req,res)=>res.end(${JSON.stringify(name)})).listen(p,'127.0.0.1');`);
+    fs.writeFileSync(path.join(dirPath, 'scenario.config.js'), 'throw new Error("discovery must not execute config")');
+    fs.writeFileSync(path.join(dirPath, 'index.html'), name);
+    fs.writeFileSync(path.join(dirPath, '.scenario-test', 'scenario-test-cli.cjs'), `const http=require('http'); const p=Number(process.argv[process.argv.indexOf('--port')+1]); http.createServer((req,res)=>res.end(${JSON.stringify(name)})).listen(p,'127.0.0.1');`);
   }
   return root;
 }
@@ -69,6 +69,17 @@ try {
   assert.equal(cli('list').apps.length, 3);
   cli('workbench', 'stop', 'one'); started.splice(started.indexOf('one'), 1);
   assert.equal(cli('workbench', 'status', 'two').state, 'RUNNING');
+  // 自定义目录：默认 scenario-test 缺失，通过浅扫描在项目根内发现接入目录（如 qa/scenarios）。
+  const customRoot = project('custom', path.join('qa', 'scenarios'));
+  register('three', customRoot, 'one');
+  const customStatus = cli('workbench', 'status', 'three');
+  assert.equal(customStatus.state, 'STOPPED', JSON.stringify(customStatus));
+  started.push('three');
+  const customOpen = cli('workbench', 'open', 'three');
+  assert.equal(customOpen.state, 'RUNNING', JSON.stringify(customOpen));
+  const customPage = await (await fetch(customOpen.url)).text();
+  assert(process.env.SCENARIO_TEST_REPO ? customPage.includes('ScenarioTest') : customPage === 'custom');
+  cli('workbench', 'stop', 'three'); started.splice(started.indexOf('three'), 1);
   fs.unlinkSync(path.join(second, 'scenario-test', '.scenario-test', 'scenario-test-cli.cjs'));
   const incomplete = cli('workbench', 'status', 'two'); assert.equal(incomplete.state, 'INCOMPLETE'); assert.equal(incomplete.pid, b.pid);
   cli('workbench', 'stop', 'two'); started.splice(started.indexOf('two'), 1);

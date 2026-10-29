@@ -178,6 +178,7 @@ export function loadManagedDesc(file) {
     ...normalizeRestartFields(d),
     onExit: d.onExit ?? null,
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
+    ...Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('x-'))),
   };
   errs.push(...unknownKeyErrors(d, new Set(Object.keys(normalized))));
   if (errs.length) throw usageError(`启动描述无效：${errs.join('；')}`);
@@ -395,6 +396,7 @@ export function upsertApp(reg, appId, desc) {
     existing.backoffMs = desc.backoffMs ?? null;
     existing.onExit = desc.onExit ?? null;
     existing.sourceFingerprint = desc.sourceFingerprint ?? null;
+    for (const [k, v] of Object.entries(desc)) if (k.startsWith('x-')) existing[k] = v;
     existing.configRevision = (existing.configRevision ?? 1) + 1;
     existing.updatedAt = now;
     return existing;
@@ -411,6 +413,7 @@ export function upsertApp(reg, appId, desc) {
     backoffMs: desc.backoffMs ?? null,
     onExit: desc.onExit ?? null,
     sourceFingerprint: desc.sourceFingerprint ?? null,
+    ...Object.fromEntries(Object.entries(desc).filter(([k]) => k.startsWith('x-'))),
     configRevision: 1, createdAt: now, updatedAt: now,
   };
   reg.apps[appId] = app;

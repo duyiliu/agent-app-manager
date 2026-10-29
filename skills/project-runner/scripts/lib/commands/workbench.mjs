@@ -19,15 +19,77 @@ function within(root, file) {
   const rel = path.relative(root, file);
   return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
+// scenario-test 接入目录的标记文件：config + 工作台页面 + 项目内 CLI 运行时副本。
+const SCENARIO_FILES = ['scenario.config.js', 'index.html', path.join('.scenario-test', 'scenario-test-cli.cjs')];
+const scenarioExists = (dir) => SCENARIO_FILES.map((f) => fs.existsSync(path.join(dir, f)));
+// 自定义目录发现：project-runner 无从预知项目的 scenario-test 目录，只能靠扫描。
+// 为控制性能：默认 `scenario-test` 存在时零扫描；缺失时才浅扫描项目根两层
+// （跳过常见非业务目录），并把结果缓存到 home 缓存文件（默认 5 分钟有效），
+// 避免详情轮询反复遍历同一项目。候选须命中 scenario-test 特有标记
+// （scenario.config.js 或 .scenario-test/scenario-test-cli.cjs），普通含 index.html 不算。
+const SCAN_SKIP = new Set(['.git', 'node_modules', '.tmp', 'target', 'build', 'dist', 'out', 'logs', '.idea', '.vscode', '.scenario-test']);
+const SCAN_MAX_DEPTH = 2;
+const DIR_CACHE_TTL_MS = 5 * 60 * 1000;
+function dirCachePath(home) {
+  return path.join(home, 'workbench-dir-cache.json');
+}
+function readDirCache(home) {
+  try { return JSON.parse(fs.readFileSync(dirCachePath(home), 'utf8')); } catch { return {}; }
+}
+function writeDirCache(home, cache) {
+  try {
+    const tmp = dirCachePath(home) + `.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache));
+    fs.renameSync(tmp, dirCachePath(home));
+  } catch { /* 缓存失败不影响功能 */ }
+}
+function isScenarioCandidate(dir) {
+  const [config, , cli] = scenarioExists(dir);
+  return config || cli;
+}
+function scanScenarioDirs(root) {
+  const found = [];
+  const walk = (dir, depth) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || SCAN_SKIP.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (isScenarioCandidate(full)) found.push(full);
+      if (depth < SCAN_MAX_DEPTH) walk(full, depth + 1);
+    }
+  };
+  walk(root, 1);
+  return found;
+}
+function pickScenarioDir(home, root) {
+  const defaults = scenarioExists(path.join(root, 'scenario-test'));
+  // 默认目录存在（哪怕不完整）就沿用现有行为，不扫描，避免与自定义目录歧义。
+  if (defaults.some(Boolean)) return { dir: path.join(root, 'scenario-test'), exists: defaults };
+  const cache = readDirCache(home);
+  const key = process.platform === 'win32' ? root.toLowerCase() : root;
+  const hit = cache[key];
+  let dir;
+  if (hit && typeof hit.dir === 'string' && Date.now() - hit.at < DIR_CACHE_TTL_MS) {
+    dir = hit.dir;
+  } else {
+    const candidates = scanScenarioDirs(root);
+    const count = (d) => scenarioExists(d).filter(Boolean).length;
+    candidates.sort((a, b) => count(b) - count(a) || (samePath(a, b) ? 0 : a < b ? -1 : 1));
+    dir = candidates[0] ?? path.join(root, 'scenario-test');
+    cache[key] = { dir, at: Date.now() };
+    writeDirCache(home, cache);
+  }
+  return { dir, exists: scenarioExists(dir) };
+}
 function discover(home, ref) {
   const registry = readRegistry(home);
   const app = registry.apps[resolveAppId(registry, ref)];
   if (app.internalKind === MARKER) throw usageError('请选择业务应用');
   let root;
   try { root = fs.realpathSync.native(app.root); } catch { throw conflictError('PROJECT_INVALID', '登记项目根目录不可访问'); }
-  const dir = path.join(root, 'scenario-test');
-  const files = [path.join(dir, 'scenario.config.js'), path.join(dir, 'index.html'), path.join(dir, '.scenario-test', 'scenario-test-cli.cjs')];
-  const exists = files.map((f) => fs.existsSync(f));
+  const { dir, exists } = pickScenarioDir(home, root);
+  const files = SCENARIO_FILES.map((f) => path.join(dir, f));
   let real;
   let realDir;
   try { realDir = fs.existsSync(dir) ? fs.realpathSync.native(dir) : dir; real = files.map((f, i) => exists[i] ? fs.realpathSync.native(f) : null); } catch { throw conflictError('PROJECT_INVALID', '场景测试文件不可访问'); }

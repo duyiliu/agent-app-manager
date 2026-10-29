@@ -16,6 +16,8 @@ export function cmdRecordUnmanaged(ctx) {
   const appId = computeAppId(root, entry);
   const logHints = (opts.getAll('--log-hints') ?? []).flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
   if (logHints.some((h) => !path.isAbsolute(h))) throw usageError('--log-hints 需要绝对路径');
+  // x- 扩展通道原样写入注册表（如 x-scenarioTestDir），供 workbench 等下游按需读取。
+  const xFields = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('x-')));
   return withLock(ctx.home, appId, 'record-unmanaged', () => {
     const regResult = withRegistryLock(ctx.home, 'record-unmanaged', () => {
     const reg = readRegistry(ctx.home);
@@ -48,6 +50,7 @@ export function cmdRecordUnmanaged(ctx) {
       existing.backoffMs = null;
       existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
       existing.tags = d.tags ?? [];
+      Object.assign(existing, xFields);
       existing.updatedAt = now;
     } else {
       reg.apps[appId] = {
@@ -58,6 +61,7 @@ export function cmdRecordUnmanaged(ctx) {
         restartPolicy: 'never', maxRestarts: null, backoffMs: null,
         envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
         sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
+        ...xFields,
       };
     }
     atomicWriteJson(registryPath(ctx.home), reg);
