@@ -237,7 +237,18 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     return entry.inflight;
   }
 
-  async function route(res, u, method) {
+  async function route(res, u, req) {
+    const method = req.method;
+    if (u.pathname === '/api/workbench') {
+      if (method === 'POST' && (req.headers['transfer-encoding'] || (req.headers['content-length'] && req.headers['content-length'] !== '0'))) throw fail(400, '工作台操作不接受请求体', 'USAGE');
+      const allowed = new Set(['app', 'op']);
+      for (const key of u.searchParams.keys()) if (!allowed.has(key) || u.searchParams.getAll(key).length !== 1) throw fail(400, '无效的工作台参数', 'USAGE');
+      const app = u.searchParams.get('app') || '';
+      const op = u.searchParams.get('op') || 'status';
+      if (!app || !['status', 'open', 'stop'].includes(op)) throw fail(400, '无效的工作台操作', 'USAGE');
+      if ((op === 'status' && method !== 'GET') || (op !== 'status' && method !== 'POST')) throw fail(405, '工作台操作使用的方法无效');
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.workbench(op, app) });
+    }
     if (u.pathname === '/' || u.pathname === '/index.html') {
       // 管理台无令牌，安全边界依赖「只允许本机用户直接访问」：禁止任何站点 iframe 嵌入，
       // 防止点击劫持把用户在诱导弹层中的点击转成同源 POST /api/lifecycle。
@@ -353,10 +364,10 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       if (dest === 'iframe' || dest === 'frame') {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '不允许在 iframe 中访问管理台' } });
       }
-      if (req.method !== 'GET' && !(req.method === 'POST' && u.pathname === '/api/lifecycle')) {
+      if (req.method !== 'GET' && !(req.method === 'POST' && ['/api/lifecycle', '/api/workbench'].includes(u.pathname))) {
         return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '仅支持 GET 与 POST /api/lifecycle' } });
       }
-      if (u.pathname === '/api/lifecycle') {
+      if (u.pathname === '/api/lifecycle' || (u.pathname === '/api/workbench' && req.method === 'POST')) {
         // 跨站写操作拦截：POST 属 simple request 无 CORS 预检，仅靠 Host 校验挡不住
         // 浏览器里恶意页面直接 fetch 本服务。Sec-Fetch-Site=cross-site 一律拒；
         // Origin 存在时必须同源（curl/脚本不带这两个头，不受影响）。
@@ -370,7 +381,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     } catch (e) {
       return sendJson(res, errorStatus(e), errorPayload(e, e.message));
     }
-    route(res, u, req.method).catch((e) => {
+    route(res, u, req).catch((e) => {
       const status = errorStatus(e);
       if (status >= 500) console.error(e?.stack ?? e);
       // ManagerError 业务原因（包括依赖/冲突）原样透出；未知内部错误仍使用通用文案。

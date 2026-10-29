@@ -4,6 +4,58 @@ const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil
 const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : null;
 
 let selected = null;          // 当前选中的 alias
+let workbench = null, workbenchBusy = false, workbenchPoll = false, workbenchEpoch = 0;
+async function loadWorkbench() {
+  const alias = selected;
+  if (!alias || workbenchPoll || workbenchBusy) return;
+  const epoch = workbenchEpoch;
+  workbenchPoll = true;
+  try {
+    const result = await api('/api/workbench?app=' + encodeURIComponent(alias));
+    if (selected === alias && !workbenchBusy && epoch === workbenchEpoch) { workbench = result; rerenderDetail(); }
+  } catch (e) {
+    if (selected === alias && epoch === workbenchEpoch) { workbench = { state: 'FAILED', message: e.message }; rerenderDetail(); }
+  } finally { workbenchPoll = false; if (selected && selected !== alias) loadWorkbench(); }
+}
+async function workbenchAction(alias, op) {
+  if (workbenchBusy) return;
+  workbenchEpoch++;
+  workbenchBusy = true;
+  rerenderDetail();
+  try {
+    const result = await api('/api/workbench?app=' + encodeURIComponent(alias) + '&op=' + op, undefined, 'POST');
+    if (selected === alias) { workbench = result; rerenderDetail(); }
+    if (op === 'open' && result.state === 'RUNNING' && result.url) window.open(result.url, '_blank', 'noopener,noreferrer');
+  } catch (e) {
+    if (selected === alias) { workbench = { state: 'FAILED', message: e.message, stderr: e.detail?.stderrTail }; }
+  } finally { workbenchBusy = false; if (selected === alias) rerenderDetail(); else if (selected) loadWorkbench(); }
+}
+function workbenchPanel(alias, compact = false) {
+  const box = el('span', 'workbench-ops');
+  const w = workbench;
+  const labels = { NOT_INSTALLED: '未发现场景测试', INCOMPLETE: '场景测试文件缺失', STOPPED: '未启动', RUNNING: '已运行', FAILED: '启动失败', UNKNOWN: '状态待核验' };
+  const statusClass = w?.state === 'RUNNING' ? ' st-RUNNING' : ['FAILED', 'UNKNOWN', 'INCOMPLETE'].includes(w?.state) ? ' st-UNKNOWN' : '';
+  const status = el('span', 'pill' + statusClass, '场景测试：' + (workbenchBusy ? '处理中…' : labels[w?.state] || '检查中…'));
+  if (w?.message) status.title = w.message;
+  box.appendChild(status);
+  if (w && !['NOT_INSTALLED', 'INCOMPLETE'].includes(w.state)) {
+    if (w.state === 'RUNNING' && w.url) {
+      const a = el('a', 'workbench-link', w.url); a.href = w.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; box.appendChild(a);
+    } else {
+      const open = el('button', 'op-btn', '打开场景测试');
+      open.disabled = workbenchBusy || w.state === 'UNKNOWN';
+      open.onclick = () => workbenchAction(alias, 'open');
+      box.appendChild(open);
+    }
+    if (w.state === 'RUNNING' || (w.state === 'FAILED' && w.pid)) {
+      const stop = el('button', 'op-btn', '停止工作台'); stop.disabled = workbenchBusy; stop.onclick = () => workbenchAction(alias, 'stop'); box.appendChild(stop);
+    }
+  }
+  if (w?.pid && ['NOT_INSTALLED', 'INCOMPLETE'].includes(w.state)) {
+    const stop = el('button', 'op-btn', '停止工作台'); stop.disabled = workbenchBusy; stop.onclick = () => workbenchAction(alias, 'stop'); box.appendChild(stop);
+  }
+  return box;
+}
 let appsCache = [];
 let healthByAlias = new Map(); // GET /api/health 结果：appId -> 健康总览行
 let currentDetail = null;     // 最近一次 /api/status 结果，供健康刷新/诊断结果异步返回后原地重绘
@@ -42,16 +94,17 @@ function resWarnOf(row) {
   return null;
 }
 // 资源时间序列：只在详情展开时按 5s 采样，收起即停。60 点 = 5 分钟窗口。
-// 采样走 /api/sample（CLI sample 子进程），单次约 1.3s；5s 间隔下单核占用约 26%。
 const RES_SERIES_MAX = 60;
 const RES_SAMPLE_INTERVAL_MS = 5000;
-let resSeries = [];          // [{ t, cpu, rss }]
+let resSeries = [];          // [{ t, runId, cpu, rss }]
 let resSeriesAlias = null;   // 曲线归属的应用：换应用必须清空
 let resTimer = null, resSampling = false;
+let resSampleEpoch = 0;
 
 function stopResSampling() {
   if (resTimer) clearInterval(resTimer);
   resTimer = null;
+  resSampleEpoch++;
 }
 function resetResSeries(alias) {
   stopResSampling();
@@ -64,17 +117,19 @@ function startResSampling(alias) {
   stopResSampling();
   if (!alias) return;
   if (resSeriesAlias !== alias) { resSeries = []; resSeriesAlias = alias; }
+  const epoch = resSampleEpoch;
   const tick = async () => {
     if (resSampling || !selected || selected !== alias) return;
     resSampling = true;
     try {
       const d = await api('/api/sample?app=' + encodeURIComponent(alias));
-      if (selected !== alias) return;
-      if (!d?.available) return;
-      resSeries.push({ t: Date.now(), cpu: Number(d.cpuPercent ?? 0), rss: Number(d.rssBytes ?? 0) });
+      if (selected !== alias || epoch !== resSampleEpoch) return;
+      if (!d?.available || !Number.isFinite(d.rssBytes)) return;
+      if (resSeries.length && resSeries[resSeries.length - 1].runId !== d.runId) resSeries = [];
+      resSeries.push({ t: Date.now(), runId: d.runId, cpu: Number.isFinite(d.cpuPercent) ? d.cpuPercent : null, rss: d.rssBytes });
       if (resSeries.length > RES_SERIES_MAX) resSeries.splice(0, resSeries.length - RES_SERIES_MAX);
       drawResChart();
-    } catch { /* 单次采样失败不断曲线 */ }
+    } catch { /* 单次采样失败时保留已有数据 */ }
     finally { resSampling = false; }
   };
   tick();
@@ -97,7 +152,7 @@ function buildResChart() {
     resChartLegend('CPU %', '#ff8a30'),
     resChartLegend('内存 MB', '#4099ff'),
     now,
-    el('span', 'res-chart-hint', `${RES_SAMPLE_INTERVAL_MS / 1000}s 采样 · 近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟`),
+    el('span', 'res-chart-hint', `${RES_SAMPLE_INTERVAL_MS / 1000}s 采样 · 近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟 · CPU 短时采样 · 收起暂停`),
   );
   const canvas = document.createElement('canvas');
   canvas.className = 'res-chart';
@@ -120,9 +175,8 @@ function drawResChart() {
   const dimColor = css.getPropertyValue('--text-faint').trim() || '#71829a';
   const padR = 44, padB = 12, padT = 6;
   const plotW = Math.max(1, w - padR), plotH = Math.max(1, h - padT - padB);
-  // CPU 轴自适应：命令模式聚合后代后 CPU% 可超过 100，固定 0-100 会把峰值裁掉。
-  const maxCpu = Math.max(100, ...resSeries.map(p => p.cpu));
-  // 网格 + 右侧刻度（CPU 0 / 中值 / 上限）
+  const maxRss = Math.max(...resSeries.map(p => p.rss), 1) * 1.15;
+  const maxCpu = Math.max(100, ...resSeries.map(p => p.cpu ?? 0));
   ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
   ctx.font = '9px "Cascadia Code", Consolas, monospace'; ctx.fillStyle = dimColor; ctx.textAlign = 'left';
   for (const pct of [0, 0.5, 1]) {
@@ -130,13 +184,15 @@ function drawResChart() {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke();
     ctx.fillText(String(Math.round(pct * maxCpu)), plotW + 6, y + 3);
   }
+  const last = resSeries[resSeries.length - 1];
+  const now = $('#resChartNow');
+  if (now && last) now.replaceChildren(el('span', 'res-chart-value cpu', `CPU ${last.cpu == null ? '不可用' : last.cpu.toFixed(0) + '%'}`), el('span', 'res-chart-value rss', `内存 ${fmtSize(last.rss)}`));
   if (resSeries.length < 2) {
     ctx.textAlign = 'center';
     ctx.fillText('采样中…', plotW / 2, padT + plotH / 2);
     return;
   }
   // 留 15% 余量，否则窗口内最大值总贴顶、小波动被放大成满屏起伏。
-  const maxRss = Math.max(...resSeries.map(p => p.rss), 1) * 1.15;
   // 最新点贴右边缘、旧点向左滚出（任务管理器同款），窗口未满时左侧留空而不是从左往右爬。
   const offset = RES_SERIES_MAX - resSeries.length;
   const xOf = (i) => ((i + offset) / (RES_SERIES_MAX - 1)) * plotW;
@@ -144,26 +200,18 @@ function drawResChart() {
   const yOfRss = (v) => padT + plotH * (1 - v / maxRss);
   const drawLine = (pick, yOf, color) => {
     ctx.beginPath();
-    resSeries.forEach((p, i) => { const x = xOf(i), y = yOf(pick(p)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    let drawing = false;
+    resSeries.forEach((p, i) => { const v = pick(p); if (v == null) { drawing = false; return; } const x = xOf(i), y = yOf(v); if (drawing) ctx.lineTo(x, y); else ctx.moveTo(x, y); drawing = true; });
     ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.stroke();
   };
   drawLine(p => p.cpu, yOfCpu, '#ff8a30');
   drawLine(p => p.rss, yOfRss, '#4099ff');
-  // 当前值放到头部图例旁：画在线上会随曲线移动，两条线接近时文字互相压住。
-  const last = resSeries[resSeries.length - 1];
-  const now = $('#resChartNow');
-  if (now) {
-    now.replaceChildren(
-      el('span', 'res-chart-value cpu', `CPU ${last.cpu.toFixed(0)}%`),
-      el('span', 'res-chart-value rss', `内存 ${fmtSize(last.rss)}`),
-    );
-  }
 }
 
 // 展开详情时那次实时采样的缓存：轮询重绘（不带 resources）时继续显示它，避免数字来回跳。
 // 按 runId 绑定而不是按时间过期——页面时钟在后台标签页会跳，TTL 判定不可靠；
 // runId 变了（重启）或切换应用时自动失效。
-let liveResources = null; // { alias, runId, rssBytes, cpuPercent, scope, reason?, at }
+let liveResources = null; // { alias, runId, rssBytes, scope, reason?, at }
 
 async function api(path, signal, method = 'GET') {
   const u = new URL(path, location.origin);
@@ -316,7 +364,7 @@ function renderApps() {
       }
     }
     if (a.managed === false) head.appendChild(el('span', 'pill unmanaged', '非受管'));
-    // 资源告警只在异常时出现（正常态无噪音）：当前内存超阈值，或 CPU 连续高位。
+    // 资源告警：内存超阈值或 CPU 连续高位。
     trackCpuStreak(a);
     const resWarn = resWarnOf(a);
     if (resWarn) {
@@ -358,7 +406,6 @@ function renderApps() {
   for (const stale of existing.values()) stale.remove();
   ordered.forEach((card, i) => { if (list.children[i] !== card) list.insertBefore(card, list.children[i] ?? null); });
   list.scrollTop = previousScroll;
-  // 清理已消失或已换 run 的 CPU 计数，避免 Map 随重启次数无限增长。
   const liveKeys = new Set(appsCache.map(resKey));
   for (const k of [...cpuStreaks.keys()]) if (!liveKeys.has(k)) cpuStreaks.delete(k);
 }
@@ -653,9 +700,19 @@ function renderDetail(d) {
     opsSlot.appendChild(mkUnmanagedRemove());
     opsSlot.hidden = false;
   }
+  opsSlot.appendChild(workbenchPanel(d.alias, true));
+  head.appendChild(workbenchPanel(d.alias));
   head.appendChild(el('span', 'spacer'));
   head.appendChild(el('span', 'appid', d.appId));
   card.appendChild(head);
+  if (workbench?.message || workbench?.stderr) {
+    const details = document.createElement('details');
+    details.className = 'lifecycle-opts';
+    details.appendChild(el('summary', null, '场景测试详情'));
+    if (workbench.message) details.appendChild(el('div', null, workbench.message));
+    if (workbench.stderr) details.appendChild(el('pre', 'diag-json', workbench.stderr));
+    card.appendChild(details);
+  }
   if (d.managed !== false) card.appendChild(lifecycleOptions());
 
   const run = d.run;
@@ -721,7 +778,7 @@ function renderDetail(d) {
   const rss = live?.rssBytes ?? listRow?.memoryBytes ?? null;
   const cpuPct = live?.cpuPercent ?? listRow?.cpuPercent ?? null;
   if (rss != null) {
-    const cpu = cpuPct != null ? ` · CPU ${Number(cpuPct).toFixed(1)}%` : '';
+    const cpu = cpuPct != null ? ` · CPU ${Number(cpuPct).toFixed(1)}%（短时）` : '';
     const scope = (live?.scope ?? listRow?.resourcesScope) === 'tree' ? '含后代聚合' : '';
     // 标明来源：展开时的精确采样，还是列表轮询的单点值。两者采样窗口相同，但时刻不同。
     const src = live ? '展开时采样' : '轮询采样';
@@ -927,7 +984,7 @@ async function doLifecycle(alias, op, extra = '') {
   pollTail();
 }
 
-// sample=true 时服务端追加 --resources，做一次有界 RSS/CPU 采样。
+// sample=true 时服务端追加 --resources，做一次有界资源采样。
 // 只在展开详情/首次选中时用；4s 轮询不带，避免变成常驻采样。
 async function loadStatus(opts = {}) {
   // 采样请求不能被轮询的在飞守卫挡掉：展开是用户主动动作，此刻轮询大概率正在飞。
@@ -975,6 +1032,9 @@ async function loadHealth() {
 function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
+  workbenchEpoch++;
+  workbench = null;
+  loadWorkbench();
   currentDetail = null;
   detailMissing = false; // 详情加载中用「正在加载」，只有真正 404 才提示不在注册表
   portDiag = null;
@@ -1580,6 +1640,7 @@ function schedulePolling() {
     setInterval(loadApps, slow ? 30000 : 4000),
     setInterval(loadStatus, slow ? 30000 : 4000),
     setInterval(loadHealth, slow ? 60000 : 15000), // 健康探测较重：低频轮询，启停/手动刷新时额外立即刷新
+    setInterval(loadWorkbench, slow ? 60000 : 15000),
     setInterval(loadSources, slow ? 30000 : 8000),
     setInterval(pollTail, slow ? 30000 : 1000),
   ];

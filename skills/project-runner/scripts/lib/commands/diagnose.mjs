@@ -148,7 +148,7 @@ function loggerCapLookup(probe) {
 
 export function cmdList(ctx) {
   const reg = readRegistry(ctx.home);
-  const apps = Object.values(reg.apps);
+  const apps = Object.values(reg.apps).filter((app) => app.internalKind !== 'scenario-workbench-v1');
   // 批量核验所有 RUNNING 记录（#15/#51）：N 个受管应用只产生 1 次 pwsh 调用；
   // 现已并入组合探针（核验+logger 采集+监听枚举+资源采样同一 pwsh）；
   // 组合失败时回退原逐路调用，语义与结果不变。
@@ -467,7 +467,7 @@ export function startReadyFields(readiness) {
 // 批量核验 RUNNING 身份，避免 N 个应用产生 N 次 pwsh 冷启动；单应用损坏只降级该行。
 export async function cmdHealth(ctx) {
   const reg = readRegistry(ctx.home);
-  const apps = Object.values(reg.apps);
+  const apps = Object.values(reg.apps).filter((app) => app.internalKind !== 'scenario-workbench-v1');
   const prefetched = new Map();
   const runtimes = new Map();
   const pending = [];

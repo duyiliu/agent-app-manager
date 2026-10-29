@@ -124,7 +124,7 @@ function runManagerJson(home, args, { timeoutMs = 60000 } = {}) {
       const e2 = j?.error ?? {};
       reject(Object.assign(
         new Error(e2.message || err.trim() || `manager ${args[0]} 异常退出（code=${code}）`),
-        { code: e2.code ?? 'COLLECT_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 6 ? code : 4 },
+        { code: e2.code ?? 'COLLECT_FAILED', exitCode: Number.isInteger(code) && code >= 1 && code <= 6 ? code : 4, ...(e2.detail !== undefined ? { detail: e2.detail } : {}) },
       ));
     });
   });
@@ -156,6 +156,7 @@ export async function cmdUi(ctx) {
         health: () => runManagerJson(ctx.home, ['health'], { timeoutMs: 90000 }),
         // 时间序列曲线专用：采样是同步 pwsh，必须走子进程，否则 2s 一次的采样会冻结事件循环。
         sample: (ref) => runManagerJson(ctx.home, ['sample', ref], { timeoutMs: 15000 }),
+        workbench: (op, ref) => runManagerJson(ctx.home, ['workbench', op, ref], { timeoutMs: 90000 }),
         listRuns: (ref) => listRuns(ctx.home, ref),
         resolveLogFile: (ref, run, stream) => resolveLogFile(ctx.home, ref, run, stream),
         listSources: (ref) => listSources(ctx.home, ref),
