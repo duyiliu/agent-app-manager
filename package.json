@@ -1,7 +1,7 @@
 {
   "name": "project-runner",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Agent-native 本地项目启动与运行管理 Skill（skills/project-runner）",
   "engines": {
     "node": ">=20"
