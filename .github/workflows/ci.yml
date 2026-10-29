@@ -26,6 +26,8 @@ jobs:
         run: node skills/project-runner/scripts/test/ui-smoke.mjs
       - name: UI source-follow test
         run: node skills/project-runner/scripts/test/ui-src-follow.mjs
+      - name: Locks smoke test
+        run: node skills/project-runner/scripts/test/locks-smoke.mjs
       - name: Manager smoke test
         run: node skills/project-runner/scripts/test/manager-smoke.mjs
       - name: CLI smoke test
