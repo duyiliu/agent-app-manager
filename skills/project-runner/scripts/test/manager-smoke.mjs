@@ -34,13 +34,23 @@ const waitLogPid = (file, re) => {
   return pid;
 };
 
-const run = (args, { json = true } = {}) => {
+const runOnce = (args, { json = true } = {}) => {
   const r = spawnSync(process.execPath, [MANAGER, '--home', home, ...(json ? ['--json'] : []), ...args], {
     encoding: 'utf8', timeout: 120000, windowsHide: true,
   });
   let parsed = null;
   try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（文本模式或崩溃） */ }
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
+};
+// 调用方行为：锁忙由调用方退避重试（最多 3 次），与 Agent 的处理方式一致；
+// 其他错误照常返回，不在这里掩盖。
+const run = (args, opts) => {
+  let r = runOnce(args, opts);
+  for (let i = 0; i < 2 && r.json?.error?.code === 'LOCK_BUSY'; i++) {
+    sleep(200);
+    r = runOnce(args, opts);
+  }
+  return r;
 };
 const runAt = (targetHome, args, { json = true } = {}) => {
   const r = spawnSync(process.execPath, [MANAGER, '--home', targetHome, ...(json ? ['--json'] : []), ...args], {

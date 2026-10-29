@@ -8,14 +8,7 @@
 import fs from 'node:fs';
 import { lockPath } from './store.mjs';
 import { psProc } from './probe.mjs';
-import { sleepSync } from './proc.mjs';
 import { conflictError, dataError } from './errors.mjs';
-
-// 内部证据写（日志轮转/退出落账）只持有毫秒级，且不是用户操作：
-// 允许短暂等待，避免它把用户的 start/stop 撞成失败。真正的命令间竞争仍然直接报错。
-const INTERNAL_OP_RETRIES = 50;
-const INTERNAL_OP_RETRY_MS = 20;
-const isInternalOp = (op) => typeof op === 'string' && (op.startsWith('log-') || op === 'exit-watch');
 
 export function readLockHolder(file) {
   let raw;
@@ -44,37 +37,30 @@ function releaseLock(file) {
 
 function acquireLock(home, name, op) {
   const file = lockPath(home, name);
-  for (let attempt = 0; ; attempt++) {
-    let fd;
-    try {
-      fd = fs.openSync(file, 'wx');
-    } catch (e) {
-      if (e.code !== 'EEXIST') {
-        // Windows：文件处于删除挂起（持有者刚 unlink）时创建会报 EPERM/EACCES/EBUSY，
-        // 这是瞬时竞争，按 LOCK_BUSY 交给调用方重试，而不是报环境错误。
-        const transient = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code);
-        if (!transient) throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
-        throw conflictError('LOCK_BUSY', `锁文件正在重建（${e.code}）；稍后重试`, { code: e.code, file });
-      }
-      const holder = readLockHolder(file);
-      if (isInternalOp(holder?.op) && attempt < INTERNAL_OP_RETRIES) {
-        sleepSync(INTERNAL_OP_RETRY_MS);
-        continue;
-      }
-      const who = holder ? `pid=${holder.pid}，op=${holder.op ?? '?'}` : '持有者信息不可读';
-      // 忙就报错，不在锁内部退避重试：等待/重试由调用方（人或 Agent）决定，
-      // 锁本身不做任何"判断持有者是否还活着"的动作。
-      throw conflictError('LOCK_BUSY',
-        `另一 manager 正在操作（${who}）；稍后重试。若确认该进程已退出，删除 ${file} 后重试`,
-        { pid: holder?.pid ?? null, op: holder?.op ?? null, file });
+  let fd;
+  try {
+    fd = fs.openSync(file, 'wx');
+  } catch (e) {
+    if (e.code !== 'EEXIST') {
+      // Windows：文件处于删除挂起（持有者刚 unlink）时创建会报 EPERM/EACCES/EBUSY，
+      // 这是瞬时竞争，按 LOCK_BUSY 交给调用方重试，而不是报环境错误。
+      const transient = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code);
+      if (!transient) throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
+      throw conflictError('LOCK_BUSY', `锁文件正在重建（${e.code}）；稍后重试`, { code: e.code, file });
     }
-    try {
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
-    } finally {
-      try { fs.closeSync(fd); } catch { /* 忽略 */ }
-    }
-    return () => releaseLock(file);
+    const holder = readLockHolder(file);
+    const who = holder ? `pid=${holder.pid}，op=${holder.op ?? '?'}` : '持有者信息不可读';
+    // 锁不做任何等待、重试或"判断持有者是否还活着"：抢不到就把事实抛给调用方。
+    throw conflictError('LOCK_BUSY',
+      `另一 manager 正在操作（${who}）；稍后重试。若确认该进程已退出，删除 ${file} 后重试`,
+      { pid: holder?.pid ?? null, op: holder?.op ?? null, file });
   }
+  try {
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
+  } finally {
+    try { fs.closeSync(fd); } catch { /* 忽略 */ }
+  }
+  return () => releaseLock(file);
 }
 
 export function withLock(home, name, op, fn) {
