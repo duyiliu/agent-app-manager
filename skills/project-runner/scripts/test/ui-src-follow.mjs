@@ -362,9 +362,10 @@ try {
     const root = elFor('detail');
     const link = root.querySelectorAll('a').find((a) => a.href === 'http://127.0.0.1:43123/');
     assert(link && link.target === '_blank' && link.rel.includes('noopener'));
-    assert(root.textContent.includes('http://127.0.0.1:43123/') && root.textContent.includes('停止工作台'));
+    assert(root.querySelector('.workbench-row') && root.textContent.includes('打开工作台') && root.textContent.includes('停止工作台'));
+    assert.equal(link.title, 'http://127.0.0.1:43123/');
     assert(!root.textContent.includes('进入工作台'));
-    assert(elFor('detailOps').textContent.includes('场景测试：已运行') && elFor('detailOps').textContent.includes('http://127.0.0.1:43123/') && elFor('detailOps').textContent.includes('停止工作台'));
+    assert(elFor('detailOps').textContent.includes('场景测试：已运行') && elFor('detailOps').textContent.includes('打开') && elFor('detailOps').textContent.includes('停止工作台'));
   });
   await check('工作台打开操作异步 POST 并打开独立地址', async () => {
     run(`selected='his'; workbenchBusy=false; globalThis.__workbenchFetch=fetch; globalThis.__opened=null; window.open=(...args)=>{globalThis.__opened=args}; fetch=async(u,options)=>{ globalThis.__request={url:String(u),method:options.method}; return {ok:true,json:async()=>({data:{state:'RUNNING',url:'http://127.0.0.1:43123/'}})}; };`);
@@ -431,7 +432,7 @@ try {
     run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);
     const buttons = [...elFor('detailOps').querySelectorAll('.op-btn'), ...elFor('detail').querySelectorAll('.op-btn')];
     const busy = buttons.filter((b) => b.classList.contains('busy'));
-    assert.equal(busy.length, 2, '摘要栏与详情卡头各应有一个 busy 按钮');
+    assert.equal(busy.length, 1, '固定操作栏应只有一个 busy 按钮');
     assert(busy.every((b) => b.disabled && b.textContent.includes('启动中')), '执行中按钮应禁用并显示“启动中…”');
     assert(buttons.every((b) => b.disabled), '执行期间其余按钮应全部禁用');
     run(`lifecycleBusy = false; lifecycleOpKey = null;`);

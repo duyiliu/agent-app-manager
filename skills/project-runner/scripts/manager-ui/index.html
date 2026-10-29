@@ -192,12 +192,13 @@ select option { background:var(--panel-2); color:var(--text) }
   border-bottom:1px solid rgba(255,92,92,.30);
   overflow-wrap:anywhere}
 .banner.warn { color:var(--warn-text); background:var(--warn-soft); border-bottom-color:rgba(255,138,48,.30) }
+.banner.info { padding:5px 14px; color:var(--text-faint); background:var(--bg); border-bottom-color:var(--line-soft); font-size:11px }
 
 .layout {
   flex:1;
   min-height:0;
   display:grid;
-  grid-template-columns:340px minmax(0,1fr)}
+  grid-template-columns:292px minmax(0,1fr)}
 aside {
   min-height:0;
   display:flex;
@@ -308,18 +309,22 @@ aside {
 /* 资源告警：方形+橙色，与绿色圆形健康点区分开，避免两个圆点并排时混淆。 */
 .res-warn { flex:none; width:7px; height:7px; border-radius:2px; background:var(--warn) }
 /* 资源曲线：详情展开时按 5s 采样，收起即停；画布高度固定，宽度自适应容器。 */
-.res-chart-wrap { margin:12px 13px 11px; padding:8px 10px 6px; border:1px solid var(--line); border-radius:8px; background:var(--surface) }
-.res-chart-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:6px; font-size:10.5px; color:var(--text-dim) }
+.detail-overview { display:grid; grid-template-columns:minmax(0, 1fr); gap:18px; padding:12px 14px 10px; container-type:inline-size }
+.detail-overview:has(.res-chart-wrap) { grid-template-columns:minmax(280px, .9fr) minmax(0, 1.1fr) }
+.runtime-summary { min-width:0 }
+.runtime-summary > .kv { grid-template-columns:66px minmax(0,1fr); gap:3px 12px; margin-top:8px }
+.runtime-summary > .kv .k { text-align:left }
+.detail-overview .health, .detail-overview .res-chart-wrap { margin:0; min-width:0 }
+.res-chart-wrap { padding:0 0 0 18px; border-left:1px solid var(--line); align-self:stretch }
+.res-chart-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:3px; font-size:10.5px; color:var(--text-dim) }
 .res-chart-title { font-weight:600; color:var(--text) }
-.res-chart-legend { display:inline-flex; align-items:center; gap:5px }
-.res-chart-swatch { width:10px; height:2px; border-radius:1px }
-.res-chart-now { display:inline-flex; gap:10px; font:10.5px var(--mono-font) }
+.res-chart-now { display:inline-flex; flex-wrap:wrap; gap:10px; font:12px var(--mono-font) }
 .res-chart-value.cpu { color:var(--warn) }
 .res-chart-value.rss { color:var(--accent) }
 .res-chart-hint { margin-left:auto; color:var(--text-faint); font-size:10px }
-.res-chart { display:block; width:100%; height:72px }
+.res-chart { display:block; width:100%; height:84px; margin-top:8px }
 /* 低频诊断字段折叠：常态只留状态/端口/资源，避免详情卡被十几行元数据撑长。 */
-.kv-more { margin:10px 13px 12px; border-top:1px solid var(--line-soft); padding-top:8px }
+.kv-more { margin:0; padding:7px 0 }
 .kv-more>summary { cursor:pointer; font-size:10.5px; color:var(--text-faint); list-style:none; user-select:none }
 .kv-more>summary::before { content:"▸ "; color:var(--accent) }
 .kv-more[open]>summary::before { content:"▾ " }
@@ -328,26 +333,27 @@ aside {
 /* 详情卡内的 READY/UNTESTED 仍用轻量注释样式，避免与状态胶囊同形。 */
 .pill.hl-READY,
 .pill.hl-UNTESTED { padding:1px 2px; border-color:transparent; background:transparent; font-weight:500; font-size:9.5px }
-.health {
-  margin:0 13px 11px;
-  padding:9px 11px;
-  border:1px solid var(--line);
-  border-radius:8px;
-  background:var(--surface)}
+.health { padding:0 0 8px; border-bottom:1px solid var(--line-soft) }
 .health-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:11.5px; color:var(--text-dim) }
 .health-title { font-weight:600; color:var(--text) }
+.health-inline { display:none }
+.health-details { margin-top:4px; font-size:10.5px; color:var(--text-faint) }
+.health-details > summary, .lifecycle-summary { cursor:pointer; user-select:none }
+.health-details > summary:hover, .lifecycle-summary:hover { color:var(--text) }
+.health-details > summary:focus-visible, .lifecycle-summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .health-ev { margin-top:6px; display:grid; gap:3px; font:10.5px/1.6 var(--mono-font); color:var(--text-dim); overflow-wrap:anywhere }
 .health-note { margin-top:5px; font-size:10.5px; color:var(--text-faint); line-height:1.55 }
 
 .detail-panel { display:flex; flex-direction:column; min-width:0; min-height:0 }
-#detail { flex:0 1 auto; max-height:52%; overflow:auto; padding:12px 14px 4px }
+#detail { flex:0 1 auto; max-height:55%; overflow:auto; padding:0 }
 .detail-bar {
   flex:none;
   display:flex;
   align-items:center;
   gap:8px;
   width:100%;
-  height:34px;
+  min-height:44px;
+  height:auto;
   padding:0 12px;
   border:0;
   border-bottom:1px solid var(--line);
@@ -361,10 +367,13 @@ aside {
 .detail-bar:hover { color:var(--text); background:var(--surface); border-color:var(--line) }
 .detail-bar .db-toggle { flex:none; color:var(--accent); font-size:9px; transition:transform .12s ease }
 .detail-bar[aria-expanded="true"] .db-toggle { transform:rotate(90deg) }
-/* 详情展开时隐藏摘要栏上的操作组：详情卡内已有同一组按钮，两处并存属重复。 */
-#detailBar[aria-expanded="true"] + #detailOps { display:none }
-/* 详情展开时摘要栏只留别名与进程状态：模式、受管、健康、pid/端口/runId/时间详情卡内都有。 */
-#detailBar[aria-expanded="true"] .db-summary > span:not(.db-name):not([class*=" st-"]) { display:none }
+/* 生命周期操作始终固定在标题栏，场景测试在收起态提供紧凑入口。 */
+#detailBar[aria-expanded="true"] + #detailOps > .workbench-ops { display:none }
+#detailBar[aria-expanded="true"] .db-info { display:none }
+#detailBar[aria-expanded="true"] .db-summary > [class*="hl-"] { display:none }
+.detail-ops > .op-group .op-btn:disabled:not(.busy) { display:none }
+.op-btn.primary { color:var(--accent-text); background:var(--accent-soft); border-color:var(--accent) }
+.op-btn.danger:hover { color:var(--danger-text); border-color:var(--danger); background:var(--danger-soft) }
 /* 未选中应用时不保留空的日志区与整排禁用按钮，右侧只留一条居中引导。 */
 body.no-selection .log-panel { display:none }
 body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-items:center; justify-content:center }
@@ -372,8 +381,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .detail-bar .db-name { font:600 12px var(--ui-font); color:var(--text) }
 .detail-bar .db-info { min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--text-faint) }
 .detail-bar .db-hint { flex:none; font-size:10px; color:var(--text-faint) }
-.detail-head { flex:none; display:flex; align-items:stretch; border-bottom:1px solid var(--line) }
-.detail-head .detail-bar { flex:1 1 auto; min-width:0; border-bottom:0 }
+.detail-head { flex:none; display:flex; align-items:stretch; flex-wrap:wrap; border-bottom:1px solid var(--line); background:var(--panel) }
+.detail-head .detail-bar { flex:1 1 240px; width:auto; min-width:0; border-bottom:0 }
 .detail-ops { flex:none; display:inline-flex; align-items:center; padding:0 12px 0 4px; margin-left:0; gap:6px;
   background:var(--panel) }
 .detail-ops[hidden] { display:none }
@@ -391,25 +400,23 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .empty.error { color:var(--danger-text); border-color:rgba(255,92,92,.35) }
 
 .card {
-  margin-bottom:10px;
-  border:1px solid var(--line);
-  border-radius:var(--radius);
+  margin:0;
+  border:0;
+  border-radius:0;
   background:var(--panel-2);
   overflow:hidden}
-.card-head {
-  display:flex;
-  align-items:center;
-  gap:8px;
-  flex-wrap:wrap;
-  padding:11px 13px;
-  border-bottom:1px solid var(--line-soft)}
-.card-head .name { font-size:14.5px; font-weight:600; color:var(--text) }
-.card-head .appid { font:10.5px/1.4 var(--mono-font); color:var(--text-faint) }
-.card-head .spacer { flex:1 }
-.workbench-ops { display:inline-flex; align-items:center; flex-wrap:wrap; gap:6px; margin-left:6px }
+.workbench-row { display:flex; align-items:center; flex-wrap:wrap; gap:6px 18px; padding:8px 14px; border-bottom:1px solid var(--line-soft) }
+.workbench-row > .lifecycle-details { margin:0 0 0 auto }
+.workbench-row > .lifecycle-details[open] { flex-basis:100% }
+.workbench-row .lifecycle-summary { text-align:right }
+.workbench-ops { display:flex; align-items:center; flex-wrap:wrap; gap:8px; min-width:0 }
+.workbench-ops.compact { display:inline-flex; gap:6px; margin-left:6px }
+.workbench-title { font-size:12px; font-weight:600; color:var(--text) }
+.workbench-ops .workbench-link { display:inline-flex; align-items:center; min-height:26px; padding:0 9px; border:1px solid var(--line-strong); border-radius:var(--radius); font:12px var(--ui-font) }
+.workbench-link:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .workbench-link, .workbench-link:visited { color:var(--accent-text); font:11px/1.4 var(--mono-font); text-decoration:none }
 .workbench-link:hover { text-decoration:underline }
-.card-body { padding:11px 13px 13px }
+.card-body { padding:0 14px; border-top:1px solid var(--line-soft) }
 .alert {
   margin:0 13px 11px;
   padding:9px 12px;
@@ -432,6 +439,10 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   font-size:10.5px;
   vertical-align:1px;
   margin:0 2px}
+.lifecycle-details { margin:0 13px 9px; font-size:10.5px; color:var(--text-dim) }
+.lifecycle-summary { padding:5px 0 }
+.lifecycle-active { margin-left:8px; color:var(--warn-text) }
+.lifecycle-details .lifecycle-opts { margin:4px 0 0 }
 .lifecycle-opts {
   display:flex;
   align-items:center;
@@ -514,13 +525,9 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .v.bad { color:var(--danger-text) }
 .v.good { color:var(--ok-text) }
 
-.prev-title {
-  padding:8px 13px 4px;
-  font-size:9px;
-  font-weight:600;
-  letter-spacing:.09em;
-  text-transform:uppercase;
-  color:var(--text-faint)}
+.run-history { padding:7px 14px; border-top:1px solid var(--line-soft); font-size:10.5px; color:var(--text-faint) }
+.run-history > summary { cursor:pointer; user-select:none }
+.run-history .prev-row { padding:6px 0; margin-top:5px }
 .prev-row {
   display:flex;
   gap:12px;
@@ -654,6 +661,13 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   .log-panel { flex:0 0 44% }
   .home-path { display:none }
 }
+@media(max-width:980px) {
+  .detail-overview:has(.res-chart-wrap) { grid-template-columns:minmax(0,1fr) }
+  .res-chart-wrap { padding:10px 0 0; border-left:0; border-top:1px solid var(--line) }
+  .detail-head .detail-bar { flex-basis:260px }
+  .detail-ops { flex-wrap:wrap; padding:6px 12px; min-width:0; max-width:100% }
+  .detail-ops .op-group { margin-left:0 }
+}
 @media(prefers-reduced-motion:reduce) {
   *,*::before,*::after { animation:none!important; transition:none!important }
 }
@@ -669,7 +683,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记；危险操作需二次确认，stop 参数在详情卡内调整。</div>
+<div class="banner info" id="roBanner" title="仅 127.0.0.1，无令牌；受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记。">仅本机访问 · 启停操作需再次点击确认，停止和重启参数可在应用详情中设置。</div>
 <div class="banner" id="fatalBanner" hidden></div>
 <div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">

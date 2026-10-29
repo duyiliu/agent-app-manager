@@ -31,16 +31,17 @@ async function workbenchAction(alias, op) {
   } finally { workbenchBusy = false; if (selected === alias) rerenderDetail(); else if (selected) loadWorkbench(); }
 }
 function workbenchPanel(alias, compact = false) {
-  const box = el('span', 'workbench-ops');
+  const box = el('span', 'workbench-ops' + (compact ? ' compact' : ''));
+  if (!compact) box.appendChild(el('span', 'workbench-title', '场景测试'));
   const w = workbench;
   const labels = { NOT_INSTALLED: '未发现场景测试', INCOMPLETE: '场景测试文件缺失', STOPPED: '未启动', RUNNING: '已运行', FAILED: '启动失败', UNKNOWN: '状态待核验' };
   const statusClass = w?.state === 'RUNNING' ? ' st-RUNNING' : ['FAILED', 'UNKNOWN', 'INCOMPLETE'].includes(w?.state) ? ' st-UNKNOWN' : '';
-  const status = el('span', 'pill' + statusClass, '场景测试：' + (workbenchBusy ? '处理中…' : labels[w?.state] || '检查中…'));
+  const status = el('span', 'pill' + statusClass, (compact ? '场景测试：' : '') + (workbenchBusy ? '处理中…' : labels[w?.state] || '检查中…'));
   if (w?.message) status.title = w.message;
   box.appendChild(status);
   if (w && !['NOT_INSTALLED', 'INCOMPLETE'].includes(w.state)) {
     if (w.state === 'RUNNING' && w.url) {
-      const a = el('a', 'workbench-link', w.url); a.href = w.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; box.appendChild(a);
+      const a = el('a', 'workbench-link', compact ? '打开' : '打开工作台'); a.href = w.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = w.url; box.appendChild(a);
     } else {
       const open = el('button', 'op-btn', '打开场景测试');
       open.disabled = workbenchBusy || w.state === 'UNKNOWN';
@@ -135,28 +136,21 @@ function startResSampling(alias) {
   tick();
   resTimer = setInterval(tick, RES_SAMPLE_INTERVAL_MS);
 }
-function resChartLegend(label, color) {
-  const span = el('span', 'res-chart-legend');
-  const swatch = el('span', 'res-chart-swatch');
-  swatch.style.background = color;
-  span.append(swatch, el('span', null, label));
-  return span;
-}
 function buildResChart() {
   const wrap = el('div', 'res-chart-wrap');
   const head = el('div', 'res-chart-head');
   const now = el('span', 'res-chart-now');
   now.id = 'resChartNow';
+  now.append(el('span', 'res-chart-value cpu', 'CPU —'), el('span', 'res-chart-value rss', '内存 —'));
   head.append(
     el('span', 'res-chart-title', '资源曲线'),
-    resChartLegend('CPU %', '#ff8a30'),
-    resChartLegend('内存 MB', '#4099ff'),
     now,
-    el('span', 'res-chart-hint', `${RES_SAMPLE_INTERVAL_MS / 1000}s 采样 · 近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟 · CPU 短时采样 · 收起暂停`),
+    el('span', 'res-chart-hint', `近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟`),
   );
   const canvas = document.createElement('canvas');
   canvas.className = 'res-chart';
   canvas.id = 'resChart';
+  canvas.title = '每 5 秒采样；橙色 CPU 使用右侧百分比刻度，蓝色内存按窗口峰值独立缩放。';
   wrap.append(head, canvas);
   return wrap;
 }
@@ -193,9 +187,8 @@ function drawResChart() {
     return;
   }
   // 留 15% 余量，否则窗口内最大值总贴顶、小波动被放大成满屏起伏。
-  // 最新点贴右边缘、旧点向左滚出（任务管理器同款），窗口未满时左侧留空而不是从左往右爬。
-  const offset = RES_SERIES_MAX - resSeries.length;
-  const xOf = (i) => ((i + offset) / (RES_SERIES_MAX - 1)) * plotW;
+  // 按已采集的窗口铺满曲线，起步阶段也能看清趋势；提示同时标明采样次数。
+  const xOf = (i) => (i / Math.max(1, resSeries.length - 1)) * plotW;
   const yOfCpu = (v) => padT + plotH * (1 - Math.min(v, maxCpu) / maxCpu);
   const yOfRss = (v) => padT + plotH * (1 - v / maxRss);
   const drawLine = (pick, yOf, color) => {
@@ -206,6 +199,8 @@ function drawResChart() {
   };
   drawLine(p => p.cpu, yOfCpu, '#ff8a30');
   drawLine(p => p.rss, yOfRss, '#4099ff');
+  const hint = $('.res-chart-hint');
+  if (hint) hint.textContent = resSeries.length < RES_SERIES_MAX ? `已采样 ${resSeries.length} 次 · 每 5 秒` : '近 5 分钟';
 }
 
 // 展开详情时那次实时采样的缓存：轮询重绘（不带 resources）时继续显示它，避免数字来回跳。
@@ -287,16 +282,23 @@ function healthBlock(h) {
     el('span', null, h.state === 'READY' ? '就绪证据命中' : h.state === 'NOT_READY' ? '就绪证据未命中' : '未做就绪探测'));
   // 说明文字收进悬停提示：它是概念解释，不需要每张详情卡常驻一行。
   head.title = '监听（TCP）≠ 业务就绪：READY 仅代表配置的 readyUrl/readyLogPattern 证据命中。';
+  const lines = healthEvidenceLines(h);
+  head.appendChild(el('span', 'health-inline', lines[0]));
   box.appendChild(head);
+  const details = el('details', 'health-details');
+  details.open = healthEvidenceOpen;
+  details.addEventListener('toggle', () => { healthEvidenceOpen = details.open; });
+  details.appendChild(el('summary', null, '查看就绪证据'));
   const ev = el('div', 'health-ev');
-  for (const line of healthEvidenceLines(h)) {
+  for (const line of lines) {
     // 日志证据常是整行启动日志，截断显示、全文放 title，避免一行撑满详情宽度。
     const short = line.length > 84 ? line.slice(0, 82) + '…' : line;
     const row = el('div', null, short);
     if (short !== line) row.title = line;
     ev.appendChild(row);
   }
-  box.appendChild(ev);
+  details.appendChild(ev);
+  box.appendChild(details);
   return box;
 }
 function exitLabel(exit) {
@@ -495,6 +497,7 @@ let detailMoreOpen = false; // 「更多诊断信息」折叠区是否展开，�
 let detailInitialized = false; // 该应用的详情是否已按「首次」规则决定过展开状态
 // 停止/重启的附加参数：控件在详情卡内，值跨轮询重绘保留；启动/移除不使用。
 let lifecycleTree = false, lifecycleGrace = '';
+let lifecycleOptionsOpen = false, healthEvidenceOpen = false;
 function applyDetail(open) {
   $('#detail').hidden = !open;
   $('#detailBar').setAttribute('aria-expanded', String(open));
@@ -576,13 +579,22 @@ function appendPortDiagnosis(card, d) {
   card.appendChild(panel);
 }
 function lifecycleOptions() {
+  const details = el('details', 'lifecycle-details');
+  details.open = lifecycleOptionsOpen;
+  details.addEventListener('toggle', () => { lifecycleOptionsOpen = details.open; });
+  const summary = el('summary', 'lifecycle-summary', '停止和重启选项');
+  const active = el('span', 'lifecycle-active');
+  const refreshActive = () => { active.textContent = [lifecycleTree ? '包含子进程' : '', lifecycleGrace !== '' ? `优雅退出 ${lifecycleGrace} ms` : ''].filter(Boolean).join(' · '); };
+  refreshActive();
+  summary.appendChild(active);
+  details.appendChild(summary);
   const row = el('div', 'lifecycle-opts');
   const treeLabel = el('label', 'lifecycle-opt');
   const tree = el('input', 'lifecycle-tree');
   tree.type = 'checkbox';
   tree.checked = lifecycleTree;
   tree.title = '停止/重启时连带终止该实例的全部后代进程（同 CLI --tree）；启动/移除不使用';
-  tree.addEventListener('change', e => { lifecycleTree = !!e.target.checked; });
+  tree.addEventListener('change', e => { lifecycleTree = !!e.target.checked; refreshActive(); });
   treeLabel.append(tree, el('span', null, '同时终止子进程（--tree）'));
   const graceLabel = el('label', 'lifecycle-opt');
   const grace = el('input', 'lifecycle-grace');
@@ -593,10 +605,11 @@ function lifecycleOptions() {
   grace.placeholder = '例如 3000';
   grace.value = lifecycleGrace;
   grace.title = '停止/重启前先等待优雅退出的毫秒数（0-600000，同 CLI --grace）；留空=现有强制终止';
-  grace.addEventListener('input', e => { lifecycleGrace = e.target.value; });
+  grace.addEventListener('input', e => { lifecycleGrace = e.target.value; refreshActive(); });
   graceLabel.append(el('span', null, '优雅退出'), grace, el('span', 'lifecycle-unit', 'ms'));
   row.append(treeLabel, graceLabel, el('span', 'lifecycle-note', '仅停止/重启生效；留空=不等待'));
-  return row;
+  details.appendChild(row);
+  return details;
 }
 // 列表接口已带状态/端口/pid/内存/退出等字段：切换应用时先用它渲染详情，
 // 避免右侧先闪「正在加载」空白、数秒后才刷出内容（status 单次采集约 3s）。
@@ -624,6 +637,7 @@ function renderDetail(d) {
   // 全量重建会重置滚动位置：同一应用（预览→详情、4s 轮询）保持视口，切换应用回到顶部。
   const sameApp = !!d && currentDetail?.alias === d.alias;
   const keepScroll = box.scrollTop;
+  const historyOpen = sameApp && !!box.querySelector('.run-history')?.open;
   currentDetail = d;
   const bar = $('#detailBar');
   box.replaceChildren();
@@ -639,25 +653,19 @@ function renderDetail(d) {
   }
   const card = el('div', 'card');
   const actualPorts = actualPortsOf(d);
-  const head = el('div', 'card-head');
-  head.append(el('span', 'name', d.alias), statusPill(d.status),
-    el('span', 'pill mode', d.mode ?? '?'),
-    el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'));
-  // 预览阶段如实标注：字段来自列表/上次结果，完整详情仍在请求中。
-  if (detailPending && d.alias === selected) head.appendChild(el('span', 'pill pending', '加载中…'));
   const opsSlot = $('#detailOps');
   opsSlot.replaceChildren();
   const st = d.status;
   if (d.managed !== false) {
     // 受管启停按钮：与 CLI start/stop/restart 同一实现；非受管登记不提供。
-    // 摘要栏（折叠态也可见）与详情卡头各渲染一组。
+    // 操作固定在详情标题栏，展开/收起均使用同一组按钮。
     const makeOps = () => {
       const ops = el('span', 'op-group');
       const mk = (label, op, enabled, title, extra = '') => {
         const needsConfirm = true; // 所有生命周期操作（含普通启动）都需二次点击确认
         const armed = armedOp === `${d.alias}:${op}:${extra}`;
         const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
-        const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
+        const b = el('button', 'op-btn' + (op === 'start' ? ' primary' : op === 'stop' || op === 'remove' ? ' danger' : '') + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
         b.disabled = !enabled || lifecycleBusy;
         b.title = running ? `${label}执行中，可能需要数秒，请稍候` : armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
         b.addEventListener('click', (e) => {
@@ -670,13 +678,12 @@ function renderDetail(d) {
       const cur = d.run;
       const unresolved = !d.preview && cur && cur.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(cur.phase);
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
-      mk('停止', 'stop', st === 'RUNNING' || st === 'BACKOFF', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）；BACKOFF 时取消排程的重启（同 CLI stop）');
       mk('重启', 'restart', ['RUNNING', 'BACKOFF', 'DEAD'].includes(st), '确认旧实例退出后启动新实例（同 CLI restart）');
+      mk('停止', 'stop', st === 'RUNNING' || st === 'BACKOFF', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）；BACKOFF 时取消排程的重启（同 CLI stop）');
       if (unresolved) mk('ack 并启动', 'start', true, `放弃未结记录 ${cur.runId} 并重新启动（同 start --ack-unresolved）`, `&ack=${encodeURIComponent(cur.runId)}`);
       mk('移除', 'remove', st === 'STOPPED' || st === 'DEAD', '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）');
       return ops;
     };
-    head.appendChild(makeOps());
     opsSlot.appendChild(makeOps());
     opsSlot.hidden = false;
   } else {
@@ -696,15 +703,14 @@ function renderDetail(d) {
       ops.appendChild(b);
       return ops;
     };
-    head.appendChild(mkUnmanagedRemove());
     opsSlot.appendChild(mkUnmanagedRemove());
     opsSlot.hidden = false;
   }
   opsSlot.appendChild(workbenchPanel(d.alias, true));
-  head.appendChild(workbenchPanel(d.alias));
-  head.appendChild(el('span', 'spacer'));
-  head.appendChild(el('span', 'appid', d.appId));
-  card.appendChild(head);
+  const workbenchRow = el('div', 'workbench-row');
+  workbenchRow.appendChild(workbenchPanel(d.alias));
+  if (d.managed !== false) workbenchRow.appendChild(lifecycleOptions());
+  card.appendChild(workbenchRow);
   if (workbench?.message || workbench?.stderr) {
     const details = document.createElement('details');
     details.className = 'lifecycle-opts';
@@ -713,7 +719,6 @@ function renderDetail(d) {
     if (workbench.stderr) details.appendChild(el('pre', 'diag-json', workbench.stderr));
     card.appendChild(details);
   }
-  if (d.managed !== false) card.appendChild(lifecycleOptions());
 
   const run = d.run;
   const needsAttention = !d.preview && run && run.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(run.phase);
@@ -727,8 +732,12 @@ function renderDetail(d) {
     card.appendChild(alert);
   }
   const health = healthByAlias.get(d.appId);
-  if (health) card.appendChild(healthBlock(health));
-  else if (d.readinessUntested) {
+  const overview = el('div', 'detail-overview');
+  const runtimeSummary = el('div', 'runtime-summary');
+  overview.appendChild(runtimeSummary);
+  if (health) runtimeSummary.appendChild(healthBlock(health));
+  card.appendChild(overview);
+  if (!health && d.readinessUntested) {
     card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：等待健康总览返回；就绪与 JRebel/热加载验证仍需按 Skill 规程用真实证据判定。'));
   }
   if (d.note) card.appendChild(el('div', 'hint-line', 'note: ' + d.note));
@@ -743,13 +752,14 @@ function renderDetail(d) {
 
   const body = el('div', 'card-body');
   const grid = el('div', 'kv');
+  const moreGrid = el('div', 'kv');
   const actualLinked = st === 'RUNNING' && actualPorts.length > 0;
   if (d.expectedPort != null) {
     grid.appendChild(el('div', 'k', '预期端口'));
     const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));
     if (st === 'RUNNING' && !actualLinked) pv.appendChild(portAnchor(d.expectedPort));
     else pv.textContent = String(d.expectedPort);
-    const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '诊断');
+    const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '端口诊断');
     diag.type = 'button';
     diag.title = '只读诊断该端口占用（同 CLI port），不接管、不停止外部进程';
     diag.disabled = !!portDiag?.loading && portDiag?.alias === d.alias;
@@ -782,14 +792,14 @@ function renderDetail(d) {
     const scope = (live?.scope ?? listRow?.resourcesScope) === 'tree' ? '含后代聚合' : '';
     // 标明来源：展开时的精确采样，还是列表轮询的单点值。两者采样窗口相同，但时刻不同。
     const src = live ? '展开时采样' : '轮询采样';
-    kvRow(grid, '内存（RSS）', `${fmtSize(rss)}${cpu}（${[scope, src].filter(Boolean).join(' · ')}）`, 'dim');
+    kvRow(moreGrid, '内存（RSS）', `${fmtSize(rss)}${cpu}（${[scope, src].filter(Boolean).join(' · ')}）`, 'dim');
   } else if (live === null && listRow?.resourcesNote) {
     kvRow(grid, '内存（RSS）', '不可用：' + listRow.resourcesNote, 'dim');
   } else if (live && live.rssBytes == null) {
     kvRow(grid, '内存（RSS）', '不可用：' + (live.reason ?? '采样失败'), 'dim');
   }
-  kvRow(grid, 'runId', run?.runId);
-  kvRow(grid, 'phase', run?.phase);
+  kvRow(moreGrid, 'runId', run?.runId);
+  kvRow(moreGrid, 'phase', run?.phase);
   if (run?.restartPolicy && run.restartPolicy !== 'never') {
     kvRow(grid, '重启策略', `${run.restartPolicy} · 已重启 ${run.restartCount ?? 0}/${run.maxRestarts ?? '?'} 次 · backoff ${run.backoffMs ?? '?'}ms`, run.restartState === 'DEAD' ? 'bad' : 'dim');
     kvRow(grid, '下次重启', fmtTime(run?.nextRestartAt), 'dim');
@@ -817,7 +827,7 @@ function renderDetail(d) {
   more.open = detailMoreOpen; // 每 4s 重绘会重建节点，展开状态必须跨渲染保留
   more.addEventListener('toggle', () => { detailMoreOpen = more.open; });
   more.appendChild(el('summary', null, '更多诊断信息'));
-  const moreGrid = el('div', 'kv');
+  kvRow(moreGrid, '应用 ID', d.appId, 'dim');
   // 静态配置与低频诊断放一起：仓库/入口只在确认对象时看一次，不必常驻。
   kvRow(moreGrid, '仓库', d.root, 'dim');
   kvRow(moreGrid, '入口', d.entry, 'dim');
@@ -835,17 +845,19 @@ function renderDetail(d) {
   // 曲线放在字段表之前：详情卡有 max-height + 滚动，放底部会被裁到可视区外。
   // 只有运行中的受管实例才有曲线；非 RUNNING 不建 canvas，避免空图占位。
   if (d.status === 'RUNNING' && d.managed !== false) {
-    body.appendChild(buildResChart());
+    overview.appendChild(buildResChart());
     requestAnimationFrame(drawResChart);
   }
-  body.appendChild(grid);
+  runtimeSummary.appendChild(grid);
   body.appendChild(more);
   card.appendChild(body);
   appendLifecycleError(card, d);
   appendPortDiagnosis(card, d);
 
   if (d.prevRuns?.length) {
-    card.appendChild(el('div', 'prev-title', '历史批次（prevRuns）'));
+    const history = el('details', 'run-history');
+    history.open = historyOpen;
+    history.appendChild(el('summary', null, `历史批次（${d.prevRuns.length}）`));
     for (const p of d.prevRuns.slice(0, 10)) {
       const row = el('div', 'prev-row');
       row.classList.add('history-pick');
@@ -862,8 +874,9 @@ function renderDetail(d) {
       if (p.lastError) row.appendChild(el('span', 'dim', p.lastError));
       row.addEventListener('click', () => selectHistoryRun(p.runId));
       row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectHistoryRun(p.runId); } });
-      card.appendChild(row);
+      history.appendChild(row);
     }
+    card.appendChild(history);
   }
   box.appendChild(card);
   box.scrollTop = sameApp ? keepScroll : 0;
