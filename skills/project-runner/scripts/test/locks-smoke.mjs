@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { withLock, lockState, readLockHolder } from '../lib/locks.mjs';
 import { hasProcessProbe } from './platform.mjs';
@@ -66,6 +67,21 @@ check('释放时不删别人的锁', () => {
   assert.ok(fs.existsSync(file), '锁已被替换时不得删除别人的锁');
   assert.equal(readLockHolder(file)?.pid, 999999);
   fs.unlinkSync(file);
+});
+
+// 内部证据写（日志轮转/退出落账）只持有毫秒级：用户命令短暂等待，不直接失败。
+check('持有者是 log-* 内部写入 → 短暂等待后成功', () => {
+  const file = lockOf('internal');
+  fs.writeFileSync(file, JSON.stringify({ pid: 999999, op: 'log-exit' }) + '\n');
+  const child = spawn(process.execPath, ['-e',
+    `setTimeout(()=>{try{require('fs').unlinkSync(${JSON.stringify(file)})}catch{}},150)`],
+  { stdio: 'ignore' });
+  try {
+    assert.equal(withLock(home, 'internal', 'stop', () => 'acquired'), 'acquired');
+    assert.ok(!fs.existsSync(file), 'fn 结束后锁应释放');
+  } finally {
+    child.kill();
+  }
 });
 
 // 忙就报错，不在锁内部退避：等待/重试是调用方（人或 Agent）的决定。
