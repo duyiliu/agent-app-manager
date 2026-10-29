@@ -293,6 +293,9 @@ aside {
 .pill.unmanaged::before { display:none }
 .pill.mode { color:var(--text-faint); font-weight:500 }
 .pill.mode::before { display:none }
+/* 预览态：详情卡先用列表/上次结果渲染，完整 status 仍在请求中，如实标注而非留空白占位。 */
+.pill.pending { color:var(--text-faint); border-color:var(--line); background:var(--surface); font-weight:500 }
+.pill.pending::before { background:var(--accent); animation:opbusy 1.2s ease-in-out infinite }
 .pill.hl-READY { color:var(--ok-text) }
 .pill.hl-READY::before { background:var(--ok) }
 .pill.hl-NOT_READY { color:var(--danger-text); border-color:rgba(255,92,92,.35); background:var(--danger-soft) }

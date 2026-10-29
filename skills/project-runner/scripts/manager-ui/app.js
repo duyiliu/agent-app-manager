@@ -8,6 +8,8 @@ let appsCache = [];
 let healthByAlias = new Map(); // GET /api/health 结果：appId -> 健康总览行
 let currentDetail = null;     // 最近一次 /api/status 结果，供健康刷新/诊断结果异步返回后原地重绘
 let detailMissing = false;    // /api/status 返回 404：选中项确实不在注册表；否则详情区显示「正在加载」而非误报
+let detailPending = false;    // 当前详情只是列表缓存/上次结果的预览，真实 /api/status 尚未返回
+const detailCache = new Map(); // alias -> 最近一次 /api/status 结果：切回看过的应用时先渲染它，避免空白占位
 let portDiag = null;          // { alias, port, loading, auto, data?, error? }
 let lastLifecycleError = null; // { alias, op, code, message, detail? }：启停失败的可见详情（仅当前选择展示）
 let paused = false, manualRefresh = false;
@@ -414,8 +416,12 @@ async function loadApps() {
     }
     updateTitle();
     $('#homePath').textContent = d.home ?? '';
+    // 注册表里已消失的应用：清掉详情缓存，避免切回时渲染已经不存在的应用。
+    const liveAliases = new Set(appsCache.map(a => a.alias));
+    for (const k of [...detailCache.keys()]) if (!liveAliases.has(k)) detailCache.delete(k);
     if (selected && !appsCache.some(a => a.alias === selected)) {
       selected = null;
+      detailPending = false;
       renderDetail(null);
       resetLog();
       $('#filesBtn').disabled = true;
@@ -545,9 +551,33 @@ function lifecycleOptions() {
   row.append(treeLabel, graceLabel, el('span', 'lifecycle-note', '仅停止/重启生效；留空=不等待'));
   return row;
 }
+// 列表接口已带状态/端口/pid/内存/退出等字段：切换应用时先用它渲染详情，
+// 避免右侧先闪「正在加载」空白、数秒后才刷出内容（status 单次采集约 3s）。
+// preview=true 表示字段不全：未结记录判定等依赖 run.phase 的逻辑据此跳过，避免误报。
+function previewDetail(row) {
+  return {
+    preview: true,
+    alias: row.alias,
+    displayName: row.displayName ?? row.alias,
+    appId: row.appId,
+    mode: row.mode,
+    status: row.status,
+    managed: row.managed,
+    pid: row.pid,
+    expectedPort: row.expectedPort,
+    root: row.root,
+    tags: row.tags ?? [],
+    run: row.lastRunId
+      ? { runId: row.lastRunId, pid: row.pid ?? null, managed: row.managed, exit: row.exit ?? null, exitSummary: row.exitSummary ?? null }
+      : null,
+  };
+}
 function renderDetail(d) {
-  currentDetail = d;
   const box = $('#detail');
+  // 全量重建会重置滚动位置：同一应用（预览→详情、4s 轮询）保持视口，切换应用回到顶部。
+  const sameApp = !!d && currentDetail?.alias === d.alias;
+  const keepScroll = box.scrollTop;
+  currentDetail = d;
   const bar = $('#detailBar');
   box.replaceChildren();
   if (!d) {
@@ -566,6 +596,8 @@ function renderDetail(d) {
   head.append(el('span', 'name', d.alias), statusPill(d.status),
     el('span', 'pill mode', d.mode ?? '?'),
     el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'));
+  // 预览阶段如实标注：字段来自列表/上次结果，完整详情仍在请求中。
+  if (detailPending && d.alias === selected) head.appendChild(el('span', 'pill pending', '加载中…'));
   const opsSlot = $('#detailOps');
   opsSlot.replaceChildren();
   const st = d.status;
@@ -589,7 +621,7 @@ function renderDetail(d) {
         ops.appendChild(b);
       };
       const cur = d.run;
-      const unresolved = cur && cur.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(cur.phase);
+      const unresolved = !d.preview && cur && cur.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(cur.phase);
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
       mk('停止', 'stop', st === 'RUNNING' || st === 'BACKOFF', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）；BACKOFF 时取消排程的重启（同 CLI stop）');
       mk('重启', 'restart', ['RUNNING', 'BACKOFF', 'DEAD'].includes(st), '确认旧实例退出后启动新实例（同 CLI restart）');
@@ -627,7 +659,7 @@ function renderDetail(d) {
   if (d.managed !== false) card.appendChild(lifecycleOptions());
 
   const run = d.run;
-  const needsAttention = run && run.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(run.phase);
+  const needsAttention = !d.preview && run && run.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(run.phase);
   if (needsAttention) {
     const cmd = `start ${d.alias} --ack-unresolved ${run.runId}`;
     const alert = el('div', 'alert');
@@ -777,6 +809,7 @@ function renderDetail(d) {
     }
   }
   box.appendChild(card);
+  box.scrollTop = sameApp ? keepScroll : 0;
 
   const bits = [
     run?.pid != null ? 'pid ' + run.pid : null,
@@ -790,6 +823,8 @@ function renderDetail(d) {
     ...(health ? [healthPill(health.state)] : []),
     el('span', 'pill mode', d.mode ?? '?'),
     el('span', 'pill' + (d.managed === false ? ' unmanaged' : ''), d.managed === false ? '非受管' : '受管'),
+    // 收起态只有这一行摘要：加载中提示也放这里，避免「pid/端口先出现、几秒后整行变化」看不出原因。
+    ...(detailPending && d.alias === selected ? [el('span', 'pill pending', '加载中…')] : []),
     el('span', 'db-info', bits));
   bar.hidden = false;
   const hasDiagnostics = lastLifecycleError?.alias === d.alias || portDiag?.alias === d.alias;
@@ -898,22 +933,30 @@ async function loadStatus(opts = {}) {
   // 采样请求不能被轮询的在飞守卫挡掉：展开是用户主动动作，此刻轮询大概率正在飞。
   const busy = opts.sample ? statusSampleBusy : statusBusy;
   if (fatal || (paused && !manualRefresh) || !selected || busy) return;
+  // 采集要 3s 左右：期间可能已切到别的应用，响应回来必须按请求时的 alias 校验，否则详情区会闪回旧应用。
+  const alias = selected;
   if (opts.sample) statusSampleBusy = true; else statusBusy = true;
   try {
-    const detail = await api('/api/status?app=' + encodeURIComponent(selected) + (opts.sample ? '&sample=1' : ''));
+    const detail = await api('/api/status?app=' + encodeURIComponent(alias) + (opts.sample ? '&sample=1' : ''));
+    if (alias !== selected) return;
     // 实时采样结果留在本地：后续 4s 轮询不带 resources，靠它继续显示同一份"当前值"。
-    if (opts.sample && detail.alias === selected && detail.resources) {
-      liveResources = { alias: selected, runId: detail.run?.runId ?? null, at: Date.now(), ...detail.resources };
+    if (opts.sample && detail.resources) {
+      liveResources = { alias, runId: detail.run?.runId ?? null, at: Date.now(), ...detail.resources };
     }
-    const old = previousStatuses.get(selected);
+    const old = previousStatuses.get(alias);
     const runId = detail.run?.runId;
     if (old?.status === 'RUNNING' && old.runId === runId && ['STOPPED', 'UNKNOWN'].includes(detail.status)) {
       notifyExit(runId, detail.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || '退出说明不可用');
     }
-    previousStatuses.set(selected, { status: detail.status, runId });
+    previousStatuses.set(alias, { status: detail.status, runId });
+    detailCache.set(alias, detail);
+    detailPending = false;
     renderDetail(detail);
   } catch (e) {
+    if (alias !== selected) return;
+    detailPending = false;
     if (e.status === 404) { detailMissing = true; renderDetail(null); return; }
+    rerenderDetail(); // 失败时保留预览内容，只摘掉「加载中」标记
     handlePollError(e);
   } finally { if (opts.sample) statusSampleBusy = false; else statusBusy = false; }
 }
@@ -948,12 +991,18 @@ function selectApp(alias) {
     history.replaceState(null, '', u); // 回写 ?app=<alias>：刷新后保持选中（初始定位已支持）
   } catch { /* 地址不可写时仅影响刷新定位，不阻塞选择 */ }
   renderApps();
-  renderDetail(null);
+  // 先用手上已有的数据画出详情（切回看过的应用用上次结果，否则用列表行构造预览），
+  // 真实 /api/status 返回后原地覆盖：避免右侧先空一个「正在加载」再整块刷出内容。
+  const cached = detailCache.get(alias) ?? null;
+  const listRow = appsCache.find(a => a.alias === alias);
+  detailPending = Boolean(cached || listRow);
+  renderDetail(cached ?? (listRow ? previewDetail(listRow) : null));
   resetLog();
   $('#filesBtn').disabled = false;
   if (!$('#fileDrawer').hidden) loadTree('', $('#fdTree'), ++treeVersion);
   loadSources();
-  loadStatus({ sample: true }); // 首次选中可能自动展开详情，顺带做一次资源采样
+  // 不带 sample：切换时先拿最快的一版详情；展开详情时会另行按需采样资源。
+  loadStatus();
 }
 
 // ---------- 日志 ----------
