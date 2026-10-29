@@ -15,6 +15,18 @@ import { psProc, listListeningPorts } from '../lib/probe.mjs';
 import { persistableDiscovery } from '../lib/launch.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
+const processPattern = 'two\\.js|srv\\.js|multi\\.js|lsn\\.js|crash\\.js|stable\\.js|clean\\.js|cmd-crash\\.js|npm-cli\\.js run dev|setInterval|sleep 30';
+const existingProcesses = new Map(findProcesses(processPattern).filter((pid) => pid !== process.pid).map((pid) => {
+  try { const info = psProc('capture', { id: pid }); return [pid, info.result === 'ok' ? info.creationFileTime : null]; }
+  catch { return [pid, null]; }
+}));
+function isExistingProcess(pid) {
+  if (!existingProcesses.has(pid)) return false;
+  const creation = existingProcesses.get(pid);
+  if (creation == null) return false;
+  try { const info = psProc('capture', { id: pid }); return info.result === 'ok' && info.creationFileTime === creation; }
+  catch { return false; }
+}
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-runtime-smoke-'));
 const home = path.join(base, 'home');
 const projNode = path.join(base, 'node-app');
@@ -262,8 +274,16 @@ try {
     await check('跨 node 进程 start 在 PORT 未设置时仍传递持久化值', async () => {
       const childEnv = { ...process.env };
       delete childEnv.PORT;
-      const start = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', 'start', 'nodeapp'],
-        { encoding: 'utf8', windowsHide: true, timeout: 60000, env: childEnv });
+      let start;
+      const deadline = Date.now() + 5000;
+      do {
+        start = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', 'start', 'nodeapp'],
+          { encoding: 'utf8', windowsHide: true, timeout: 60000, env: childEnv });
+        let code;
+        try { code = JSON.parse(start.stdout).error?.code; } catch { /* 保留原始错误用于断言 */ }
+        if (code !== 'LOCK_BUSY' || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } while (true);
       assert.equal(start.status, 0, `${start.stdout}${start.stderr}`);
       assert.equal(cli('status', 'nodeapp').json.data.env.PORT, '3001');
       const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${cli('status', 'nodeapp').json.data.appId}.json`), 'utf8'));
@@ -857,7 +877,7 @@ try {
   // 回归断言：本轮启动的临时进程都已退出（kill 后进程退出需要一点时间，轮询等待）
   let leftover = [];
   for (let i = 0; i < 20; i++) {
-    leftover = findProcesses('two\\.js|srv\\.js|multi\\.js|lsn\\.js|crash\\.js|stable\\.js|clean\\.js|cmd-crash\\.js|npm-cli\\.js run dev|setInterval|sleep 30').filter((pid) => pid !== process.pid);
+    leftover = findProcesses(processPattern).filter((pid) => pid !== process.pid && !isExistingProcess(pid));
     if (!leftover.length) break;
     await wait(250);
   }

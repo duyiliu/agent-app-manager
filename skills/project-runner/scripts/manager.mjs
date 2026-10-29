@@ -25,6 +25,7 @@ import {
 } from './lib/commands.mjs';
 import { parseTagFilters } from './lib/desc.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource } from './lib/log-sources.mjs';
+import { cmdWorkbench } from './lib/commands/workbench.mjs';
 
 export { SCHEMA_VERSION, MANAGER_VERSION };
 
@@ -429,6 +430,7 @@ function usageText() {
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
     '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
     '  ui [--port N] [--open]              本地 Web 管理台（默认固定 127.0.0.1:8199，无令牌仅本机；--open 监听成功后用默认浏览器打开 URL，失败仅打印地址；Ctrl+C 退出）',
+    '  workbench <status|open|stop> <alias|appId>  查询、打开或停止项目的场景测试工作台',
     '',
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>] [--wait-ready [--ready-timeout <ms>]]   首次受管启动：意图→启动→身份采集→登记',
@@ -470,7 +472,8 @@ async function main() {
     // start/restart --dry-run 必须连 home 目录都不创建：命令本身不是只读命令，
     // 但该分支不取锁/不写 registry/runtime，因此按只读方式解析 home。
     const dryRunReadOnly = (command === 'start' || command === 'restart') && ctx.rest.includes('--dry-run');
-    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command) || dryRunReadOnly);
+    const workbenchReadOnly = command === 'workbench' && ctx.rest[0] === 'status';
+    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command) || dryRunReadOnly || workbenchReadOnly);
   } catch (e) {
     const c = command ?? 'cli';
     if (e instanceof ManagerError) { emitErr({ json: false }, c, e); return; }
@@ -573,6 +576,7 @@ async function main() {
       case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;
       case 'start-new': data = await cmdStartNew(ctx); break;
       case 'record-unmanaged': data = cmdRecordUnmanaged(ctx); break;
+      case 'workbench': data = await cmdWorkbench(ctx, ctx.rest[0], ctx.rest[1]); break;
       case 'ui': await cmdUi(ctx); return; // 前台常驻直到 Ctrl+C，不走 emitOk
       default: throw usageError(`未知命令：${command}\n${usageText()}`);
     }

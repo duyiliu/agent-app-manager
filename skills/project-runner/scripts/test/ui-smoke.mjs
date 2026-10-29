@@ -176,6 +176,21 @@ try {
   });
 
   // lifecycle 写操作防 CSRF：GET 必须被方法守卫挡在业务之外（405 而非业务错误码），
+  await check('工作台状态 GET 只读且未安装项目有提示', async () => {
+    const r = await get('/api/workbench?app=his');
+    assert.equal(r.status, 200); assert.equal(r.json.data.state, 'NOT_INSTALLED');
+  });
+  await check('工作台操作拒绝 GET 和跨站 POST', async () => {
+    assert.equal((await get('/api/workbench?app=his&op=open')).status, 405);
+    assert.equal((await get('/api/workbench?app=his&op=open', { method: 'POST', headers: { Origin: 'http://evil.example' } })).status, 403);
+    assert.equal((await get('/api/workbench?app=his&op=open', { method: 'POST', headers: { Origin: `http://127.0.0.1:${port === 1 ? 2 : port - 1}`, 'Sec-Fetch-Site': 'same-site' } })).status, 403);
+    assert.equal((await get('/api/workbench?app=his&op=stop', { method: 'POST', headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+  });
+  await check('工作台拒绝多余参数和请求体', async () => {
+    assert.equal((await get('/api/workbench?app=his&op=open&path=evil', { method: 'POST' })).status, 400);
+    assert.equal((await get('/api/workbench?app=his&app=report')).status, 400);
+    assert.equal((await get('/api/workbench?app=his&op=open', { method: 'POST', headers: { 'Transfer-Encoding': 'chunked' } })).status, 400);
+  });
   // 跨站来源（Sec-Fetch-Site=cross-site 或异源 Origin）的 POST 一律 403。
   await check('GET /api/lifecycle 拒绝（405）', async () => {
     const r = await get('/api/lifecycle?app=nosuchapp&op=stop');
@@ -477,10 +492,15 @@ try {
     return check(name, fn);
   };
   const runManager = async (args) => {
-    const r = await exitInfo(spawn(process.execPath, [MANAGER, '--home', home, '--json', ...args], { stdio: ['ignore', 'pipe', 'pipe'] }));
+    // stdout 才是 --json 结果；stderr 的 Node 警告不能混入 JSON 解析。
+    const c = spawn(process.execPath, [MANAGER, '--home', home, '--json', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    c.stdout.on('data', (d) => { out += d; });
+    c.stderr.on('data', (d) => { err += d; });
+    const code = await new Promise((res) => c.on('exit', res));
     let json = null;
-    try { json = JSON.parse(r.text); } catch { /* 非 JSON：用 text 报错 */ }
-    return { ...r, json };
+    try { json = JSON.parse(out); } catch { /* 非 JSON：用 text 报错 */ }
+    return { code, text: out + err, json };
   };
   const waitLogPid = async (file, re) => {
     for (let i = 0; i < 60; i++) {

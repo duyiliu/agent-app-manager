@@ -357,6 +357,25 @@ try {
     const sigText = elFor('detail').textContent;
     assert(sigText.includes('signal=SIGKILL') && sigText.includes('被信号终止'), sigText);
   });
+  await check('工作台入口展示运行状态、安全链接和停止按钮', () => {
+    run(`workbench = {state:'RUNNING', url:'http://127.0.0.1:43123/', pid:123}; renderDetail({alias:'his',appId:'ahis',status:'STOPPED',managed:true,mode:'node'});`);
+    const root = elFor('detail');
+    const link = root.querySelectorAll('a').find((a) => a.href === 'http://127.0.0.1:43123/');
+    assert(link && link.target === '_blank' && link.rel.includes('noopener'));
+    assert(root.textContent.includes('http://127.0.0.1:43123/') && root.textContent.includes('停止工作台'));
+    assert(!root.textContent.includes('进入工作台'));
+    assert(elFor('detailOps').textContent.includes('场景测试：已运行') && elFor('detailOps').textContent.includes('http://127.0.0.1:43123/') && elFor('detailOps').textContent.includes('停止工作台'));
+  });
+  await check('工作台打开操作异步 POST 并打开独立地址', async () => {
+    run(`selected='his'; workbenchBusy=false; globalThis.__workbenchFetch=fetch; globalThis.__opened=null; window.open=(...args)=>{globalThis.__opened=args}; fetch=async(u,options)=>{ globalThis.__request={url:String(u),method:options.method}; return {ok:true,json:async()=>({data:{state:'RUNNING',url:'http://127.0.0.1:43123/'}})}; };`);
+    try {
+      await run(`workbenchAction('his','open')`);
+      assert.equal(run('__opened[0]'), 'http://127.0.0.1:43123/');
+      assert.match(run('__opened[2]'), /noopener/);
+      assert.equal(run('__request.method'), 'POST');
+      assert.match(run('__request.url'), /\/api\/workbench\?app=his&op=open/);
+    } finally { run(`fetch=__workbenchFetch; workbench=null;`); }
+  });
   // #107：UI 必须优先展示/链接实际监听端口，expectedPort 只保留为启动前冲突检查与回退展示。
   await check('端口链接优先使用实际端口（列表与详情）', () => {
     const anchorHrefs = (root) => [...root.querySelectorAll('a.port-link')].map((a) => a.href);

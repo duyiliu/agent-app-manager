@@ -802,12 +802,19 @@ try {
     expectOk(st);
     assert.equal(st.json.data.status, 'DEAD');
     assert.equal(st.json.data.run.restartCount, 1, '重启次数应为 1（maxRestarts=1）');
-    const hits = readNotifies();
+    // DEAD 先落盘，回调在锁外执行并随后回写结果；等待回调完成后再断言。
+    const deadline = Date.now() + 5000;
+    let hits = readNotifies();
+    let rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
+    while ((hits.length < 3 || !rt.current.notifyResult) && Date.now() < deadline) {
+      sleep(100);
+      hits = readNotifies();
+      rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
+    }
     assert.equal(hits.length, 3, `监督型 DEAD 应触发一次回调（此前共 2 次），实际 ${hits.length}：${JSON.stringify(hits)}`);
     assert.equal(hits[2].runId, s.data.runId, '回调 runId 应为监督 run');
     assert.equal(hits[2].alias, 'smoke-noti4');
     // 落账：DEAD 记录带 notifiedAt/notifyResult，重复查询不重复触发
-    const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
     assert(rt.current.notifiedAt, 'DEAD 记录缺少 notifiedAt');
     assert.equal(rt.current.notifyResult, 'ok', `notifyResult 异常：${rt.current.notifyResult}`);
     expectOk(run(['status', 'smoke-noti4']));

@@ -307,7 +307,7 @@ aside {
 .hl-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--ok) }
 /* 资源告警：方形+橙色，与绿色圆形健康点区分开，避免两个圆点并排时混淆。 */
 .res-warn { flex:none; width:7px; height:7px; border-radius:2px; background:var(--warn) }
-/* 资源曲线：详情展开时按 2s 采样，收起即停；画布高度固定，宽度自适应容器。 */
+/* 资源曲线：详情展开时按 5s 采样，收起即停；画布高度固定，宽度自适应容器。 */
 .res-chart-wrap { margin:12px 13px 11px; padding:8px 10px 6px; border:1px solid var(--line); border-radius:8px; background:var(--surface) }
 .res-chart-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:6px; font-size:10.5px; color:var(--text-dim) }
 .res-chart-title { font-weight:600; color:var(--text) }
@@ -406,6 +406,9 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .card-head .name { font-size:14.5px; font-weight:600; color:var(--text) }
 .card-head .appid { font:10.5px/1.4 var(--mono-font); color:var(--text-faint) }
 .card-head .spacer { flex:1 }
+.workbench-ops { display:inline-flex; align-items:center; flex-wrap:wrap; gap:6px; margin-left:6px }
+.workbench-link, .workbench-link:visited { color:var(--accent-text); font:11px/1.4 var(--mono-font); text-decoration:none }
+.workbench-link:hover { text-decoration:underline }
 .card-body { padding:11px 13px 13px }
 .alert {
   margin:0 13px 11px;

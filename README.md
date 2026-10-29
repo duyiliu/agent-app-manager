@@ -53,6 +53,8 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 `ui` 默认监听 `http://127.0.0.1:8199`，浏览器打开即可查看全局应用、日志和项目文件。命令在任何目录都能用，不需要 `cd` 到业务仓库。
 
+在应用详情中，若项目的 `scenario-test` 目录包含配置、`index.html` 和项目内 CLI，可点击「打开场景测试」启动并打开独立工作台；再次点击会复用，停止工作台不影响业务应用。工作台使用独立的本地端口，新标签被拦截时可点击显示的地址。打开工作台不会自动执行场景。
+
 完整参数见 [manager 参考](skills/project-runner/references/manager.md)，Agent 侧规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节。
 
 ## 能力
