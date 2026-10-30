@@ -345,11 +345,11 @@ function drawResChart() {
 // runId 变了（重启）或切换应用时自动失效。
 let liveResources = null; // { alias, runId, rssBytes, scope, reason?, at }
 
-async function api(path, signal, method = 'GET') {
+async function api(path, signal, method = 'GET', body = undefined) {
   const u = new URL(path, location.origin);
   // GET 轮询必须超时：服务端若挂起，请求永不应答时 in-flight 守卫会永久置位、轮询停摆（#166）。
   // 显式 signal（AbortController/AbortSignal.timeout）优先；未给的 GET 默认 30s 超时。
-  const r = await fetch(u, { cache: 'no-store', signal: signal ?? AbortSignal.timeout(30_000), method });
+  const r = await fetch(u, { cache: 'no-store', signal: signal ?? AbortSignal.timeout(30_000), method, ...(body !== undefined ? { body } : {}) });
   const j = await r.json().catch(() => ({ ok: false, error: { code: 'BAD_JSON', message: '响应解析失败' } }));
   if (!r.ok) {
     const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
@@ -1884,11 +1884,26 @@ $('#docBtn').addEventListener('click', async () => {
   try { $('#docBody').textContent = JSON.stringify(await api('/api/doctor'), null, 2); }
   catch (e) { $('#docBody').textContent = `诊断失败：${e.message}`; }
 });
+$('#backupBtn').addEventListener('click', () => { $('#backupOverlay').hidden = false; });
+$('#backupClose').addEventListener('click', () => { $('#backupOverlay').hidden = true; });
+$('#backupOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.hidden = true; });
+$('#backupImportBtn').addEventListener('click', async () => {
+  const out = $('#backupResult');
+  const text = $('#backupImportText').value.trim();
+  if (!text) { out.textContent = '请先粘贴备份 JSON'; return; }
+  out.textContent = '导入中…';
+  try {
+    const q = `?dry=${$('#backupImportDry').checked ? 1 : 0}&force=${$('#backupImportForce').checked ? 1 : 0}`;
+    const r = await api('/api/import' + q, AbortSignal.timeout(30000), 'POST', text);
+    out.textContent = JSON.stringify(r, null, 2);
+  } catch (e) { out.textContent = `导入失败：${e.message}`; }
+});
 $('#docClose').addEventListener('click', () => { $('#docOverlay').hidden = true; });
 $('#docOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.hidden = true; });
 // Esc 关闭诊断浮层（#167）；操作确认框的 Esc 由 actionDialog 自己的 keydown 处理
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#docOverlay').hidden) $('#docOverlay').hidden = true;
+  if (e.key === 'Escape' && !$('#backupOverlay').hidden) $('#backupOverlay').hidden = true;
 });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {

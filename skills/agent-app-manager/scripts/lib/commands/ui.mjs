@@ -1,6 +1,9 @@
 // 本地只读 Web 管理台（ui，design.md §2.2 / AC08）。
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { usageError, conflictError } from '../errors.mjs';
@@ -196,6 +199,26 @@ export async function cmdUi(ctx) {
             throw usageError('deps 需要 1/true/0/false 且仅 stop 支持');
           }
           return runLifecycleSubprocess(ctx.home, op, ref, ack, { tree, graceMs, owner, deps });
+        },
+        // 登记备份（#142）：导出经 manager export --out 临时文件，读回后删除；
+        // 导入把上传体写临时文件再交 manager import（同一 CLI 实现，校验/冲突语义一致）。
+        exportBackup: async () => {
+          const tmp = path.join(os.tmpdir(), `aam-export-${process.pid}-${crypto.randomBytes(4).toString('hex')}.json`);
+          try {
+            const r = await runManagerJson(ctx.home, ['export', '--out', tmp], { timeoutMs: 30000 });
+            const content = fs.readFileSync(tmp, 'utf8');
+            return { ...r, content };
+          } finally { try { fs.unlinkSync(tmp); } catch { /* 已删则忽略 */ } }
+        },
+        importBackup: async (bodyText, { dryRun = false, force = false } = {}) => {
+          const tmp = path.join(os.tmpdir(), `aam-import-${process.pid}-${crypto.randomBytes(4).toString('hex')}.json`);
+          try {
+            fs.writeFileSync(tmp, bodyText);
+            const args = ['import', '--from', tmp];
+            if (dryRun) args.push('--dry-run');
+            if (force) args.push('--force');
+            return await runManagerJson(ctx.home, args, { timeoutMs: 30000 });
+          } finally { try { fs.unlinkSync(tmp); } catch { /* 已删则忽略 */ } }
         },
       },
     });

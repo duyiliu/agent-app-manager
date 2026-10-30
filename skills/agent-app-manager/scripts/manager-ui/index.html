@@ -702,6 +702,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 <header class="topbar">
   <div class="brand"><span class="live-dot" role="img" aria-label="管理台运行中" title="管理台运行中"></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
   <button id="docBtn" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
+  <button id="backupBtn" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
   <button id="themeBtn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题">◐</button>
   <button id="filesBtn" type="button" disabled>文件</button>
   <span class="badge ro" id="verBadge">本地</span>
@@ -769,6 +770,22 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <div class="doc-card" role="dialog" aria-label="只读诊断">
     <div class="doc-head"><strong>只读诊断</strong><span class="dim">同 manager doctor：列出问题不自动修复</span><button id="docClose" class="icon-btn" type="button" title="关闭" aria-label="关闭诊断">✕</button></div>
     <pre id="docBody"></pre>
+  </div>
+</div>
+<div id="backupOverlay" class="doc-overlay" hidden>
+  <div class="doc-card" role="dialog" aria-label="登记备份">
+    <div class="doc-head"><strong>登记备份</strong><span class="dim">同 manager export/import；导入只登记不启动</span><button id="backupClose" class="icon-btn" type="button" title="关闭" aria-label="关闭备份">✕</button></div>
+    <div style="padding:12px 14px">
+      <p style="margin:0 0 8px"><a id="backupExport" href="/api/export" download="registry-backup.json">导出全部登记（JSON，敏感 env 键不落明文）</a></p>
+      <p class="dim" style="margin:0 0 6px">导入：粘贴备份 JSON — 冲突默认跳过，勾选 --force 等价覆盖</p>
+      <textarea id="backupImportText" rows="8" style="width:100%;font:11.5px/1.5 var(--mono-font)" placeholder='{"format":"agent-app-manager/registry-export",...}'></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <label><input type="checkbox" id="backupImportDry" checked> 预览（dry-run）</label>
+        <label><input type="checkbox" id="backupImportForce"> --force 覆盖冲突</label>
+        <button id="backupImportBtn" type="button">导入</button>
+      </div>
+      <pre id="backupResult" style="margin:10px 0 0;font:11.5px/1.5 var(--mono-font);white-space:pre-wrap"></pre>
+    </div>
   </div>
 </div>
 <div id="actionOverlay" class="doc-overlay" hidden>
