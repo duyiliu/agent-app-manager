@@ -244,6 +244,7 @@ function renderHuman(command, data) {
         data.run?.exit ? `exit: ${data.run.exit.signal ? `signal=${data.run.exit.signal}` : `code=${data.run.exit.code ?? '?'}`}${data.run.exit.at ? ` at=${data.run.exit.at}` : ''}${data.run.exitSummary ? `（${data.run.exitSummary}）` : ''}` : null,
         Object.keys(data.env ?? {}).length ? `env=${JSON.stringify(data.env)}` : null,
         data.run?.lastError ? `lastError: ${data.run.lastError}` : null,
+        data.run?.notifyResult ? `onExit 通知: ${data.run.notifyResult}${data.run.notifiedAt ? ` @${data.run.notifiedAt}` : ''}` : null,
         data.run?.restartPolicy && data.run.restartPolicy !== 'never'
           ? `restart=${data.run.restartPolicy} ${data.run.restartCount ?? 0}/${data.run.maxRestarts ?? '?'} state=${data.run.restartState ?? '-'} backoff=${data.run.backoffMs ?? '?'}ms${data.run.nextRestartAt ? ` next=${data.run.nextRestartAt}` : ''}`
           : null,

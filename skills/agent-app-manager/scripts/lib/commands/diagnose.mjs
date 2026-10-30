@@ -17,6 +17,7 @@ import { displayEnv } from '../env.mjs';
 import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from '../restart.mjs';
 import { sampleRunResources } from '../resources.mjs';
 import { detectLegacySkills } from '../legacy-skill.mjs';
+import { loadGlobalOnExit } from '../notify.mjs';
 
 // 实际监听端口去重排序：同一端口可能在 0.0.0.0 与 :: 各有一条监听记录。
 function uniqueListeningPorts(entries) {
@@ -129,6 +130,21 @@ export function cmdDoctor(ctx) {
     problems.push({ file: '(dependency)', code: 'DEPENDENCY', message: `Linux 受管 terminate/wait 需要 python3>=3.9 与 pidfd API（os.pidfd_open / signal.pidfd_send_signal）：${pidfdProbe.error}` });
   }
   const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
+  // onExit 副作用审计（#160）：status/list 首次观测到退出会同步执行已配置钩子（≤15s）。
+  // 这里暴露"哪些应用配置了钩子/全局兜底是否生效/最近一次执行结果"，让副作用可见可审计；
+  // 不回显命令本身（属本机配置，可能含敏感参数）。
+  const globalOnExit = loadGlobalOnExit(home);
+  const onExitAudit = [];
+  for (const [appId, app] of Object.entries(reg.apps)) {
+    let cur = null;
+    try { cur = readRuntimeStrict(home, appId)?.current ?? null; } catch { /* 单条失败不阻断 */ }
+    if (!app.onExit && !cur?.notifyResult && !cur?.notifiedAt) continue;
+    onExitAudit.push({
+      alias: app.alias, appId,
+      configured: Boolean(app.onExit),
+      notifiedAt: cur?.notifiedAt ?? null, notifyResult: cur?.notifyResult ?? null,
+    });
+  }
   const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
   // 旧 Skill 安装探测只报告；是否卸载由用户决定，doctor 不删除任何文件。
   let legacySkills = [];
@@ -142,7 +158,8 @@ export function cmdDoctor(ctx) {
     pidfd: pidfdProbe,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports, problems,
     legacySkills,
-    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪；legacySkills 仅列出旧 Skill 安装位置，不自动卸载',
+    onExit: { globalConfigured: Boolean(globalOnExit), apps: onExitAudit },
+    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪；legacySkills 仅列出旧 Skill 安装位置，不自动卸载；status/list 首次观测到受管进程退出时会同步执行已配置的 onExit 钩子（≤15s），执行证据见 onExit.apps',
   }));
 }
 
