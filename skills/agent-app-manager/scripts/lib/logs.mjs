@@ -6,7 +6,7 @@ export const MAX_LOG_LINES = 5000;
 
 // 批次日志与启动元文件的文件名语法（logs/<appId>/ 下），prune 与 listSources 共用
 export const RUN_LOG_FILE_RE = /^([a-z0-9][a-z0-9-]{0,47})\.(stdout|stderr)\.log(?:\.1)?$/;
-export const RUN_META_FILE_RE = /^\.([a-z0-9][a-z0-9-]{0,47})\.(pid|sink\.json)$/;
+export const RUN_META_FILE_RE = /^\.([a-z0-9][a-z0-9-]{0,47})\.(pid|sink\.json|exit-watch\.ready)$/;
 
 // 尾部窗口起点：默认 50-200 行的场景不需要读满 MAX_LOG_BYTES（#53），
 // 行数不足时再按 4 倍向前扩展，直到覆盖文件开头或达到 maxBytes 上限。

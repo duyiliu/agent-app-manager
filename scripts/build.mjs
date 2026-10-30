@@ -50,3 +50,12 @@ if (failures.length > 0) {
 }
 
 console.log(`语法校验通过：${files.length} 个文件`);
+
+// 版本漂移校验：package.json 与 MANAGER_VERSION 必须一致，发版漏改任一处即拒绝。
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const constantsFile = path.join(ROOT, 'skills/agent-app-manager/scripts/lib/constants.mjs');
+const m = /MANAGER_VERSION\s*=\s*'([^']+)'/.exec(fs.readFileSync(constantsFile, 'utf8'));
+if (!m || m[1] !== pkg.version) {
+  console.error(`版本漂移：package.json=${pkg.version} 与 MANAGER_VERSION=${m?.[1] ?? '未找到'} 不一致`);
+  process.exit(1);
+}

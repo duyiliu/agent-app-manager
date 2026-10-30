@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { usageError, conflictError } from '../errors.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile } from '../log-sources.mjs';
 import { parseNamed } from './common.mjs';
-import { cmdDoctor, portDiagnosis } from './diagnose.mjs';
 import { parseGraceMsValue } from './lifecycle.mjs';
 
 const MANAGER_MJS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'manager.mjs');
@@ -164,10 +163,12 @@ export async function cmdUi(ctx) {
         resolveSource: (ref, src) => resolveSource(ctx.home, ref, src),
         listTree: (ref, p) => listTree(ctx.home, ref, p),
         readFile: (ref, p, offset) => readProjectFile(ctx.home, ref, p, offset),
-        doctor: () => cmdDoctor(ctx),
+        // doctor/port 内部含 spawnSync 进程探测（Windows 起 pwsh、Linux 扫 /proc），
+        // 与 list/status 一样必须走子进程，否则同步执行冻结 ui 事件循环。
+        doctor: () => runManagerJson(ctx.home, ['doctor'], { timeoutMs: 90000 }),
         // 端口诊断复用 CLI 同一只读实现；HTTP 层再按白名单裁剪字段（server.mjs），
         // 避免 commandLine 等敏感内容进入页面。
-        port: (port) => portDiagnosis(port),
+        port: (port) => runManagerJson(ctx.home, ['port', String(port)], { timeoutMs: 30000 }),
         // 受管启停与移除：改由 manager.mjs 子进程执行（#82-B1）——start/stop/restart
         // 可能持锁等待与进程核验数十秒，同进程同步执行会冻结 ui 事件循环、
         // 期间全部轮询停摆。--json 输出保证数据契约与直调 cmd* 一致（同一实现）。

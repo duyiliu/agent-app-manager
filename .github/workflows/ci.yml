@@ -23,3 +23,37 @@ jobs:
 
       - name: 编译（语法校验）
         run: npm run build
+
+  test:
+    name: 冒烟测试（Linux）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖（存在 lockfile 时）
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+
+      - name: 全量冒烟
+        run: node scripts/test-all.mjs
+
+  build-windows:
+    name: 编译校验（Windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖（存在 lockfile 时）
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+
+      - name: 编译（语法校验）
+        run: npm run build

@@ -13,14 +13,14 @@ import { effectiveRestartSettings } from './restart.mjs';
 import { archiveCurrent, writeRuntime, isUnresolvedPhase } from './runtime.mjs';
 import { readStderrTailSafe } from './logs.mjs';
 import { prepareLaunchEnv, envWarningMessage } from './env.mjs';
+import { startTargetExitWatcher } from './exit-watch.mjs';
 import { conflictError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LOG_WRITER = path.join(SCRIPTS_DIR, 'log-writer.mjs');
 // log-writer 可在启动期间把轮转结果写入同一 runId 的 runtime；launch 的旧快照
 // 落账时必须把这些字段带过来，避免启动完成时的 writeRuntime 覆盖失败证据。
-const LOG_ROTATION_FIELDS = ['logRotated', 'logRotatedStreams', 'logRotateFailedStreams'];
-const EXIT_WATCHER = path.join(SCRIPTS_DIR, 'exit-watcher.mjs');
+const LOG_ROTATION_FIELDS = ['logRotated', 'logRotatedStreams', 'logRotateFailedStreams', 'logWritePausedStreams'];
 
 // 命令模式的顶层 wrapper：Windows 是 cmd.exe，Linux 是 /bin/sh；两者都必须是
 // 可校验的真实可执行文件（sh 不允许被 shebang 脚本冒充）。
@@ -84,31 +84,8 @@ export function persistableDiscovery(detail) {
 }
 
 // command 模式：log-writer 只能看到 shell wrapper，真实目标由 discover 找到。
-// 目标与 wrapper 不同 pid 时启动 detached watcher，用目标自身身份等待其真实退出，
-// 避免把 wrapper 的普通退出当成目标 code/signal。
-function startTargetExitWatcher(home, appId, runId, cur) {
-  if (!Number.isInteger(cur.pid) || cur.pid <= 0 || !cur.creationFileTime) return false;
-  // shell exec 后 wrapper 就是目标，log-writer 自身已有精确 exit 事件，无需 watcher。
-  if (Number.isInteger(cur.wrapperPid) && cur.pid === cur.wrapperPid) return true;
-  const logDir = cur.logPaths ? path.dirname(cur.logPaths.stdout) : SCRIPTS_DIR;
-  const readyFile = path.join(logDir, `.${runId}.exit-watch.ready`);
-  let ready = false;
-  try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
-  try {
-    const watcher = spawn(process.execPath, [
-      EXIT_WATCHER, home, appId, runId, String(cur.pid), String(cur.creationFileTime), readyFile,
-    ], { cwd: logDir, detached: true, windowsHide: true, stdio: 'ignore' });
-    watcher.unref();
-    // 等 helper 真正持有目标句柄/pidfd 后再返回启动成功；否则目标可能在 watcher
-    // 就绪前退出并被 wrapper 回收，真实退出证据永久缺失。
-    for (let i = 0; i < 250 && !fs.existsSync(readyFile); i++) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-    }
-    ready = fs.existsSync(readyFile);
-  } catch { /* 下面按未就绪处理 */ }
-  try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
-  return ready;
-}
+// 目标与 wrapper 不同 pid 时启动 detached watcher（lib/exit-watch.mjs，与
+// log-writer 自动重启路径共用同一实现）。
 
 export async function launchManaged(home, appId, app, opts = {}) {
   // 环境校验/解析必须先于日志目录、旧账归档与 STARTING 落盘：ENV_MISSING 或

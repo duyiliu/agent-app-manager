@@ -7,7 +7,7 @@ import { conflictError } from './errors.mjs';
 import { ENV_NAME_RE } from './desc.mjs';
 
 // 敏感名模式：只用于回显脱敏与启动前告警，不改变 env/envRefs 的持久化契约。
-export const SENSITIVE_ENV_NAME_RE = /(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|PRIVATE|KEY)/i;
+export const SENSITIVE_ENV_NAME_RE = /(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|AUTH(?:ENTICATION|ORIZATION)?|APIKEY|API_KEY|PRIVATE|KEY)(?=_|\d|$)/i;
 
 export function isSensitiveEnvName(name) {
   return SENSITIVE_ENV_NAME_RE.test(String(name));
