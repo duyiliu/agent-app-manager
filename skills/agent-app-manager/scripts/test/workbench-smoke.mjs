@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { cmdWorkbench } from '../lib/commands/workbench.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-workbench-'));
 const home = path.join(base, 'home');
@@ -71,6 +72,9 @@ try {
   assert.equal(cli('workbench', 'status', 'two').state, 'RUNNING');
   // 自定义目录：默认 scenario-test 缺失，通过浅扫描在项目根内发现接入目录（如 qa/scenarios）。
   const customRoot = project('custom', path.join('qa', 'scenarios'));
+  // 残留的默认页面不能遮蔽完整自定义目录。
+  fs.mkdirSync(path.join(customRoot, 'scenario-test'));
+  fs.writeFileSync(path.join(customRoot, 'scenario-test', 'index.html'), 'leftover');
   register('three', customRoot, 'one');
   const customStatus = cli('workbench', 'status', 'three');
   assert.equal(customStatus.state, 'STOPPED', JSON.stringify(customStatus));
@@ -80,6 +84,26 @@ try {
   const customPage = await (await fetch(customOpen.url)).text();
   assert(process.env.SCENARIO_TEST_REPO ? customPage.includes('ScenarioTest') : customPage === 'custom');
   cli('workbench', 'stop', 'three'); started.splice(started.indexOf('three'), 1);
+  const ambiguousRoot = project('ambiguous', 'qa-a');
+  project('ambiguous', 'qa-b');
+  register('ambiguous', ambiguousRoot, 'one');
+  const cacheFile = path.join(home, 'workbench-dir-cache.json');
+  const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  const realAmbiguousRoot = fs.realpathSync.native(ambiguousRoot);
+  const cacheKey = process.platform === 'win32' ? realAmbiguousRoot.toLowerCase() : realAmbiguousRoot;
+  // 旧版缓存只记录第一项，升级后必须重新发现歧义。
+  cache[cacheKey] = { dir: path.join(realAmbiguousRoot, 'qa-a'), at: Date.now() };
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  for (const op of ['status', 'open', 'status']) {
+    await assert.rejects(cmdWorkbench({ home, rest: [op, 'ambiguous'] }, op, 'ambiguous'),
+      e => e.code === 'WORKBENCH_AMBIGUOUS' && e.message.includes('qa-a') && e.message.includes('qa-b'));
+  }
+  // 缓存命中后文件完整性变化仍能恢复到唯一候选，不需等五分钟。
+  fs.unlinkSync(path.join(ambiguousRoot, 'qa-b', 'index.html'));
+  assert.equal(cli('workbench', 'status', 'ambiguous').state, 'STOPPED');
+  // 完整默认目录仍优先，不受其他完整目录干扰。
+  project('ambiguous');
+  assert.equal(cli('workbench', 'status', 'ambiguous').state, 'STOPPED');
   fs.unlinkSync(path.join(second, 'scenario-test', '.scenario-test', 'scenario-test-cli.cjs'));
   const incomplete = cli('workbench', 'status', 'two'); assert.equal(incomplete.state, 'INCOMPLETE'); assert.equal(incomplete.pid, b.pid);
   cli('workbench', 'stop', 'two'); started.splice(started.indexOf('two'), 1);

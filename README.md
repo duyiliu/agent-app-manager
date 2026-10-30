@@ -77,6 +77,8 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 在应用详情中，若项目包含 scenario-test 接入目录（默认 `scenario-test`，缺失时自动发现项目内自定义目录）且包含配置、`index.html` 和项目内 CLI，可点击「打开场景测试」启动并打开独立工作台；再次点击会复用，停止工作台不影响业务应用。工作台使用独立的本地端口，新标签被拦截时可点击显示的地址。打开工作台不会自动执行场景。
 
+完整的默认目录优先；默认目录缺失或不完整时查找项目内自定义目录。发现多个完整候选时报告目录歧义，不自动选择。
+
 完整参数见 [manager 参考](skills/agent-app-manager/references/manager.md)，Agent 侧规程见 [SKILL.md](skills/agent-app-manager/SKILL.md) 第 8 节。
 
 ## 能力

@@ -23,7 +23,7 @@ function within(root, file) {
 const SCENARIO_FILES = ['scenario.config.js', 'index.html', path.join('.scenario-test', 'scenario-test-cli.cjs')];
 const scenarioExists = (dir) => SCENARIO_FILES.map((f) => fs.existsSync(path.join(dir, f)));
 // 自定义目录发现：agent-app-manager 无从预知项目的 scenario-test 目录，只能靠扫描。
-// 为控制性能：默认 `scenario-test` 存在时零扫描；缺失时才浅扫描项目根两层
+// 为控制性能：默认 `scenario-test` 完整时零扫描；缺失或不完整时才浅扫描项目根两层
 // （跳过常见非业务目录），并把结果缓存到 home 缓存文件（默认 5 分钟有效），
 // 避免详情轮询反复遍历同一项目。候选须命中 scenario-test 特有标记
 // （scenario.config.js 或 .scenario-test/scenario-test-cli.cjs），普通含 index.html 不算。
@@ -63,23 +63,28 @@ function scanScenarioDirs(root) {
   return found;
 }
 function pickScenarioDir(home, root) {
-  const defaults = scenarioExists(path.join(root, 'scenario-test'));
-  // 默认目录存在（哪怕不完整）就沿用现有行为，不扫描，避免与自定义目录歧义。
-  if (defaults.some(Boolean)) return { dir: path.join(root, 'scenario-test'), exists: defaults };
+  const defaultDir = path.join(root, 'scenario-test');
+  const defaults = scenarioExists(defaultDir);
+  if (defaults.every(Boolean)) return { dir: defaultDir, exists: defaults };
   const cache = readDirCache(home);
   const key = process.platform === 'win32' ? root.toLowerCase() : root;
   const hit = cache[key];
-  let dir;
-  if (hit && typeof hit.dir === 'string' && Date.now() - hit.at < DIR_CACHE_TTL_MS) {
-    dir = hit.dir;
+  let candidates;
+  // 缓存全部候选而非选中项：每次重查完整性，且不沿用旧版静默择一的缓存。
+  if (hit?.version === 2 && Array.isArray(hit.dirs)
+    && hit.dirs.every(d => typeof d === 'string' && within(root, d))
+    && Date.now() - hit.at < DIR_CACHE_TTL_MS) {
+    candidates = hit.dirs;
   } else {
-    const candidates = scanScenarioDirs(root);
-    const count = (d) => scenarioExists(d).filter(Boolean).length;
-    candidates.sort((a, b) => count(b) - count(a) || (samePath(a, b) ? 0 : a < b ? -1 : 1));
-    dir = candidates[0] ?? path.join(root, 'scenario-test');
-    cache[key] = { dir, at: Date.now() };
+    candidates = scanScenarioDirs(root);
+    cache[key] = { version: 2, dirs: candidates, at: Date.now() };
     writeDirCache(home, cache);
   }
+  const complete = candidates.filter(d => scenarioExists(d).every(Boolean));
+  const choices = complete.length ? complete : defaults.some(Boolean) ? [defaultDir] : candidates.filter(isScenarioCandidate);
+  if (choices.length > 1) throw conflictError('WORKBENCH_AMBIGUOUS',
+    `发现多个场景测试目录，无法确定应打开哪一个：${choices.map(d => path.relative(root, d)).join('、')}`);
+  const dir = choices[0] ?? defaultDir;
   return { dir, exists: scenarioExists(dir) };
 }
 function discover(home, ref) {

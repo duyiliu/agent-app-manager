@@ -578,9 +578,7 @@ function statusResources(st, cur, sampled) {
   return result ?? { available: false, reason: '资源采样不可用' };
 }
 
-// 管理台时间序列采样：只读 runtime 记录 + 一次采样，跳过 registry 全量解析与身份核验。
-// 用于详情展开时 2s 一次的高频采样；pid 取自刚读到的运行记录，复用窗口极小。
-// 控制类操作仍走 status/verify 全链路，这里只服务于只读曲线。
+// 管理台时间序列采样：仅对 RUNNING 记录核验身份后采样，避免旧 PID 复用污染曲线。
 export function sampleAppUsage(home, ref) {
   const reg = readRegistry(home);
   const appId = resolveAppId(reg, ref);
@@ -589,8 +587,9 @@ export function sampleAppUsage(home, ref) {
   const rt = readRuntimeStrict(home, appId);
   const cur = rt?.current ?? null;
   if (!cur || !cur.managed) return { alias, available: false, reason: '当前无受管运行实例' };
+  if (cur.phase !== 'RUNNING') return { alias, runId: cur.runId ?? null, available: false, reason: `非 RUNNING（${cur.phase}），不采样资源用量` };
   if (!Number.isInteger(cur.pid) || cur.pid <= 0) return { alias, available: false, reason: '运行记录无可用 pid' };
-  const [r] = sampleRunResources([{ pid: cur.pid, kind: cur.kind ?? 'direct', verified: true, creationFileTime: cur.creationFileTime, image: cur.image }]);
+  const [r] = sampleRunResources([{ pid: cur.pid, kind: cur.kind ?? 'direct', creationFileTime: cur.creationFileTime, image: cur.image }]);
   return { alias, runId: cur.runId ?? null, ...(r ?? { available: false, reason: '采样不可用' }) };
 }
 
