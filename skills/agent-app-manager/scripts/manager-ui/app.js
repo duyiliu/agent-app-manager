@@ -101,6 +101,34 @@ let resSeries = [];          // [{ t, runId, cpu, rss }]
 let resSeriesAlias = null;   // 曲线归属的应用：换应用必须清空
 let resTimer = null, resSampling = false;
 let resSampleEpoch = 0;
+let resHoverIdx = null;      // 鼠标悬停命中的采样点下标：画布重绘/重采样后按它继续画游标
+let resPointer = null;       // 指针仍在画布内时记录 clientX：轮询重建 DOM 后据此恢复游标
+
+// 时间轴换算：曲线始终按最近 5 分钟窗口铺满画布宽度，绘制与悬停命中共用同一套映射。
+function resTimeWindow() {
+  const windowMs = RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS;
+  const last = resSeries[resSeries.length - 1];
+  return { start: last.t - windowMs, windowMs };
+}
+function resX(t, start, windowMs, plotW) {
+  return Math.max(0, Math.min(1, (t - start) / windowMs)) * plotW;
+}
+function resClock(t) {
+  const d = new Date(t), p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+// 命中最近的采样点，而不是按像素逐点建热区：采样稀疏时隔很远也能给出读数。
+function resHitIndex(canvas, clientX) {
+  if (!resSeries.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || clientX < rect.left - 2 || clientX > rect.left + rect.width + 2) return null;
+  const plotW = Math.max(1, rect.width - 44);
+  const { start, windowMs } = resTimeWindow();
+  const t = start + Math.max(0, Math.min(1, (clientX - rect.left) / plotW)) * windowMs;
+  let best = 0, bestGap = Infinity;
+  resSeries.forEach((p, i) => { const gap = Math.abs(p.t - t); if (gap < bestGap) { bestGap = gap; best = i; } });
+  return best;
+}
 
 function stopResSampling() {
   if (resTimer) clearInterval(resTimer);
@@ -110,6 +138,7 @@ function stopResSampling() {
 function resetResSeries(alias) {
   stopResSampling();
   resSeries = [];
+  resHoverIdx = null;
   resSeriesAlias = alias ?? null;
 }
 function startResSampling(alias) {
@@ -117,7 +146,7 @@ function startResSampling(alias) {
   if (resTimer && resSeriesAlias === alias) return;
   stopResSampling();
   if (!alias) return;
-  if (resSeriesAlias !== alias) { resSeries = []; resSeriesAlias = alias; }
+  if (resSeriesAlias !== alias) { resSeries = []; resHoverIdx = null; resSeriesAlias = alias; }
   const epoch = resSampleEpoch;
   const tick = async () => {
     if (resSampling || !selected || selected !== alias) return;
@@ -126,7 +155,7 @@ function startResSampling(alias) {
       const d = await api('/api/sample?app=' + encodeURIComponent(alias));
       if (selected !== alias || epoch !== resSampleEpoch) return;
       if (!d?.available || !Number.isFinite(d.rssBytes)) return;
-      if (resSeries.length && resSeries[resSeries.length - 1].runId !== d.runId) resSeries = [];
+      if (resSeries.length && resSeries[resSeries.length - 1].runId !== d.runId) { resSeries = []; resHoverIdx = null; }
       resSeries.push({ t: Date.now(), runId: d.runId, cpu: Number.isFinite(d.cpuPercent) ? d.cpuPercent : null, rss: d.rssBytes });
       if (resSeries.length > RES_SERIES_MAX) resSeries.splice(0, resSeries.length - RES_SERIES_MAX);
       drawResChart();
@@ -142,17 +171,49 @@ function buildResChart() {
   const now = el('span', 'res-chart-now');
   now.id = 'resChartNow';
   now.append(el('span', 'res-chart-value cpu', 'CPU —'), el('span', 'res-chart-value rss', '内存 —'));
-  head.append(
-    el('span', 'res-chart-title', '资源曲线'),
-    now,
-    el('span', 'res-chart-hint', `近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟`),
-  );
+  const hint = el('span', 'res-chart-hint', `近 ${Math.round(RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS / 60000)} 分钟`);
+  // 悬停提示自己画，不再依赖 canvas.title：原生 tooltip 延迟且会与游标提示重复。
+  hint.title = '每 5 秒采样；橙色 CPU 使用右侧百分比刻度，蓝色内存按窗口峰值独立缩放；悬停查看单点数值。';
+  head.append(el('span', 'res-chart-title', '资源曲线'), now, hint);
   const canvas = document.createElement('canvas');
   canvas.className = 'res-chart';
   canvas.id = 'resChart';
-  canvas.title = '每 5 秒采样；橙色 CPU 使用右侧百分比刻度，蓝色内存按窗口峰值独立缩放。';
-  wrap.append(head, canvas);
+  const tip = el('div', 'res-chart-tip');
+  tip.dataset.show = '0';
+  wrap.append(head, canvas, tip);
+  resHoverIdx = null;
+  canvas.addEventListener('pointermove', (ev) => {
+    resPointer = ev.clientX;
+    const best = resHitIndex(canvas, ev.clientX);
+    if (best != null && resHoverIdx !== best) { resHoverIdx = best; drawResChart(); }
+  });
+  canvas.addEventListener('pointerleave', () => {
+    resPointer = null;
+    if (resHoverIdx == null) return;
+    resHoverIdx = null;
+    drawResChart();
+  });
   return wrap;
+}
+function updateResTip(canvas, idx) {
+  const wrap = canvas.parentElement;
+  const tip = wrap?.querySelector('.res-chart-tip');
+  if (!tip) return;
+  const p = idx == null ? null : resSeries[idx];
+  if (!p) { tip.dataset.show = '0'; return; }
+  const age = Math.max(0, Math.round((Date.now() - p.t) / 1000));
+  tip.replaceChildren(
+    el('span', 'res-chart-tip-time', `${resClock(p.t)} · ${age}s 前`),
+    el('span', 'res-chart-value cpu', `CPU ${p.cpu == null ? '不可用' : p.cpu.toFixed(0) + '%'}`),
+    el('span', 'res-chart-value rss', `内存 ${fmtSize(p.rss)}`),
+  );
+  const { start, windowMs } = resTimeWindow();
+  const px = canvas.offsetLeft + resX(p.t, start, windowMs, Math.max(1, canvas.clientWidth - 44));
+  const tw = tip.offsetWidth || 150;
+  const left = Math.max(2, Math.min(Math.max(0, wrap.clientWidth - tw - 2), px - tw / 2));
+  // 提示条放在画布上方的表头行，避免 84px 高的图表被读数气泡挡住。
+  tip.dataset.show = '1';
+  tip.style.transform = `translate(${Math.round(left)}px, ${Math.round(Math.max(0, canvas.offsetTop - tip.offsetHeight - 4))}px)`;
 }
 function drawResChart() {
   const canvas = $('#resChart');
@@ -184,15 +245,19 @@ function drawResChart() {
   const hint = $('.res-chart-hint');
   if (hint) hint.textContent = resSeries.length < RES_SERIES_MAX ? `已采样 ${resSeries.length} 次 · 每 5 秒` : '近 5 分钟';
   if (!resSeries.length) {
+    resHoverIdx = null;
+    updateResTip(canvas, null);
     ctx.textAlign = 'center';
     ctx.fillText('采样中…', plotW / 2, padT + plotH / 2);
     return;
   }
+  if (resHoverIdx != null && !resSeries[resHoverIdx]) resHoverIdx = null;
+  // 轮询每 4s 重建详情 DOM：指针还停在图上时直接按原位置恢复游标，避免提示条闪掉。
+  else if (resHoverIdx == null && resPointer != null) resHoverIdx = resHitIndex(canvas, resPointer);
   // 留 15% 余量，否则窗口内最大值总贴顶、小波动被放大成满屏起伏。
   // 固定五分钟时间尺度，采样间隔不规律时也按实际时间定位。
-  const windowMs = RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS;
-  const start = last.t - windowMs;
-  const xOf = (i) => Math.max(0, Math.min(1, (resSeries[i].t - start) / windowMs)) * plotW;
+  const { start, windowMs } = resTimeWindow();
+  const xOf = (i) => resX(resSeries[i].t, start, windowMs, plotW);
   const yOfCpu = (v) => padT + plotH * (1 - Math.min(v, maxCpu) / maxCpu);
   const yOfRss = (v) => padT + plotH * (1 - v / maxRss);
   const drawLine = (pick, yOf, color) => {
@@ -206,6 +271,18 @@ function drawResChart() {
   };
   drawLine(p => p.cpu, yOfCpu, '#ff8a30');
   drawLine(p => p.rss, yOfRss, '#4099ff');
+  if (resHoverIdx != null) {
+    const hp = resSeries[resHoverIdx], hx = xOf(resHoverIdx);
+    ctx.save();
+    ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(148,163,184,.55)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, padT + plotH); ctx.stroke();
+    ctx.restore();
+    for (const [value, yOf, color] of [[hp.cpu, yOfCpu, '#ff8a30'], [hp.rss, yOfRss, '#4099ff']]) {
+      if (value == null) continue;
+      ctx.beginPath(); ctx.arc(hx, yOf(value), 2.6, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    }
+  }
+  updateResTip(canvas, resHoverIdx);
 }
 
 // 展开详情时那次实时采样的缓存：轮询重绘（不带 resources）时继续显示它，避免数字来回跳。
