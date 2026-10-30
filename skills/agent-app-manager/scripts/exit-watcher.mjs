@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readRuntimeStrict, atomicWriteJson, runtimePath } from './lib/store.mjs';
 import { withLogEvidenceLock } from './lib/locks.mjs';
+import { pwshCandidates, PWSH_LAUNCH_FAIL } from './lib/probe.mjs';
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PS_PROC = path.join(SCRIPTS_DIR, 'ps', 'proc.ps1');
@@ -48,11 +49,19 @@ function runHelper(file, args) {
 
 async function waitForTargetExit() {
   if (process.platform === 'win32') {
-    return runHelper('pwsh', [
+    // WindowsApps 别名可能 EPERM：与 probe.mjs 同口径回退常见安装路径。
+    const args = [
       '-NoProfile', '-NonInteractive', '-File', PS_PROC,
       '-Action', 'wait-exit', '-Id', String(targetPid), '-CreationFileTime', String(creationFileTime),
       '-ReadyFile', readyFile,
-    ]);
+    ];
+    let last = { result: 'error', code: 'ENOENT' };
+    for (const exe of pwshCandidates()) {
+      const r = await runHelper(exe, args);
+      if (r.result !== 'error' || !PWSH_LAUNCH_FAIL.has(r.code)) return r;
+      last = r;
+    }
+    return last;
   }
   if (process.platform === 'linux') {
     for (const python of ['python3', 'python']) {

@@ -54,13 +54,17 @@ export function effectiveRestartSettings(source = {}) {
 }
 
 // 崩溃语义：信号终止或非 0 退出码。正常 code=0 退出不属于 on-failure 的重启对象。
+// 退出证据不可得（code 与 signal 均缺失）是第三态：不计入 crash，也不计入 clean。
 export function isCrashExit(code, signal) {
-  return signal != null || code !== 0;
+  return signal != null || (code != null && code !== 0);
 }
 
 // 纯决策：返回 stop（不重启）/ dead（达到上限）/ restart（下一次自动重启）。
 export function planRestart(settings, restartCount, code, signal) {
   if (settings.restartPolicy !== 'on-failure') return { action: 'stop', reason: 'policy-never' };
+  // 证据缺失时不按崩溃处理：一个正常退出但采集不到 code 的目标不应触发
+  // on-failure 自动重启；落 STOPPED + evidence 供人工判断（#157）。
+  if (code == null && signal == null) return { action: 'stop', reason: 'exit-evidence-unavailable' };
   if (!isCrashExit(code, signal)) return { action: 'stop', reason: 'clean-exit' };
   const count = Number.isInteger(restartCount) && restartCount >= 0 ? restartCount : 0;
   if (count >= settings.maxRestarts) {

@@ -8,8 +8,9 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { readRuntimeStrict, atomicWriteJson } from './lib/store.mjs';
 import { withLockAsync, withLogEvidenceLock } from './lib/locks.mjs';
-import { psProc } from './lib/probe.mjs';
+import { psProc, verifyRun } from './lib/probe.mjs';
 import { effectiveRestartSettings, planRestart, exitDescription } from './lib/restart.mjs';
+import { startTargetExitWatcherAsync } from './lib/exit-watch.mjs';
 import { resolveOnExit, notifyEnv, runNotifyCommand } from './lib/notify.mjs';
 
 const [configPath] = process.argv.slice(2);
@@ -28,6 +29,14 @@ const rotatedStreams = new Set();
 const recordedStreams = new Set();
 const rotateFailedStreams = new Set();
 const recordedFailedStreams = new Set();
+// rename 连续失败时暂停该流写盘（#156）：继续追加会让 logMaxBytes 形同虚设，
+// 单流日志无界增长。暂停换取硬上限，周期性重试轮转，成功后自动恢复。
+const PAUSE_AFTER_ROTATE_FAILURES = 3;
+const PAUSED_RETRY_MS = 3000;
+const rotateFailStreak = { stdout: 0, stderr: 0 };
+const pausedStreams = new Set();
+let pausedSynced = '';
+let pausedRetryTimer = null;
 let rotationRetryTimer = null;
 let rotationRetryAttempts = 0;
 
@@ -37,6 +46,12 @@ let currentSpawnFailed = false;
 let restartTimer = null;
 let restartAttempt = null;
 let finishing = false;
+// 代数守卫：自动重启后同一 runId 复用，旧 wrapper/目标的 close 不能当作新目标退出评估。
+let targetEpoch = 0;
+// command 模式：目标已死但 wrapper 仍存活时 'close' 不触发——轮询运行记录中
+// exit-watcher 写下的退出证据，保证监督不僵尸化（#152）。
+let targetExitPoll = null;
+let exitWatchErrorChecked = false;
 const ignoredChildren = new WeakSet();
 
 // 目标进程退出证据：runId 匹配当前记录时写入 current.exit（spawn 失败走 pidFile=0/lastError，不写 exit）。
@@ -57,7 +72,9 @@ function scheduleRotationRetry() {
 }
 
 function persistRotationState() {
-  if ([...rotatedStreams].every((stream) => recordedStreams.has(stream))
+  const pausedKey = [...pausedStreams].sort().join(',');
+  if (pausedKey === pausedSynced
+    && [...rotatedStreams].every((stream) => recordedStreams.has(stream))
     && [...rotateFailedStreams].every((stream) => recordedFailedStreams.has(stream))) return;
   try {
     withLogEvidenceLock(home, appId, 'log-rotation', () => {
@@ -65,6 +82,7 @@ function persistRotationState() {
       if (rt?.current?.runId !== runId) {
         for (const stream of rotatedStreams) recordedStreams.add(stream);
         for (const stream of rotateFailedStreams) recordedFailedStreams.add(stream);
+        pausedSynced = pausedKey;
         return;
       }
       const streams = new Set([...(rt.current.logRotatedStreams ?? []), ...rotatedStreams]);
@@ -72,9 +90,12 @@ function persistRotationState() {
       if (streams.size) rt.current.logRotated = true;
       rt.current.logRotatedStreams = [...streams];
       if (failed.size) rt.current.logRotateFailedStreams = [...failed];
+      if (pausedStreams.size) rt.current.logWritePausedStreams = [...pausedStreams];
+      else delete rt.current.logWritePausedStreams;
       atomicWriteJson(runtimeFile, rt);
       for (const stream of rotatedStreams) recordedStreams.add(stream);
       for (const stream of rotateFailedStreams) recordedFailedStreams.add(stream);
+      pausedSynced = pausedKey;
     });
   } catch {
     scheduleRotationRetry();
@@ -236,6 +257,48 @@ async function runExitNotify(notify) {
   } catch { /* 结果留证失败不影响通知本身 */ }
 }
 
+// 暂停流的周期恢复：重试 rename，成功即换新文件恢复写盘，仍失败则下个周期再试。
+function schedulePausedRetry() {
+  if (pausedRetryTimer || !pausedStreams.size) return;
+  pausedRetryTimer = setTimeout(() => {
+    pausedRetryTimer = null;
+    resumePausedStreams();
+  }, PAUSED_RETRY_MS);
+}
+
+function resumePausedStreams() {
+  if (!pausedStreams.size) return;
+  for (const stream of [...pausedStreams]) {
+    const isOut = stream === 'stdout';
+    const filePath = isOut ? outPath : errPath;
+    let fd = isOut ? outFd : errFd;
+    try {
+      fs.renameSync(filePath, `${filePath}.1`);
+    } catch (e) {
+      // 文件已被外部清走（ENOENT）：无需轮转，直接走下面的新建路径恢复；
+      // 其余失败保持暂停与 logRotateFailedStreams 证据，下个周期再试。
+      if (e.code !== 'ENOENT') continue;
+    }
+    try { if (fd != null) fs.closeSync(fd); } catch { /* already closed */ }
+    fd = null;
+    try {
+      fd = fs.openSync(filePath, 'w');
+      if (isOut) { outFd = fd; outSize = 0; } else { errFd = fd; errSize = 0; }
+      markRotated(stream);
+    } catch {
+      // 新文件仍建不起来：fd 置空转懒重开路径，暂停状态保留证据后继续尝试。
+      if (isOut) outFd = null; else errFd = null;
+      markRotateFailed(stream);
+      continue;
+    }
+    rotateFailStreak[stream] = 0;
+    pausedStreams.delete(stream);
+    supervisorLog(`日志流 ${stream} 已恢复写盘（轮转重试成功）`);
+  }
+  persistRotationState(); // 同步 paused 集合（含清空）
+  schedulePausedRetry();
+}
+
 function finalize(code) {
   if (finishing) return;
   finishing = true;
@@ -243,12 +306,24 @@ function finalize(code) {
     clearTimeout(restartTimer);
     restartTimer = null;
   }
+  if (pausedRetryTimer) {
+    clearTimeout(pausedRetryTimer);
+    pausedRetryTimer = null;
+  }
+  if (targetExitPoll) {
+    clearInterval(targetExitPoll);
+    targetExitPoll = null;
+  }
   try { fs.closeSync(outFd); } catch { /* already closed */ }
   try { fs.closeSync(errFd); } catch { /* already closed */ }
   process.exitCode = code ?? 0;
 }
 
 function writeChunk(stream, input) {
+  if (pausedStreams.has(stream)) {
+    schedulePausedRetry();
+    return; // 丢弃本 chunk：换取单流日志的硬上限
+  }
   const isOut = stream === 'stdout';
   let chunk = input;
   let fd = isOut ? outFd : errFd;
@@ -278,6 +353,7 @@ function writeChunk(stream, input) {
       markRotateFailed(stream);
     }
     if (rotated) {
+      rotateFailStreak[stream] = 0;
       try { fs.closeSync(fd); } catch { /* already closed */ }
       fd = null;
       try {
@@ -291,6 +367,17 @@ function writeChunk(stream, input) {
       }
       if (isOut) outFd = fd; else errFd = fd;
       if (fd == null) return;
+    } else {
+      // rename 连续失败仍追加等于移除上限：超阈值后暂停写盘并周期重试轮转，
+      // 文件保持在 ~limit + 少量失败窗口增量，不再无界增长（#156）。
+      rotateFailStreak[stream] += 1;
+      if (rotateFailStreak[stream] >= PAUSE_AFTER_ROTATE_FAILURES) {
+        pausedStreams.add(stream);
+        supervisorLog(`日志流 ${stream} 轮转连续失败 ${rotateFailStreak[stream]} 次，暂停写盘防无界增长（重试中）`);
+        persistRotationState();
+        schedulePausedRetry();
+        return;
+      }
     }
   }
   fs.writeSync(fd, chunk);
@@ -327,6 +414,7 @@ function cleanupOwnedChild(child) {
 // of being double-counted by the normal close handler.
 function spawnTarget({ initial, attempt = null }) {
   currentSpawnFailed = false;
+  const epoch = ++targetEpoch;
   const child = spawn(file, args, { cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   target = child;
   // pidFile 契约：spawn 同步拿到 pid 时立即写入；异步 error（ENOENT/EACCES 等）时写 0，
@@ -364,6 +452,8 @@ function spawnTarget({ initial, attempt = null }) {
     if (target === child) target = null;
     const exit = { code, signal, spawnFailed: currentSpawnFailed };
     if (ignoredChildren.has(child)) return;
+    // 旧代子进程的退出：证据已随上一轮 exit/restart 事件落账，不得当作新目标退出。
+    if (epoch !== targetEpoch) return;
     if (attempt && restartAttempt === attempt && attempt.child === child && attempt.state === 'launching') {
       attempt.deferredExit = exit;
       return;
@@ -377,14 +467,19 @@ function spawnTarget({ initial, attempt = null }) {
 }
 
 function applyExitPlan(cur, rt, exit, context) {
-  const plan = planRestart(settings, cur.restartCount ?? 0, exit.code, exit.signal);
+  // spawn 失败本身是有证据的失败（非"证据不可得"）：折算成 code=1 计入崩溃路径，
+  // 与 exitCodeFrom 的口径一致；真实"目标退出但拿不到 code/signal"才走第三态。
+  const codeForPlan = exit.spawnFailed && exit.code == null ? 1 : exit.code;
+  const plan = planRestart(settings, cur.restartCount ?? 0, codeForPlan, exit.signal);
   const now = new Date().toISOString();
   cur.lastExit = {
     at: now, code: exit.code ?? null, signal: exit.signal ?? null,
     spawnFailed: !!exit.spawnFailed, source: context,
   };
   appendRestartEvent(cur, { type: context === 'restart-attempt' ? 'restart-failed' : 'exit', ...cur.lastExit });
-  const label = context === 'restart-attempt' ? '自动重启尝试失败' : '进程异常退出';
+  const evidenceMissing = exit.code == null && exit.signal == null && !exit.spawnFailed;
+  const label = context === 'restart-attempt' ? '自动重启尝试失败'
+    : (evidenceMissing ? '目标已退出但退出证据不可用' : '进程异常退出');
   const desc = exitDescription(exit.code, exit.signal);
   if (plan.action === 'stop') {
     cur.phase = 'STOPPED';
@@ -439,6 +534,10 @@ function evaluateTargetExit(exit) {
     // status 查询可能先按 OS 事实把 RUNNING 落成 STOPPED；这不是人为 stop，
     // 仍应按 exit code 走 restartPolicy（人为 stop 会写 stopRequested=true）。
     supervisorLog('目标退出先被 status 落为 STOPPED（非人为 stop），继续按 restartPolicy 评估');
+  } else if (cur.phase === 'BACKOFF') {
+    // 上一轮退出已评估且自动重启在排队：迟到的 wrapper/旧目标 close 不能终止监督。
+    supervisorLog('BACKOFF 等待中的迟到退出事件，忽略（重启计时器继续）');
+    return { action: 'none' };
   } else if (cur.phase !== 'RUNNING') {
     supervisorLog(`目标退出后 phase=${cur.phase}（人为停止/未结记录），不自动重启`);
     return { action: 'finalize', code: 0 };
@@ -461,10 +560,39 @@ async function onTargetExit(exit) {
     return;
   }
   if (outcome.action === 'schedule') scheduleRestart(outcome.delayMs);
+  else if (outcome.action === 'none') { /* BACKOFF 中的迟到事件：监督继续 */ }
   else {
     await runExitNotify(outcome.notify);
     finalize(outcome.code ?? exitCodeFrom(exit));
   }
+}
+
+// 监督 + command 模式：目标已退出但 wrapper 仍存活时 wrapper 'close' 不触发——
+// 轮询运行记录中 exit-watcher 写下的退出证据（毫秒级 fs 读，不拉 pwsh）。
+// watcher 自身失败（exitWatchError）时核验目标一次，死了按"证据不可得"评估。
+function startTargetExitPolling() {
+  if (targetExitPoll || !supervised || !config.isCommand) return;
+  targetExitPoll = setInterval(() => {
+    if (finishing) return;
+    const cur = readCurrentRun();
+    if (cur === undefined || !cur || cur.runId !== runId || cur.phase !== 'RUNNING') return;
+    if (cur.exit) {
+      clearInterval(targetExitPoll);
+      targetExitPoll = null;
+      void onTargetExit({ code: cur.exit.code ?? null, signal: cur.exit.signal ?? null, spawnFailed: false });
+      return;
+    }
+    if (!exitWatchErrorChecked && cur.exitWatchError) {
+      exitWatchErrorChecked = true;
+      try {
+        if (verifyRun(cur).alive === false) {
+          clearInterval(targetExitPoll);
+          targetExitPoll = null;
+          void onTargetExit({ code: null, signal: null, spawnFailed: false });
+        }
+      } catch { /* 核验失败保持现状，等 wrapper/下一个证据周期 */ }
+    }
+  }, 1000);
 }
 
 // BACKOFF 等待按小步轮询：人为 stop/start/remove 改写 phase 或 runId 后，
@@ -582,6 +710,11 @@ async function performRestart() {
       cur.endedAt = null;
       cur.exitNote = null;
       cur.lastError = null;
+      // 旧目标的退出证据属于上一代：不带入新一轮 RUNNING，否则新目标的
+      // exit 轮询/UI 会把旧 code 误当成本轮结果。
+      cur.exit = null;
+      cur.exitWatchError = null;
+      cur.wrapperExit = null;
       cur.restartStartedAt = new Date().toISOString();
       appendRestartEvent(cur, { type: 'restarted', attempt: cur.restartCount, pid: cur.pid, image: cur.image });
       atomicWriteJson(runtimeFile, rt);
@@ -589,7 +722,18 @@ async function performRestart() {
       exitInfo = null;
       exitRecorded = false;
       attempt.state = 'succeeded';
+      if (config.isCommand) {
+        // command 模式的新目标与 wrapper 不同 pid 时必须重建 exit-watcher（#152）：
+        // 没有它目标真实退出无人感知；失败写 exitWatchError 而非静默。
+        const ready = await startTargetExitWatcherAsync(home, appId, runId, cur);
+        if (!ready) {
+          cur.exitWatchError = { reason: '自动重启后退出监视未能就绪', at: new Date().toISOString(), source: 'supervisor' };
+          atomicWriteJson(runtimeFile, rt);
+        }
+        exitWatchErrorChecked = false;
+      }
       supervisorLog(`自动重启成功（第 ${cur.restartCount}/${settings.maxRestarts} 次），pid=${cur.pid}`);
+      startTargetExitPolling();
       return { action: 'running', deferredExit: attempt.deferredExit };
     });
   } catch (e) {
@@ -620,3 +764,4 @@ async function performRestart() {
 }
 
 spawnTarget({ initial: true });
+startTargetExitPolling();

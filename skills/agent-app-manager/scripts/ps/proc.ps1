@@ -907,7 +907,9 @@ if ($Action -eq 'terminate-tree') {
       $raw = [ProcUtil]::Capture([int]$cpid)
       $parts = $raw -split "`t", 3
       if ($parts[0] -ne 'OK') { continue } # 已退出/身份不可采：不触碰
-      $r = Parse-Result ([ProcUtil]::Terminate([int]$cpid, [long]$parts[1], [string]$parts[2], 0))
+      # 后代给 500ms 短等窗：waitMs=0 时 TerminateProcess 发出即返回，一律被计为
+      # terminateTimeout，无法区分"终止失败"与"发出即算"，killedPids 语义含糊。
+      $r = Parse-Result ([ProcUtil]::Terminate([int]$cpid, [long]$parts[1], [string]$parts[2], 500))
       if ($r.result -in 'terminated', 'terminateTimeout') { $killed += $cpid }
     }
   } catch { }

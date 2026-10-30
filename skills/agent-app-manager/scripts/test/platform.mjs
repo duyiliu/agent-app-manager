@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { spawnPwsh } from '../lib/probe.mjs';
 
 export const isWindows = process.platform === 'win32';
 export const isLinux = process.platform === 'linux';
@@ -10,7 +11,8 @@ export const isLinux = process.platform === 'linux';
 // Windows 需要 pwsh 7；Linux 需要 /proc 与可用的 Python pidfd API。
 export function hasProcessProbe() {
   if (isWindows) {
-    const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    // 与产品同口径：PATH 命中 WindowsApps 别名（EPERM）时回退常见安装路径。
+    const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     return !r.error && r.status === 0;
   }
   if (isLinux) {

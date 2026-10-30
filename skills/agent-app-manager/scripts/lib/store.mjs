@@ -40,10 +40,25 @@ export function readRuntimeStrict(home, appId) {
 export function atomicWriteJson(file, obj) {
   const dir = path.dirname(file);
   const tmp = path.join(dir, `.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeSync(fd, JSON.stringify(obj, null, 2) + '\n');
+    // 内容先落盘再 rename，避免崩溃后新文件名指向空文件。
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   try { fs.renameSync(tmp, file); }
   catch (e) {
     try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }
     throw dataError('DATA_UNWRITABLE', `写入失败（${file}）：${e.message}`);
+  }
+  // POSIX 上 rename 只更新目录项缓存：补目录 fsync，保证崩溃后新名字也能找回。
+  // Windows/NTFS 无对应可靠原语，保持文件级 fsync 的尽力而为。
+  if (process.platform !== 'win32') {
+    try {
+      const dfd = fs.openSync(dir, 'r');
+      try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+    } catch { /* 目录 fsync 失败不阻断：文件内容已 fsync */ }
   }
 }

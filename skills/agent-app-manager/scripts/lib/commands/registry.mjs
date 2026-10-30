@@ -37,21 +37,22 @@ export function cmdRecordUnmanaged(ctx) {
         { appId, alias: existing.alias, root, entry, managed: true });
     }
     if (existing) {
-      existing.alias = d.alias;
-      existing.displayName = d.displayName ?? d.alias;
-      // 转为非受管形态：清空受管启动能力，避免残留 exe/command 继续被当作可受管
-      existing.exe = null;
-      existing.args = [];
-      existing.command = null;
-      existing.expectedImage = null;
-      existing.discoverTimeoutMs = null;
-      existing.restartPolicy = 'never';
-      existing.maxRestarts = null;
-      existing.backoffMs = null;
-      existing.mode = MODES.has(d.mode) ? d.mode : existing.mode;
-      existing.tags = d.tags ?? [];
-      Object.assign(existing, xFields);
-      existing.updatedAt = now;
+      // 覆盖登记与新建同一字段集整体重建：逐项清受管字段会漏掉 env/envFile/
+      // onExit/expectedPort/readyUrl/cwd/root 等旧值残留并继续生效（#155）。
+      // 只保留非 desc 管理的运行字段（internalKind、configRevision、createdAt）。
+      const keep = { internalKind: existing.internalKind, configRevision: existing.configRevision ?? 1, createdAt: existing.createdAt };
+      for (const k of Object.keys(existing)) delete existing[k];
+      Object.assign(existing, {
+        appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,
+        cwd: d.cwd ? realpathOrConflict('cwd', d.cwd) : root, mode: MODES.has(d.mode) ? d.mode : 'java',
+        tags: d.tags ?? [],
+        exe: null, args: [], command: null, expectedImage: null, discoverTimeoutMs: null,
+        restartPolicy: 'never', maxRestarts: null, backoffMs: null,
+        envRefs: [], env: {}, expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+        sourceFingerprint: null, configRevision: keep.configRevision + 1, createdAt: keep.createdAt ?? now, updatedAt: now,
+        ...xFields,
+        ...(keep.internalKind !== undefined ? { internalKind: keep.internalKind } : {}),
+      });
     } else {
       reg.apps[appId] = {
         appId, alias: d.alias, displayName: d.displayName ?? d.alias, root, entry,

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { appContext } from './runtime.mjs';
+import { readRuntimeStrict } from './store.mjs';
 import { ID_RE } from './desc.mjs';
 import { UI_FILE_CHUNK, TMP_NAME_RE, uiBlocked, uiFail, uiResolveFile } from './ui-data.mjs';
 import { readTailLines, MAX_LOG_BYTES, RUN_LOG_FILE_RE, createLogFilter } from './logs.mjs';
@@ -262,7 +263,7 @@ export function mergeStreamTails(a, b) {
   return out;
 }
 
-export function followLogs(rt, runId, file, initialLines, filterOptions = null) {
+export function followLogs(home, appId, rt, runId, file, initialLines, filterOptions = null) {
   const cur = rt && rt.current;
   process.on('SIGINT', () => {
     process.stderr.write('\n[已中止 follow]\n');
@@ -316,6 +317,41 @@ export function followLogs(rt, runId, file, initialLines, filterOptions = null) 
   let pos = fs.statSync(file).size;
   let decoder = new TextDecoder('utf-8', { fatal: true });
   let lastIdentityCheck = 0;
+  let lastProbeCheck = 0;
+  // 存活兜底核验间隔：runtime 记录正常时只做毫秒级 fs 读，探针（Windows=pwsh 冷启动）
+  // 仅作 60s 一次的后盾与 runtime 不可读时的回退（#170）。
+  const PROBE_BACKSTOP_MS = 60000;
+  const drainAndFinish = () => {
+    try {
+      const s2 = fs.statSync(file).size;
+      if (s2 > pos) {
+        // 最终 drain 与 tick 内读取同一上限：超过 MAX_LOG_BYTES 截断并提示，不无限占内存
+        const len = Math.min(s2 - pos, MAX_LOG_BYTES);
+        const fd = fs.openSync(file, 'r');
+        try {
+          const buf = Buffer.alloc(len);
+          fs.readSync(fd, buf, 0, len, pos);
+          try { writeText(decoder.decode(buf, { stream: true })); }
+          catch {
+            flushPending();
+            decoder = pickDecoder('gbk');
+            writeText(decoder.decode(buf));
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+        pos += len;
+        if (s2 - pos > 0) {
+          process.stderr.write(`\n[日志截断：进程退出后剩余 ${(s2 - pos)} 字节超过单次读取上限 ${MAX_LOG_BYTES} 字节，未继续输出；完整内容可用 manager logs 查看]\n`);
+        }
+      }
+    } catch { /* 忽略 */ }
+    flushPending();
+    reportSinceSkips();
+    clearInterval(tick);
+    process.stderr.write(`\n[进程已退出，follow 结束]\n`);
+    process.exit(0);
+  };
   const tick = setInterval(() => {
     let size = 0;
     try {
@@ -351,40 +387,26 @@ export function followLogs(rt, runId, file, initialLines, filterOptions = null) 
     }
     if (!managedWithIdentity || Date.now() - lastIdentityCheck < 2000) return;
     lastIdentityCheck = Date.now();
-    // 核验异常时保守继续 follow（Ctrl+C 可中止）
+    // 结束判定优先读运行记录：目标退出后 log-writer/exit-watcher 会写入
+    // exit/endedAt 或改写 phase，毫秒级 fs 读即可发现，无需每 2s 起 pwsh（#170）。
+    let ended = null;
     try {
-      const v = verifyRun(cur);
-      if (!v.alive) {
-        try {
-          const s2 = fs.statSync(file).size;
-          if (s2 > pos) {
-            // 最终 drain 与 tick 内读取同一上限：超过 MAX_LOG_BYTES 截断并提示，不无限占内存
-            const len = Math.min(s2 - pos, MAX_LOG_BYTES);
-            const fd = fs.openSync(file, 'r');
-            try {
-              const buf = Buffer.alloc(len);
-              fs.readSync(fd, buf, 0, len, pos);
-              try { writeText(decoder.decode(buf, { stream: true })); }
-              catch {
-                flushPending();
-                decoder = pickDecoder('gbk');
-                writeText(decoder.decode(buf));
-              }
-            } finally {
-              fs.closeSync(fd);
-            }
-            pos += len;
-            if (s2 - pos > 0) {
-              process.stderr.write(`\n[日志截断：进程退出后剩余 ${(s2 - pos)} 字节超过单次读取上限 ${MAX_LOG_BYTES} 字节，未继续输出；完整内容可用 manager logs 查看]\n`);
-            }
-          }
-        } catch { /* 忽略 */ }
-        flushPending();
-        reportSinceSkips();
-        clearInterval(tick);
-        process.stderr.write(`\n[进程已退出，follow 结束]\n`);
-        process.exit(0);
+      const c = readRuntimeStrict(home, appId)?.current;
+      if (c) {
+        // current 已换成别的 runId：跟随的批次必然已归档/退出，直接结束，
+        // 不用回退探针（否则历史批次跟随会每 2s 起一次 pwsh，#170 同一问题）。
+        ended = c.runId !== runId ? true : (c.exit != null || c.endedAt != null || c.phase !== 'RUNNING');
       }
-    } catch { /* 核验失败：继续跟随 */ }
+    } catch { ended = null; }
+    // runtime 不可读/无该批次 → 回退探针核验；记录仍 RUNNING 时每 60s 兜底一次，
+    // 防止 log-writer 同死的极端场景下 follow 永不结束。
+    if (ended !== true && (ended === null || Date.now() - lastProbeCheck >= PROBE_BACKSTOP_MS)) {
+      try {
+        const v = verifyRun(cur);
+        lastProbeCheck = Date.now();
+        if (!v.alive) ended = true;
+      } catch { /* 核验失败：继续跟随（Ctrl+C 可中止） */ }
+    }
+    if (ended) drainAndFinish();
   }, 500);
 }

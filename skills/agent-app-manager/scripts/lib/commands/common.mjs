@@ -19,14 +19,13 @@ export function parseNamed(args, spec) {
     if (kind === 'flag') {
       if (inlineValue !== undefined) throw usageError(`${a} 不接受参数`);
       flags.add(a);
-    } else if (kind === 'value') {
+    } else if (kind === 'value' || kind === 'multi') {
       const v = inlineValue ?? args[++i];
-      if (v === undefined) throw usageError(`${a} 需要参数`);
-      single.set(a, v);
-    } else if (kind === 'multi') {
-      const v = inlineValue ?? args[++i];
-      if (v === undefined) throw usageError(`${a} 需要参数`);
-      multi.set(a, [...(multi.get(a) ?? []), v]);
+      // 空格形式下若下一个 token 仍是 --xxx，说明参数漏写而非值：吞掉会让后续 flag 静默失效。
+      // 值确实以 -- 开头时用 --x=--v 内联形式明确表达。
+      if (v === undefined || (inlineValue === undefined && v.startsWith('--'))) throw usageError(`${a} 需要参数`);
+      if (kind === 'value') single.set(a, v);
+      else multi.set(a, [...(multi.get(a) ?? []), v]);
     } else if (a.startsWith('--')) {
       throw usageError(`未知选项：${a}${inlineValue !== undefined ? `=${inlineValue}` : ''}`);
     } else {

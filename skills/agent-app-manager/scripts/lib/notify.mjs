@@ -49,7 +49,6 @@ export function notifyEnv(appId, app, cur) {
     PROJECT_RUNNER_EXIT_NOTE: cur.exitNote ?? '',
     PROJECT_RUNNER_EXIT_CODE: cur.exit?.code != null ? String(cur.exit.code) : '',
     PROJECT_RUNNER_EXIT_SIGNAL: cur.exit?.signal ?? '',
-    PROJECT_RUNNER_HOME: '',
   };
 }
 

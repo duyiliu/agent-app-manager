@@ -372,33 +372,26 @@ export function upsertApp(reg, appId, desc) {
   const now = new Date().toISOString();
   const existing = reg.apps[appId];
   if (existing) {
-    existing.alias = desc.alias;
-    existing.displayName = desc.displayName;
-    existing.root = desc.root;
-    existing.entry = desc.entry;
-    existing.cwd = desc.cwd;
-    existing.mode = desc.mode;
-    existing.tags = desc.tags ?? [];
-    existing.exe = desc.exe;
-    existing.args = desc.args;
-    existing.command = desc.command ?? null;
-    existing.expectedImage = desc.expectedImage ?? null;
-    existing.discoverTimeoutMs = desc.discoverTimeoutMs ?? null;
-    existing.envRefs = desc.envRefs;
-    existing.envFile = desc.envFile ?? null;
-    existing.env = desc.env ?? {};
-    existing.expectedPort = desc.expectedPort ?? null;
-    existing.readyLogPattern = desc.readyLogPattern ?? null;
-    existing.readyUrl = desc.readyUrl ?? null;
-    existing.logMaxBytes = desc.logMaxBytes ?? RUN_LOG_MAX_BYTES;
-    existing.restartPolicy = desc.restartPolicy ?? 'never';
-    existing.maxRestarts = desc.maxRestarts ?? null;
-    existing.backoffMs = desc.backoffMs ?? null;
-    existing.onExit = desc.onExit ?? null;
-    existing.sourceFingerprint = desc.sourceFingerprint ?? null;
-    for (const [k, v] of Object.entries(desc)) if (k.startsWith('x-')) existing[k] = v;
-    existing.configRevision = (existing.configRevision ?? 1) + 1;
-    existing.updatedAt = now;
+    // 覆盖登记按新建同一字段集整体重建：逐项赋值会漏掉新建分支不写的字段，
+    // 旧 env/端口/hook/x- 扩展可能残留并继续生效（#155）。只保留非 desc 管理的
+    // 运行字段（internalKind、configRevision、createdAt）。
+    const keep = { internalKind: existing.internalKind, configRevision: existing.configRevision ?? 1, createdAt: existing.createdAt };
+    for (const k of Object.keys(existing)) delete existing[k];
+    Object.assign(existing, {
+      appId, alias: desc.alias, displayName: desc.displayName, root: desc.root, entry: desc.entry,
+      cwd: desc.cwd, mode: desc.mode, tags: desc.tags ?? [], exe: desc.exe, args: desc.args,
+      command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
+      discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
+      envFile: desc.envFile ?? null, env: desc.env ?? {},
+      expectedPort: desc.expectedPort ?? null, readyLogPattern: desc.readyLogPattern ?? null,
+      readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
+      restartPolicy: desc.restartPolicy ?? 'never', maxRestarts: desc.maxRestarts ?? null,
+      backoffMs: desc.backoffMs ?? null, onExit: desc.onExit ?? null,
+      sourceFingerprint: desc.sourceFingerprint ?? null,
+      ...Object.fromEntries(Object.entries(desc).filter(([k]) => k.startsWith('x-'))),
+      configRevision: keep.configRevision + 1, createdAt: keep.createdAt ?? now, updatedAt: now,
+      ...(keep.internalKind !== undefined ? { internalKind: keep.internalKind } : {}),
+    });
     return existing;
   }
   const app = {

@@ -128,7 +128,7 @@ export function cmdLogs(ctx, ref) {
       if (ctx.json) throw usageError('--follow 与 --json 不兼容');
       const rt = readRuntimeStrict(ctx.home, t.appId);
       // hint/tmp 源没有受管身份，followLogs 会提示无法自动结束，直到 Ctrl+C
-      followLogs(rt, t.runId, t.file, lines, filterInfo.active ? filterInfo.options : null);
+      followLogs(ctx.home, t.appId, rt, t.runId, t.file, lines, filterInfo.active ? filterInfo.options : null);
       return { following: true };
     }
     const r = readTailLines(t.file, lines);
@@ -162,7 +162,7 @@ export function cmdLogs(ctx, ref) {
   if (opts.has('--follow')) {
     if (ctx.json) throw usageError('--follow 与 --json 不兼容');
     const rt = readRuntimeStrict(ctx.home, t.appId);
-    followLogs(rt, t.runId, t.file, lines, filterInfo.active ? filterInfo.options : null);
+    followLogs(ctx.home, t.appId, rt, t.runId, t.file, lines, filterInfo.active ? filterInfo.options : null);
     return { following: true };
   }
   const r = readTailLines(t.file, lines);

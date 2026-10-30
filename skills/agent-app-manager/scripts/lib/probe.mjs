@@ -26,6 +26,45 @@ function ensureSupported() {
   }
 }
 
+// Windows 应用执行别名（AppData\Local\Microsoft\WindowsApps\pwsh.exe）是 reparse point：
+// 未安装或商店别名被禁用时 spawnSync('pwsh') 返回 EPERM 而非 ENOENT；别名也可能在 PATH
+// 中排在真实安装（Program Files\PowerShell\7）之前。启动失败码一律回退常见安装路径，
+// 全部失败才按缺失上报（调用方 ENOENT → PWSH_MISSING）。
+export const PWSH_LAUNCH_FAIL = new Set(['ENOENT', 'EPERM', 'EACCES', 'EINVAL']);
+let pwshExeCache = null;
+
+export function pwshCandidates() {
+  const list = ['pwsh'];
+  if (IS_WIN) {
+    const e = process.env;
+    for (const p of [
+      e.ProgramFiles && path.join(e.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'),
+      e['ProgramFiles(x86)'] && path.join(e['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'),
+      e.LOCALAPPDATA && path.join(e.LOCALAPPDATA, 'Microsoft', 'PowerShell', 'pwsh.exe'),
+      e.USERPROFILE && path.join(e.USERPROFILE, '.dotnet', 'tools', 'pwsh.exe'),
+    ]) if (p && !list.includes(p)) list.push(p);
+  }
+  return list;
+}
+
+export function spawnPwsh(args, opts) {
+  const candidates = pwshExeCache
+    ? [pwshExeCache, ...pwshCandidates().filter((c) => c !== pwshExeCache)]
+    : pwshCandidates();
+  let last = null;
+  for (const exe of candidates) {
+    const r = spawnSync(exe, args, opts);
+    if (!r.error || !PWSH_LAUNCH_FAIL.has(r.error.code)) {
+      pwshExeCache = exe;
+      return r;
+    }
+    last = r;
+  }
+  pwshExeCache = null;
+  last.error = Object.assign(new Error(`spawnSync pwsh ENOENT（含安装路径回退：${candidates.slice(1).join(', ') || '无'}）`), { code: 'ENOENT' });
+  return last;
+}
+
 function psProcOnce(action, params) {
   const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', action];
   if (params.id != null) args.push('-Id', String(params.id));
@@ -39,7 +78,7 @@ function psProcOnce(action, params) {
   const timeout = action === 'discover' ? (params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS) + 15000
     : action === 'grace' ? (params.waitMs ?? TERMINATE_WAIT_MS) + 15000
     : action === 'resources' || action === 'probe' ? (params.intervalMs ?? 200) + 15000 : 30000;
-  const r = spawnSync('pwsh', args, { encoding: 'utf8', timeout, windowsHide: true });
+  const r = spawnPwsh(args, { encoding: 'utf8', timeout, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
     throw dependencyError(`pwsh 调用失败：${r.error.message}`);
@@ -84,7 +123,7 @@ export function portOccupants(port) {
 }
 
 function portOccupantsOnce(port) {
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'port', '-Id', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'port', '-Id', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
     const e = dependencyError(`端口诊断调用失败：${r.error.message}`);
@@ -129,7 +168,7 @@ export function listListeningPorts(pid) {
 }
 
 function listeningPortsOnce(pid) {
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'listening', '-Id', String(pid)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'listening', '-Id', String(pid)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   return parseListeningOutput(r);
 }
 
@@ -179,7 +218,7 @@ export function listListeningPortsBatch(pids) {
 
 function listeningPortsBatchOnce(pids) {
   const payload = Buffer.from(JSON.stringify(pids), 'utf8').toString('base64');
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'listening-batch', '-Json', payload], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'listening-batch', '-Json', payload], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   return parseListeningOutput(r);
 }
 
@@ -197,7 +236,7 @@ export function listDescendants(pid) {
   ensureSupported();
   if (!Number.isInteger(pid) || pid <= 0) return [];
   if (IS_LINUX) return linuxProc.descendants(pid);
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'descendants', '-Id', String(pid)],
+  const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'descendants', '-Id', String(pid)],
     { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
@@ -229,7 +268,7 @@ export function verifyRuns(runs) {
 
 function verifyRunsOnce(norm, count) {
   const payload = Buffer.from(JSON.stringify(norm), 'utf8').toString('base64');
-  const r = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'verify-batch', '-Json', payload],
+  const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'verify-batch', '-Json', payload],
     { encoding: 'utf8', timeout: 30000 + count * 500, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');

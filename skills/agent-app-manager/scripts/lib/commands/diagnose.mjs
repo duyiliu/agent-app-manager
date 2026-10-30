@@ -6,7 +6,7 @@ import http from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { registryPath, runtimePath, readRegistry, readRuntimeStrict } from '../store.mjs';
 import { usageError } from '../errors.mjs';
-import { verifyRun, verifyRuns, portOccupants, tcpListening, listListeningPorts, listListeningPortsBatch, cacheVerifyResult, interpretVerifyResult, probeComposite } from '../probe.mjs';
+import { verifyRun, verifyRuns, portOccupants, tcpListening, listListeningPorts, listListeningPortsBatch, cacheVerifyResult, interpretVerifyResult, probeComposite, spawnPwsh } from '../probe.mjs';
 import { resolveAppId, statusWithFacts, exitSummary } from '../runtime.mjs';
 import { readTailLines, MAX_LOG_LINES } from '../logs.mjs';
 import { decodeText } from '../decode.mjs';
@@ -104,11 +104,30 @@ export function cmdDoctor(ctx) {
   const isLinux = process.platform === 'linux';
   let pw = { error: true, status: null, stdout: '' };
   if (isWin) {
-    pw = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+    pw = spawnPwsh(['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
   }
   const procReadable = isLinux
     ? (() => { try { fs.accessSync('/proc/self/stat', fs.constants.R_OK); return true; } catch { return false; } })()
     : null;
+  // Linux 受管终止/等待走 python pidfd（proc-linux.mjs pidfdTerminate）：
+  // 缺 python3 或 pidfd API 不可用时 terminate 一律 DEPENDENCY 拒绝，doctor 提前报告。
+  const pidfdProbe = isLinux
+    ? (() => {
+        for (const python of ['python3', 'python']) {
+          const r = spawnSync(python, ['-c',
+            'import os,signal,sys; fd=os.pidfd_open(os.getpid()); signal.pidfd_send_signal(fd, 0); os.close(fd); print(sys.version.split()[0])'],
+            { encoding: 'utf8', timeout: 10000 });
+          if (r.error?.code === 'ENOENT') continue;
+          if (r.error) return { ok: false, exe: python, error: r.error.message };
+          if (r.status !== 0) return { ok: false, exe: python, error: (r.stderr || `exit ${r.status}`).trim() };
+          return { ok: true, exe: python, version: String(r.stdout ?? '').trim() };
+        }
+        return { ok: false, exe: null, error: '未找到 python3/python' };
+      })()
+    : null;
+  if (pidfdProbe && !pidfdProbe.ok) {
+    problems.push({ file: '(dependency)', code: 'DEPENDENCY', message: `Linux 受管 terminate/wait 需要 python3>=3.9 与 pidfd API（os.pidfd_open / signal.pidfd_send_signal）：${pidfdProbe.error}` });
+  }
   const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
   const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
   // 旧 Skill 安装探测只报告；是否卸载由用户决定，doctor 不删除任何文件。
@@ -120,6 +139,7 @@ export function cmdDoctor(ctx) {
     pwshVersion: isWin && !pw.error && pw.status === 0 ? pw.stdout.trim() : null,
     bootId: isLinux ? bootId() : null,
     procReadable,
+    pidfd: pidfdProbe,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports, problems,
     legacySkills,
     note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪；legacySkills 仅列出旧 Skill 安装位置，不自动卸载',
@@ -620,7 +640,18 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   if (runningRecord && resourcesRequested) {
     spec.resources = { items: [{ id: cur0.pid, tree: (cur0.kind ?? 'direct') === 'command' }] };
   }
-  const probe = Object.keys(spec).length ? probeComposite(spec) : null;
+  // 组合探针失败（pwsh 缺失/崩溃等）回退逐路探测：verify/capture/listening/resources
+  // 各段在下游均有独立按需路径，与 cmdHealth 的回退语义一致。
+  let probe = null;
+  let probeFailed = null;
+  if (Object.keys(spec).length) {
+    try {
+      probe = probeComposite(spec);
+    } catch (e) {
+      probeFailed = `${e.code ?? 'PROBE_FAILED'}: ${e.message}`;
+      probe = null;
+    }
+  }
   // 只有确实预取过 logger 身份（有 loggerCreationFileTime 才进 spec.capture）才传预取结果；
   // 否则保持 undefined，loggerAliveNote 走原 kill(0)+按需 capture 路径，语义不回退。
   const loggerCapture = probe && spec.capture
@@ -668,6 +699,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     expectedPort: app.expectedPort,
     exit: runExit,
     exitSummary: runExitSummary,
+    ...(probeFailed ? { probeFailed } : {}),
     portNote: probeRequested ? '端口监听仅为 TCP 证据；监听 ≠ 业务就绪；actualPorts 为受管进程实际监听端口' : '使用 --probe 执行本机 TCP 监听探测与 pid→实际端口枚举',
     ...(probeRequested ? { portListening } : {}),
     ...(collectPorts ? { actualPorts, portMismatch, ...(actualPortsError ? { actualPortsError } : {}) } : {}),
@@ -683,6 +715,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       logPaths: cur.logPaths, logHints: cur.logHints ?? null,
       logRotated: cur.logRotated ?? false, logRotatedStreams: cur.logRotatedStreams ?? [],
       logRotateFailedStreams: cur.logRotateFailedStreams ?? [],
+      logWritePausedStreams: cur.logWritePausedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
       exit: runExit, exitSummary: runExitSummary, wrapperExit: cur.wrapperExit ?? null,
       exitWatchError: cur.exitWatchError ?? null,
