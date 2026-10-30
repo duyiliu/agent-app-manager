@@ -246,7 +246,9 @@ function notifyExit(runId, status, note) {
   } catch { /* 通知不可用时仅保留页面横幅 */ }
 }
 function handlePollError(e) {
-  conn(e.message, true);
+  // fetch 网络层失败（服务不可达/连接中断）抛 TypeError，无 status/code，
+  // 原生 message 是英文且不含可操作信息；统一译为中文，原文附后便于排查。
+  conn(e.status == null ? `无法连接管理台，自动重试中…（${e.message}）` : e.message, true);
   if (e.status === 403) {
     fatal = true;
     showBanner('访问被拒绝（403）：管理台仅接受 127.0.0.1 本机请求，请确认经本机直接访问。');
@@ -898,10 +900,14 @@ function renderDetail(d) {
     el('span', 'db-info', bits));
   bar.hidden = false;
   const hasDiagnostics = lastLifecycleError?.alias === d.alias || portDiag?.alias === d.alias;
-  // 只在首次渲染该应用时自动决定展开/收起；之后保持现状。
+  // 只在首次拿到真实详情时自动决定展开/收起；之后保持现状。
   // 否则每 4s 轮询重绘都会按「当前无异常」重新收起，用户正看着详情却被折叠。
+  // preview 快照不算数：未结告警、诊断态只在真实 /api/status 数据里，提前置位会让告警永远折叠。
   if (detailTouched) applyDetail(detailOpen);
-  else if (!detailInitialized) { detailInitialized = true; applyDetail(needsAttention || hasDiagnostics); }
+  else if (!detailInitialized) {
+    if (!d.preview) detailInitialized = true;
+    applyDetail(needsAttention || hasDiagnostics);
+  }
 }
 let lifecycleBusy = false, lifecycleOpKey = null;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：

@@ -203,12 +203,18 @@ export function resolveSource(home, ref, src) {
   throw usageError('日志源标识无效');
 }
 
+// 文件浏览缺失路径统一 404（同「日志不存在」语义），否则 ENOENT 会透成 500
+const fsOr404 = (fn) => {
+  try { return fn(); }
+  catch (e) { if (e.code === 'ENOENT') throw notFoundError('路径不存在或已删除，请刷新文件树'); throw e; }
+};
+
 export function listTree(home, ref, rel = '') {
   const { app, root } = appRootOf(home, ref);
-  const dir = uiResolveFile(root, rel);
-  if (!fs.statSync(dir).isDirectory()) throw uiFail(400, '不是目录');
+  const dir = fsOr404(() => uiResolveFile(root, rel));
+  if (!fsOr404(() => fs.statSync(dir)).isDirectory()) throw uiFail(400, '不是目录');
   const entries = [];
-  for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const item of fsOr404(() => fs.readdirSync(dir, { withFileTypes: true }))) {
     if (uiBlocked(item.name) || item.isSymbolicLink() || (!item.isDirectory() && !item.isFile())) continue;
     if (!item.isDirectory() && isConfiguredEnvFile(app, root, path.join(dir, item.name))) continue;
     entries.push({ name: item.name, path: path.posix.join(rel, item.name), directory: item.isDirectory() });
@@ -219,15 +225,15 @@ export function listTree(home, ref, rel = '') {
 
 export function readProjectFile(home, ref, rel = '', offset = 0) {
   const { app, root } = appRootOf(home, ref);
-  const file = uiResolveFile(root, rel);
+  const file = fsOr404(() => uiResolveFile(root, rel));
   if (isConfiguredEnvFile(app, root, file)) throw uiFail(403, 'envFile 不允许通过管理台浏览');
-  const stat = fs.statSync(file);
+  const stat = fsOr404(() => fs.statSync(file));
   if (!stat.isFile()) throw uiFail(400, '不是普通文件');
   offset = Number(offset);
   if (!Number.isSafeInteger(offset) || offset < 0) offset = 0;
   offset = Math.min(offset, Math.max(0, stat.size - 1));
   const chunk = Math.min(Math.max(0, stat.size - offset), UI_FILE_CHUNK);
-  const fd = fs.openSync(file, 'r');
+  const fd = fsOr404(() => fs.openSync(file, 'r'));
   let buf;
   try {
     buf = Buffer.alloc(chunk);
