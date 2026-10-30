@@ -9,6 +9,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.mjs';
+import { mergeStreamTails } from '../lib/log-sources.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_FILE = path.join(SCRIPT_DIR, 'index.html');
@@ -256,6 +257,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
         'Content-Security-Policy': "frame-ancestors 'none'",
       });
@@ -346,6 +348,45 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
         schemaVersion: SCHEMA_VERSION, ok: true,
         data: { appId: t.appId, alias: t.alias, runId: t.runId ?? null, stream: t.stream ?? null, ...data },
       });
+    }
+    if (u.pathname === '/api/download') {
+      // 完整日志下载（#164）：与 /api/tail 同一 resolveSource 解析，下载内容与
+      // 日志源文件一致而非前端 8000 行缓存窗口。合并源按同一近似归并算法合成单文件。
+      const src = u.searchParams.get('src');
+      if (!src) throw fail(400, 'download 需要 src 参数', 'USAGE');
+      const t = api.resolveSource(u.searchParams.get('app') || '', src);
+      const safe = (s) => String(s ?? 'log').replace(/[^\w.-]+/g, '_').slice(0, 80) || 'log';
+      const base = `${safe(t.alias)}-${safe(t.runId ?? 'src')}`;
+      if (t.merged) {
+        // 单文件有界（logMaxBytes 上限）；stderr 行加 [stderr] 前缀与 CLI --stream both 一致。
+        const parts = {};
+        for (const stream of ['stdout', 'stderr']) {
+          try { parts[stream] = fs.readFileSync(t.files[stream], 'utf8').split('\n').filter((l) => l.length); }
+          catch { parts[stream] = []; }
+        }
+        const merged = mergeStreamTails(parts.stdout, parts.stderr);
+        const text = merged.map((e) => (e.stream === 'stderr' ? `[stderr] ${e.line}` : e.line)).join('\n');
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Disposition': `attachment; filename="${base}-merged.log"`,
+        });
+        res.end(text + (text ? '\n' : ''));
+        return;
+      }
+      let stat;
+      try { stat = fs.statSync(t.file); } catch { throw fail(404, '日志不存在'); }
+      if (!stat.isFile()) throw fail(404, '日志不存在');
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Length': stat.size,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': `attachment; filename="${base}${safe(t.stream)}.log"`,
+      });
+      fs.createReadStream(t.file).pipe(res);
+      return;
     }
     throw fail(404, '接口不存在');
   }

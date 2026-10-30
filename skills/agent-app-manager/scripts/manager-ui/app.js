@@ -1,10 +1,19 @@
 const $ = s => document.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
-const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : null;
+const fmtSize = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
+// 服务器返回的时间是 UTC ISO（结尾 Z）。原实现只去掉 Z 直接显示 = 显示成 UTC，
+// 本地读数偏差 8h（#162）。统一经 Date 转本地时区；无法解析时原样回显，不伪造本地时间。
+const fmtTime = t => {
+  if (!t) return null;
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return String(t);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
 
 function actionDialog(title, message, onConfirm = null, confirmLabel = '确认结束并启动') {
   const overlay = $('#actionOverlay');
+  const prevFocus = document.activeElement;
   $('#actionTitle').textContent = title;
   $('#actionMessage').textContent = message;
   const confirm = $('#actionConfirm');
@@ -12,10 +21,31 @@ function actionDialog(title, message, onConfirm = null, confirmLabel = '确认�
   confirm.hidden = !onConfirm;
   confirm.textContent = confirmLabel;
   cancel.textContent = onConfirm ? '取消' : '关闭';
-  const close = () => { overlay.hidden = true; confirm.onclick = null; };
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
+    if (e.key === 'Tab') {
+      // 焦点圈进对话框内：模态打开期间 Tab 不逃逸到背后页面（#167）
+      const f = [...overlay.querySelectorAll('button')].filter((b) => !b.hidden && !b.disabled);
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (!overlay.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  const onBackdrop = (e) => { if (e.target === overlay) close(); };
+  const close = () => {
+    overlay.hidden = true;
+    confirm.onclick = null;
+    overlay.removeEventListener('keydown', onKey);
+    overlay.removeEventListener('mousedown', onBackdrop);
+    if (prevFocus && document.contains(prevFocus)) prevFocus.focus?.(); // 焦点归还原位
+  };
   $('#actionClose').onclick = close;
   cancel.onclick = close;
   confirm.onclick = () => { close(); onConfirm?.(); };
+  overlay.addEventListener('keydown', onKey);
+  overlay.addEventListener('mousedown', onBackdrop);
   overlay.hidden = false;
   cancel.focus?.();
 }
@@ -201,6 +231,8 @@ function buildResChart() {
   const canvas = document.createElement('canvas');
   canvas.className = 'res-chart';
   canvas.id = 'resChart';
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', '资源曲线：CPU 与内存，最近 5 分钟（读数见上方）');
   const tip = el('div', 'res-chart-tip');
   tip.dataset.show = '0';
   wrap.append(head, canvas, tip);
@@ -315,7 +347,9 @@ let liveResources = null; // { alias, runId, rssBytes, scope, reason?, at }
 
 async function api(path, signal, method = 'GET') {
   const u = new URL(path, location.origin);
-  const r = await fetch(u, { cache: 'no-store', signal, method });
+  // GET 轮询必须超时：服务端若挂起，请求永不应答时 in-flight 守卫会永久置位、轮询停摆（#166）。
+  // 显式 signal（AbortController/AbortSignal.timeout）优先；未给的 GET 默认 30s 超时。
+  const r = await fetch(u, { cache: 'no-store', signal: signal ?? AbortSignal.timeout(30_000), method });
   const j = await r.json().catch(() => ({ ok: false, error: { code: 'BAD_JSON', message: '响应解析失败' } }));
   if (!r.ok) {
     const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
@@ -326,13 +360,28 @@ async function api(path, signal, method = 'GET') {
   }
   return j.data;
 }
-function showBanner(text, warn = false) {
+// 横幅两类（#165）：kind='data' 连接/数据异常——恢复即自动清；kind='op' 操作反馈——
+// 警告/失败驻留到手动关闭或被下一次同类结果覆盖，不被轮询成功冲掉。成功/信息 12s 后淡出。
+let bannerKind = 'data';
+let bannerFadeTimer = null;
+function showBanner(text, warn = false, kind = 'data') {
   const b = $('#fatalBanner');
   b.hidden = false;
   b.classList.toggle('warn', warn);
-  b.replaceChildren(el('span', null, text));
+  bannerKind = kind;
+  const close = el('button', 'banner-close', '✕');
+  close.type = 'button';
+  close.title = '关闭提示';
+  close.setAttribute('aria-label', '关闭提示');
+  close.addEventListener('click', hideBanner);
+  b.replaceChildren(el('span', null, text), close);
+  if (bannerFadeTimer) { clearTimeout(bannerFadeTimer); bannerFadeTimer = null; }
+  if (!warn) bannerFadeTimer = setTimeout(hideBanner, 12000);
 }
-function hideBanner() { $('#fatalBanner').hidden = true; }
+function hideBanner() {
+  $('#fatalBanner').hidden = true;
+  if (bannerFadeTimer) { clearTimeout(bannerFadeTimer); bannerFadeTimer = null; }
+}
 function conn(text, bad = false) { const c = $('#connState'); c.textContent = text; c.classList.toggle('bad', bad); }
 function notifyExit(runId, status, note) {
   if (!runId || notifiedRuns.has(runId)) return;
@@ -340,13 +389,27 @@ function notifyExit(runId, status, note) {
   try { sessionStorage.setItem('pr-ui-notified-runs', JSON.stringify([...notifiedRuns])); } catch {}
   const banner = $('#exitBanner');
   banner.hidden = false;
-  banner.textContent = `批次 ${runId} 状态变化：${status}${note ? ` · ${note}` : ''}`;
-  // 浏览器通知：授权后 RUNNING→STOPPED/UNKNOWN 也推系统通知（标签页切走时仍可见）。
-  // 权限只能在用户手势中申请（浏览器会静默拒绝轮询回调里的 requestPermission），
-  // 已挪到首次点击页面时询问（见事件区）。
+  // #165：横幅驻留 + 显式关闭；#168：通知授权入口挪到横幅按钮（用户手势上下文内申请）。
+  const msg = el('span', null, `批次 ${runId} 状态变化：${status}${note ? ` · ${note}` : ''}`);
+  const btns = el('span', 'banner-actions');
+  if ('Notification' in window && Notification.permission === 'default') {
+    const ask = el('button', 'banner-btn', '开启通知');
+    ask.type = 'button';
+    ask.title = '授权后运行状态变化同时推送系统通知（标签页切走时仍可见）';
+    ask.addEventListener('click', async () => { try { await Notification.requestPermission(); } catch {} ask.remove(); });
+    btns.appendChild(ask);
+  }
+  const close = el('button', 'banner-close', '✕');
+  close.type = 'button';
+  close.title = '关闭';
+  close.setAttribute('aria-label', '关闭退出提醒');
+  close.addEventListener('click', () => { banner.hidden = true; });
+  btns.appendChild(close);
+  banner.replaceChildren(msg, btns);
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(`agent-app-manager · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
+      const n = new Notification(`agent-app-manager · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
+      n.onclick = () => { try { window.focus(); } catch { /* 浏览器可能不允许聚焦，忽略 */ } };
     }
   } catch { /* 通知不可用时仅保留页面横幅 */ }
 }
@@ -420,9 +483,21 @@ function exitClass(exit) { return exit ? (exitOk(exit) ? 'good' : 'bad') : undef
 function actualPortsOf(d) {
   return Array.isArray(d?.actualPorts) ? d.actualPorts.filter((p) => Number.isInteger(p) && p > 0) : [];
 }
-function portAnchor(port, title) {
+// 端口链接协议（#168）：一律 http 会把 https 应用跳死链。就绪探测的 HTTP 证据带真实 URL，
+// 同端口命中 https 证据时链接改用 https；无证据保持 http（多数本地应用）。
+function portScheme(port, health) {
+  for (const e of health?.readiness?.evidence ?? []) {
+    if (e.kind !== 'http' || typeof e.url !== 'string' || !/^https:\/\//i.test(e.url)) continue;
+    try {
+      const u = new URL(e.url);
+      if ((u.port ? Number(u.port) : 443) === port) return 'https';
+    } catch { /* 证据 URL 不可解析：忽略，按 http */ }
+  }
+  return 'http';
+}
+function portAnchor(port, title, scheme = 'http') {
   const a = el('a', 'port-link', ':' + port);
-  a.href = `http://127.0.0.1:${port}/`;
+  a.href = `${scheme}://127.0.0.1:${port}/`;
   a.target = '_blank'; a.rel = 'noopener';
   a.title = title ?? '新标签页打开该应用端口';
   a.addEventListener('click', (e) => e.stopPropagation());
@@ -435,7 +510,7 @@ function renderApps() {
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const rank = { RUNNING: 0, STARTING: 1, BACKOFF: 2, UNKNOWN: 3, DEAD: 4, STOPPED: 5 };
   const filtered = appsCache
-    .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state, ...(a.tags ?? [])].some(v => String(v ?? '').toLowerCase().includes(q)))
+    .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state, ...(a.tags ?? []), ...actualPortsOf(a)].some(v => String(v ?? '').toLowerCase().includes(q)))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
   $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
   const previousScroll = list.scrollTop;
@@ -448,13 +523,15 @@ function renderApps() {
   if (!filtered.length) { list.appendChild(el('div', 'empty', '无匹配应用')); return; }
   const ordered = [];
   for (const a of filtered) {
-    const card = existing.get(a.appId) ?? el('button', 'app-card');
+    // <button> 内含 <a> 是嵌套交互元素（HTML 无效且 SR 混乱，#167）：卡片改用
+    // div[role=button][tabindex=0]，Enter/Space 触发，内部端口链接可正常聚焦。
+    const card = existing.get(a.appId) ?? el('div', 'app-card');
     existing.delete(a.appId);
     card.className = 'app-card' + (a.alias === selected ? ' selected' : '');
     card.dataset.appId = a.appId;
     card.replaceChildren();
-    card.type = 'button';
-    card.setAttribute('role', 'listitem');
+    card.setAttribute('role', 'button');
+    card.tabIndex = 0;
     const head = el('div', 'app-head');
     const health = healthByAlias.get(a.appId);
     head.append(el('span', 'app-alias', a.alias), statusPill(a.status));
@@ -465,6 +542,8 @@ function renderApps() {
       if (health.state === 'READY') {
         const dot = el('span', 'hl-dot');
         dot.title = healthTitle(health);
+        dot.setAttribute('role', 'img');
+        dot.setAttribute('aria-label', '就绪证据命中');
         head.appendChild(dot);
       } else if (health.state !== 'UNTESTED') {
         const hp = healthPill(health.state);
@@ -479,6 +558,8 @@ function renderApps() {
     if (resWarn) {
       const dot = el('span', 'res-warn');
       dot.title = resWarn;
+      dot.setAttribute('role', 'img');
+      dot.setAttribute('aria-label', resWarn); // 色块是唯一视觉信号：读出告警原因（#167）
       head.appendChild(dot);
     }
     card.appendChild(head);
@@ -496,7 +577,7 @@ function renderApps() {
             : '新标签页打开该应用端口';
           const portInfo = el('span', 'app-port');
           portInfo.appendChild(el('span', null, ':' + port));
-          const link = portAnchor(port, title);
+          const link = portAnchor(port, title, portScheme(port, health));
           link.classList.add('port-icon');
           link.textContent = '';
           const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -524,6 +605,7 @@ function renderApps() {
     card.appendChild(el('div', 'app-root', a.root ?? ''));
     card.title = a.error ? `${a.alias}：${a.error}` : [a.alias, a.displayName !== a.alias ? a.displayName : null, a.appId, health ? health.state : null].filter(Boolean).join(' · ');
     card.onclick = () => selectApp(a.alias);
+    card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectApp(a.alias); } };
     ordered.push(card);
   }
   for (const stale of existing.values()) stale.remove();
@@ -605,7 +687,8 @@ async function loadApps() {
 }
 // 任一轮询成功即视为数据层恢复可读：清掉 degrading 让日志跟随恢复轮询并隐藏横幅。
 // DATA_UNREADABLE 可能是瞬时的（杀软扫描/原子写窗口）；若损坏持续，下一轮轮询会重新上报。
-function hideBannerIfRecovered() { degrading = false; hideBanner(); }
+// 只清 kind='data' 的异常横幅：操作反馈（启停失败等）属用户可见证据，驻留到手动关闭（#165）。
+function hideBannerIfRecovered() { degrading = false; if (bannerKind === 'data') hideBanner(); }
 
 // ---------- 详情 ----------
 
@@ -764,8 +847,53 @@ function previewDetail(row) {
       : null,
   };
 }
+// 详情重建用的 DOM 路径定位（#163）：结构确定性重建下，子索引路径能找回同位元素，
+// 借此跨渲染恢复焦点/输入光标；结构因数据变化而错位时找不回就放弃，不冒焦点乱跳的险。
+function domPath(node, root) {
+  const parts = [];
+  let n = node;
+  while (n && n !== root) {
+    const p = n.parentElement;
+    if (!p) return null;
+    parts.unshift([...p.children].indexOf(n));
+    n = p;
+  }
+  return n === root ? parts : null;
+}
+function domAt(root, parts) {
+  let n = root;
+  for (const i of parts) { n = n?.children?.[i]; if (!n) return null; }
+  return n;
+}
+// 详情卡内告警：同一内容只以 role=alert 播报一次，避免 4s 轮询重绘反复朗读（#167）。
+const announcedAlerts = new Set();
+function alertDiv(text) {
+  const a = el('div', 'alert', text);
+  const key = String(text).slice(0, 200);
+  if (!announcedAlerts.has(key)) {
+    if (announcedAlerts.size > 200) announcedAlerts.clear();
+    announcedAlerts.add(key);
+    a.setAttribute('role', 'alert');
+  }
+  return a;
+}
 function renderDetail(d) {
   const box = $('#detail');
+  const opsHost = $('#detailOps');
+  // 详情区有活动文本选区/正在拖动选择时跳过本轮重建：选中行为优先于即时刷新（#163）。
+  // 数据仍缓存到 currentDetail，下一轮轮询会补上渲染。
+  const selObj = window.getSelection?.();
+  if (selObj && !selObj.isCollapsed && (box.contains(selObj.anchorNode) || opsHost.contains(selObj.anchorNode))) {
+    currentDetail = d;
+    return;
+  }
+  // 焦点在详情区/操作区时记录 DOM 路径，重建后恢复（armed 确认按钮、grace 输入、折叠区等）。
+  const active = document.activeElement;
+  const focusState = active && active !== document.body
+    ? (box.contains(active) ? { root: box, path: domPath(active, box), caret: active.selectionStart ?? null }
+      : opsHost.contains(active) ? { root: opsHost, path: domPath(active, opsHost), caret: active.selectionStart ?? null }
+      : null)
+    : null;
   // 全量重建会重置滚动位置：同一应用（预览→详情、4s 轮询）保持视口，切换应用回到顶部。
   const sameApp = !!d && currentDetail?.alias === d.alias;
   const keepScroll = box.scrollTop;
@@ -856,11 +984,13 @@ function renderDetail(d) {
   const needsAttention = !d.preview && run && run.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(run.phase);
   if (needsAttention) {
     const cmd = `start ${d.alias} --ack-unresolved ${run.runId}`;
-    const alert = el('div', 'alert');
-    alert.append(el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（需再次点击确认），或用 manager CLI 执行 `));
-    alert.appendChild(el('code', null, cmd));
-    alert.appendChild(copyButton(cmd));
-    alert.appendChild(el('span', null, ' 显式恢复。不要删除运行数据绕过。'));
+    const alert = alertDiv(`未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（需再次点击确认），或用 manager CLI 执行 ${cmd} 显式恢复。不要删除运行数据绕过。`);
+    // 文案进 <code>/<span> 分段便于复制按钮并排展示，alertDiv 的纯文本版本供朗读
+    alert.replaceChildren(
+      el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（需再次点击确认），或用 manager CLI 执行 `),
+      el('code', null, cmd), copyButton(cmd),
+      el('span', null, ' 显式恢复。不要删除运行数据绕过。'),
+    );
     card.appendChild(alert);
   }
   const health = healthByAlias.get(d.appId);
@@ -876,10 +1006,13 @@ function renderDetail(d) {
   if (d.portMismatch) {
     card.appendChild(el('div', 'hint-line', `端口漂移：配置 expectedPort=${d.expectedPort}，实际监听 ${actualPorts.join(', ')}；端口链接已指向实际端口。`));
   }
-  if (d.actualPortsError) card.appendChild(el('div', 'alert', `实际端口探测失败：${d.actualPortsError}`));
-  if (d.loggerNote) card.appendChild(el('div', 'alert', d.loggerNote));
+  if (d.actualPortsError) card.appendChild(alertDiv(`实际端口探测失败：${d.actualPortsError}`));
+  if (d.loggerNote) card.appendChild(alertDiv(d.loggerNote));
   if (run?.logRotateFailedStreams?.length) {
-    card.appendChild(el('div', 'alert', `日志轮转重开失败（${run.logRotateFailedStreams.join('/')}）：期间输出可能未落盘，管道后续自动恢复重试；请人工核验日志完整性。`));
+    card.appendChild(alertDiv(`日志轮转重开失败（${run.logRotateFailedStreams.join('/')}）：期间输出可能未落盘，管道后续自动恢复重试；请人工核验日志完整性。`));
+  }
+  if (run?.logWritePausedStreams?.length) {
+    card.appendChild(alertDiv(`日志写盘已暂停（${run.logWritePausedStreams.join('/')}）：轮转连续失败，为防止日志无限增长已丢弃该流新输出；管道定期重试恢复，请人工核验。`));
   }
 
   const body = el('div', 'card-body');
@@ -889,7 +1022,7 @@ function renderDetail(d) {
   if (d.expectedPort != null) {
     grid.appendChild(el('div', 'k', '预期端口'));
     const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));
-    if (st === 'RUNNING' && !actualLinked) pv.appendChild(portAnchor(d.expectedPort));
+    if (st === 'RUNNING' && !actualLinked) pv.appendChild(portAnchor(d.expectedPort, undefined, portScheme(d.expectedPort, health)));
     else pv.textContent = String(d.expectedPort);
     const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '端口诊断');
     diag.type = 'button';
@@ -907,7 +1040,7 @@ function renderDetail(d) {
         if (i) pv.appendChild(el('span', null, ' '));
         pv.appendChild(portAnchor(port, d.expectedPort != null && d.expectedPort !== port
           ? `实际监听端口 ${port}（配置 expectedPort=${d.expectedPort}）`
-          : '新标签页打开该应用端口'));
+          : '新标签页打开该应用端口', portScheme(port, health)));
       });
     } else pv.textContent = actualPorts.join(', ');
     grid.appendChild(pv);
@@ -1038,6 +1171,17 @@ function renderDetail(d) {
     if (!d.preview) detailInitialized = true;
     applyDetail(needsAttention || hasDiagnostics);
   }
+  // 重建后把焦点还回同位元素（#163）：DOM 路径在同构重建下命中等效节点，
+  // 结构变化（如按钮增删）找不到对应位置就不恢复，避免焦点落到错误控件。
+  if (focusState?.path) {
+    const n = domAt(focusState.root, focusState.path);
+    if (n) {
+      n.focus?.();
+      if (focusState.caret != null && typeof n.setSelectionRange === 'function') {
+        try { n.setSelectionRange(focusState.caret, focusState.caret); } catch { /* 非文本控件不支持选区 */ }
+      }
+    }
+  }
 }
 let lifecycleBusy = false, lifecycleOpKey = null;
 // 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
@@ -1119,10 +1263,11 @@ async function doLifecycle(alias, op, extra = '', owner = null) {
     const treeNote = Array.isArray(stopResult?.treeKilled)
       ? `；treeKilled=${stopResult.treeKilled.length} killedPids=${JSON.stringify(stopResult.killedPids ?? [])}`
       : '';
-    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${treeNote}${envWarning ? ` · 警告：${envWarning}` : ''}`, Boolean(envWarning));
+    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${treeNote}${envWarning ? ` · 警告：${envWarning}` : ''}`, Boolean(envWarning), 'op');
   } catch (e) {
     lastLifecycleError = { alias, op, code: e.code, message: e.message, detail: e.detail };
-    showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true);
+    // 失败横幅属操作反馈：驻留到手动关闭（#165），不被下一次轮询成功冲掉。
+    showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true, 'op');
     const owners = [...new Map((e.detail?.occupants ?? []).map(o => [o.pid, o])).values()];
     const occupant = owners.length === 1 ? owners[0] : null;
     const canForce = op === 'start' && e.code === 'PORT_IN_USE' && occupant?.identity?.result === 'ok';
@@ -1227,7 +1372,9 @@ function selectApp(alias) {
 // ---------- 日志 ----------
 
 const MAX_LINES = 8000;
-const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:/;
+// 常见错误形态（#168）：除全大写 ERROR/Java 异常链外，小写 error/failed 也是主流日志习惯
+//（Go/Python/systemd 风格）。词边界限定避免 errors/erroneous 之类的部分命中。
+const errorPattern = /\bERROR\b|Exception|(?:\w+Error)(?::|\b)|Caused by:|Suppressed:|\berror\b|\bfailed\b/;
 const isErrLine = (t) => t.startsWith('[err] ');
 // 合并源行序：两流无统一时间戳，按本批新行在各自流中的相对位置交错。
 // 只保证流内顺序稳定、结果确定，不冒充精确时间序（源标签与 meta 同步标注）。
@@ -1274,6 +1421,7 @@ function compileFilter() {
     input.classList.add('invalid');
     input.title = `正则无效：${e.message}`;
   }
+  updateDlBtn();
 }
 function lineVisible(text) {
   if (errorsOnly && !isErrLine(text) && !errorPattern.test(text)) return false;
@@ -1492,6 +1640,8 @@ async function loadSources({ preferCurrent = false } = {}) {
     const d = await api('/api/sources?app=' + encodeURIComponent(selected), sourcesController.signal);
     if (version !== sourcesVersion) return;
     hideBannerIfRecovered(); // 成功读取即视为恢复：清横幅并让日志跟随解除 degrading（与 loadApps 一致）
+    // 下拉被聚焦（展开/键盘浏览中）时重建 options 会打断用户选择：本轮跳过，下个轮询周期再刷新（#168）
+    if (document.activeElement === runSel) return;
     runSel.replaceChildren();
     for (const s of d.sources ?? []) {
       runSel.appendChild(new Option(`${s.current ? '● ' : ''}${s.label} · ${fmtSize(s.size)}`, s.src));
@@ -1578,12 +1728,8 @@ async function manualReload() {
   } finally { manualRefresh = false; }
 }
 $('#refreshBtn').addEventListener('click', manualReload);
-// 通知权限只能在用户手势中申请：首次点击页面任意处时询问一次（轮询回调里申请会被静默拒绝）。
-document.addEventListener('click', () => {
-  try {
-    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-  } catch {}
-}, { once: true });
+// 通知授权入口在退出状态横幅的「开启通知」按钮上（notifyExit）：那里才有明确的
+// 授权动机与用户手势上下文；不再做「首次点击页面任意处即申请」的模糊时机。
 $('#appSearch').addEventListener('input', renderApps);
 $('#pauseBtn').addEventListener('click', () => {
   paused = !paused;
@@ -1637,6 +1783,7 @@ $('#errorsBtn').addEventListener('click', () => {
   errorsOnly = !errorsOnly;
   $('#errorsBtn').classList.toggle('on', errorsOnly);
   $('#errorsBtn').setAttribute('aria-pressed', String(errorsOnly));
+  updateDlBtn();
   renderLines(true);
 });
 $('#log').addEventListener('click', (e) => {
@@ -1644,22 +1791,51 @@ $('#log').addEventListener('click', (e) => {
   if (!row) return;
   copyText(row.textContent).then((ok) => { if (ok) { row.classList.add('copied'); setTimeout(() => row.classList.remove('copied'), 800); } });
 });
+// 下载按钮语义（#164）：未过滤→服务端 /api/download 下载源文件全量；
+// 过滤/只看错误激活→按所见导出命中行（标注部分导出），两种语义用 title 明示。
+function updateDlBtn() {
+  $('#dlBtn').title = (filterRe || errorsOnly)
+    ? '下载当前过滤命中的行（部分导出）'
+    : '下载当前日志源完整文件';
+}
+updateDlBtn();
 $('#dlBtn').addEventListener('click', () => {
-  // 过滤/只看错误激活时下载命中行（与所见一致）；否则下载缓存全量。
-  const out = (filterRe || errorsOnly) ? lines.filter((l) => lineVisible(l.text)) : lines;
-  const text = out.map((l) => l.text).join('\n');
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${selected || 'app'}-${(logSrcLabel || logFallbackLabel || 'log').replace(/[^\w.-]+/g, '_')}.log`;
+  if (filterRe || errorsOnly) {
+    const out = lines.filter((l) => lineVisible(l.text));
+    const text = out.map((l) => l.text).join('\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    a.href = URL.createObjectURL(blob);
+    a.download = `${selected || 'app'}-${(logSrcLabel || logFallbackLabel || 'log').replace(/[^\w.-]+/g, '_')}-filtered.log`;
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } else {
+    if (!logSrc || !selected) return;
+    a.href = `/api/download?app=${encodeURIComponent(selected)}&src=${encodeURIComponent(logSrc)}`;
+  }
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  a.remove();
 });
-try { if (localStorage.getItem('pr-ui-theme') === 'light') document.documentElement.dataset.theme = 'light'; } catch {}
+// 主题三态（#151/#168）：auto=跟随系统（默认）→ light → dark → auto。系统主题
+// 变化只在 auto 态下生效；手动选定的 light/dark 固定不变。旧版存的 'light'/'dark'
+// 按显式偏好保留，点回 auto 即恢复默认。
+const themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+function themePref() {
+  try { const v = localStorage.getItem('pr-ui-theme'); return ['light', 'dark', 'auto'].includes(v) ? v : 'auto'; }
+  catch { return 'auto'; }
+}
+function applyThemePref(pref = themePref()) {
+  const light = pref === 'light' || (pref === 'auto' && !!themeMedia?.matches);
+  if (light) document.documentElement.dataset.theme = 'light'; else delete document.documentElement.dataset.theme;
+  const label = pref === 'auto' ? '跟随系统' : pref === 'light' ? '浅色' : '深色';
+  $('#themeBtn').title = `主题：${label}（点击在 跟随系统/浅色/深色 间循环）`;
+}
+applyThemePref();
+themeMedia?.addEventListener?.('change', () => { if (themePref() === 'auto') applyThemePref(); });
 $('#themeBtn').addEventListener('click', () => {
-  const light = document.documentElement.dataset.theme === 'light';
-  if (light) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = 'light';
-  try { localStorage.setItem('pr-ui-theme', light ? 'dark' : 'light'); } catch {}
+  const next = { auto: 'light', light: 'dark', dark: 'auto' }[themePref()];
+  try { localStorage.setItem('pr-ui-theme', next); } catch {}
+  applyThemePref(next);
 });
 $('#docBtn').addEventListener('click', async () => {
   $('#docOverlay').hidden = false;
@@ -1669,6 +1845,10 @@ $('#docBtn').addEventListener('click', async () => {
 });
 $('#docClose').addEventListener('click', () => { $('#docOverlay').hidden = true; });
 $('#docOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.hidden = true; });
+// Esc 关闭诊断浮层（#167）；操作确认框的 Esc 由 actionDialog 自己的 keydown 处理
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#docOverlay').hidden) $('#docOverlay').hidden = true;
+});
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
   const box = $('#log');
@@ -1740,9 +1920,10 @@ async function previewFile(rel, offset = 0) {
     if (d.binary) { fdHint(box, '不支持文本预览：二进制或非 UTF-8 文件'); return; }
     if (!d.text) { fdHint(box, '空文件'); return; }
     const frag = document.createDocumentFragment();
-    d.text.split('\n').forEach((text, i) => {
+    d.text.split('\n').forEach((text) => {
+      // 假行号已移除（#168）：服务端返回的是字节偏移窗口，offset+i 不是真实行号。
       const line = el('div', 'fd-line');
-      line.append(el('span', 'no', String(d.offset + i + 1)), el('span', 'tx', text || ' '));
+      line.append(el('span', 'tx', text || ' '));
       frag.appendChild(line);
     });
     box.appendChild(frag);

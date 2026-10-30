@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Agent App Manager · 运行管理台</title>
 <style>
 /* ZCode (zai) 风格：纯灰阶扁平界面，无渐变/发光；单色品牌（暗色=白、亮色=黑），
@@ -68,7 +69,6 @@
   --ok-soft:rgba(30,138,62,.10);
   --shadow:0 12px 32px rgba(0,0,0,.14);
 }
-:root[data-theme="light"] .fd-line .no { color:#adadad }
 :root[data-theme="light"] .line.jr { color:#0a7f7f; background:rgba(10,167,167,.05); border-left-color:rgba(10,167,167,.4) }
 :root[data-theme="light"] .line.err { background:rgba(224,49,49,.05) }
 :root[data-theme="light"] .line.warn { background:rgba(224,123,0,.04); border-left-color:rgba(224,123,0,.45) }
@@ -184,6 +184,9 @@ select option { background:var(--panel-2); color:var(--text) }
 
 .banner {
   flex:none;
+  display:flex;
+  align-items:center;
+  gap:10px;
   padding:9px 14px;
   font-size:12px;
   line-height:1.6;
@@ -191,8 +194,12 @@ select option { background:var(--panel-2); color:var(--text) }
   background:var(--danger-soft);
   border-bottom:1px solid rgba(255,92,92,.30);
   overflow-wrap:anywhere}
+.banner > span:first-child { flex:1; min-width:0 }
 .banner.warn { color:var(--warn-text); background:var(--warn-soft); border-bottom-color:rgba(255,138,48,.30) }
 .banner.info { padding:5px 14px; color:var(--text-faint); background:var(--bg); border-bottom-color:var(--line-soft); font-size:11px }
+.banner-actions { flex:none; display:inline-flex; align-items:center; gap:6px }
+.banner-btn { height:22px; padding:0 8px; font-size:11px }
+.banner-close { flex:none; width:22px; height:22px; padding:0; font-size:11px }
 
 .layout {
   flex:1;
@@ -240,6 +247,7 @@ aside {
   background:transparent;
   text-align:left;
   cursor:pointer;
+  user-select:none;
   box-shadow:none;
   height:auto}
 .app-card:hover { background:var(--surface) }
@@ -668,8 +676,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .fd-path { padding:7px 12px 0; font:10.5px/1.4 var(--mono-font); color:var(--text-faint); overflow-wrap:anywhere }
 .fd-content { flex:1; overflow:auto; padding:6px 0 14px; background:var(--bg) }
 .fd-line { display:flex; min-width:max-content; font:11.5px/1.55 var(--mono-font); color:var(--text) }
-.fd-line .no { min-width:38px; text-align:right; padding:0 10px 0 6px; color:#6b6b6b; user-select:none }
-.fd-line .tx { white-space:pre; padding-right:12px }
+.fd-line .tx { white-space:pre; padding:0 12px 0 10px }
 
 @media(max-width:860px) {
   .layout { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(150px,38%) minmax(0,1fr) }
@@ -693,17 +700,17 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="live-dot" aria-hidden="true"></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
+  <div class="brand"><span class="live-dot" role="img" aria-label="管理台运行中" title="管理台运行中"></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
   <button id="docBtn" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
-  <button id="themeBtn" type="button" title="切换深色/浅色主题" aria-label="切换主题">◐</button>
+  <button id="themeBtn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题">◐</button>
   <button id="filesBtn" type="button" disabled>文件</button>
   <span class="badge ro" id="verBadge">本地</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
 <div class="banner info" id="roBanner" title="仅 127.0.0.1，无令牌；受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记。">仅本机访问 · 启停操作需再次点击确认，停止和重启参数可在应用详情中设置。</div>
-<div class="banner" id="fatalBanner" hidden></div>
-<div class="banner warn" id="exitBanner" hidden></div>
+<div class="banner" id="fatalBanner" hidden role="alert"></div>
+<div class="banner warn" id="exitBanner" hidden role="alert"></div>
 <main class="layout">
   <aside aria-label="应用列表">
     <div id="sidebarResize" class="sidebar-resize" role="separator" tabindex="0" aria-label="调整应用列表宽度" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="600" aria-valuenow="292"></div>
@@ -713,7 +720,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
       <button id="refreshBtn" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
     </div>
     <div class="app-search"><input id="appSearch" type="search" placeholder="过滤应用（别名/显示名/ID/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
-    <div id="appList" role="list"></div>
+    <div id="appList"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
     <div class="detail-head">
@@ -733,10 +740,10 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
         <button id="pauseBtn" type="button" aria-pressed="false">暂停</button>
         <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" type="button" disabled>清屏</button>
-        <button id="dlBtn" type="button" disabled title="下载日志（过滤激活时仅下载命中行）">下载</button>
+        <button id="dlBtn" type="button" disabled title="下载当前日志源完整文件">下载</button>
         <span id="logMeta"></span>
       </div>
-      <div id="log" tabindex="0" aria-label="日志内容"><div class="empty">选择左侧应用后查看日志。</div></div>
+      <div id="log" tabindex="0" aria-label="日志内容" title="点击行复制该行"><div class="empty">选择左侧应用后查看日志。</div></div>
     </section>
   </section>
 </main>
