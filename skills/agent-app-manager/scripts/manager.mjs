@@ -540,8 +540,9 @@ async function main() {
         break;
       }
       case 'start': {
-        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--ack-unresolved': 'value', '--force': 'flag', '--dry-run': 'flag', '--wait-ready': 'flag', '--ready-timeout': 'value' });
+        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--ack-unresolved': 'value', '--force': 'flag', '--dry-run': 'flag', '--wait-ready': 'flag', '--ready-timeout': 'value', '--kill-port-owner': 'value' });
         if (opts.has('--tag')) {
+          if (opts.has('--kill-port-owner')) throw usageError('批量启动不支持结束端口占用进程');
           if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
           if (opts.has('--ack-unresolved')) throw usageError('start --tag 不支持 --ack-unresolved：请先逐个应用核验未结记录');
           data = await cmdStartByTags(ctx, parseTagFilters(opts.getAll('--tag')), stripTagArgs(ctx.rest));

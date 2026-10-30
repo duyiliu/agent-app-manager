@@ -3,6 +3,29 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
 const fmtTime = t => t ? String(t).replace('T', ' ').replace(/\.\d+Z$/, '') : null;
 
+function actionDialog(title, message, onConfirm = null, confirmLabel = '确认结束并启动') {
+  const overlay = $('#actionOverlay');
+  $('#actionTitle').textContent = title;
+  $('#actionMessage').textContent = message;
+  const confirm = $('#actionConfirm');
+  const cancel = $('#actionCancel');
+  confirm.hidden = !onConfirm;
+  confirm.textContent = confirmLabel;
+  cancel.textContent = onConfirm ? '取消' : '关闭';
+  const close = () => { overlay.hidden = true; confirm.onclick = null; };
+  $('#actionClose').onclick = close;
+  cancel.onclick = close;
+  confirm.onclick = () => { close(); onConfirm?.(); };
+  overlay.hidden = false;
+  cancel.focus?.();
+}
+
+function confirmPortOwnerStart(alias, port, owner) {
+  actionDialog('确认结束占用进程', `将强制结束端口 ${port} 的进程 PID ${owner.pid}\n${owner.executablePath || owner.processName || ''}\n启动时间：${owner.startedAt || '未知'}\n这会中断该进程。确认继续？`, () => {
+    doLifecycle(alias, 'start', '', { pid: owner.pid, creationFileTime: owner.identity.creationFileTime, image: owner.identity.image });
+  });
+}
+
 let selected = null;          // 当前选中的 alias
 let workbench = null, workbenchBusy = false, workbenchPoll = false, workbenchEpoch = 0;
 async function loadWorkbench() {
@@ -658,6 +681,17 @@ function appendPortDiagnosis(card, d) {
     if (!occupants.length) {
       panel.appendChild(el('div', 'diag-note', '未发现监听该端口的进程。'));
     } else {
+      const unique = [...new Map(occupants.map(o => [o.pid, o])).values()];
+      if (st.auto && lastLifecycleError?.alias === d.alias && lastLifecycleError?.code === 'PORT_IN_USE' && lastLifecycleError?.op === 'start' && unique.length === 1 && unique[0].identity?.result === 'ok') {
+        const owner = unique[0];
+        const force = el('button', 'diag-btn', '结束占用进程并启动');
+        force.type = 'button';
+        force.disabled = lifecycleBusy;
+        force.addEventListener('click', () => {
+          confirmPortOwnerStart(d.alias, st.port, owner);
+        });
+        panel.appendChild(force);
+      }
       for (const o of occupants) {
         const row = el('div', 'diag-occ');
         row.appendChild(el('div', null, `PID ${o.pid ?? '?'} · ${o.processName ?? '未知进程'}${o.localAddress != null ? ` · ${o.localAddress}:${o.localPort ?? st.port}` : ''}`));
@@ -1063,16 +1097,19 @@ function lifecycleRequestPath(alias, op, extra = '') {
   }
   return `/api/lifecycle?${q.toString()}`;
 }
-async function doLifecycle(alias, op, extra = '') {
+async function doLifecycle(alias, op, extra = '', owner = null) {
   if (lifecycleBusy || !alias) return;
   lifecycleBusy = true;
   lifecycleOpKey = `${alias}:${op}:${extra}`;
   conn(`${op} ${alias} 执行中…`);
   manualRefresh = true;
   loadStatus(); // 立刻重绘按钮为执行中态，不等请求返回（stop/restart 可能数秒）
+  let selectNewLog = false;
   try {
     // 启停可能耗时数十秒（命令模式 discover 上限 ~60s），加 150s 超时防永久挂起
-    const r = await api(lifecycleRequestPath(alias, op, extra), AbortSignal.timeout(150_000), 'POST');
+    const ownerQuery = owner ? '&owner=' + encodeURIComponent(JSON.stringify(owner)) : '';
+    const r = await api(lifecycleRequestPath(alias, op, extra) + ownerQuery, AbortSignal.timeout(150_000), 'POST');
+    selectNewLog = (op === 'start' || op === 'restart') && selected === alias;
     const pid = r.pid ?? r.start?.pid;
     if (lastLifecycleError?.alias === alias) lastLifecycleError = null;
     if (portDiag?.alias === alias && portDiag.auto) portDiag = null;
@@ -1086,6 +1123,12 @@ async function doLifecycle(alias, op, extra = '') {
   } catch (e) {
     lastLifecycleError = { alias, op, code: e.code, message: e.message, detail: e.detail };
     showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true);
+    const owners = [...new Map((e.detail?.occupants ?? []).map(o => [o.pid, o])).values()];
+    const occupant = owners.length === 1 ? owners[0] : null;
+    const canForce = op === 'start' && e.code === 'PORT_IN_USE' && occupant?.identity?.result === 'ok';
+    const ownerInfo = canForce ? `\n\n端口 ${e.detail.port} · PID ${occupant.pid}\n${occupant.executablePath || occupant.processName || ''}\n启动时间：${occupant.startedAt || '未知'}` : '';
+    actionDialog(`${op} ${alias} 失败`, e.message + ownerInfo,
+      canForce ? () => confirmPortOwnerStart(alias, e.detail.port, occupant) : null, '强制启动');
     if (e.code === 'PORT_IN_USE') {
       const app = appsCache.find((a) => a.alias === alias);
       const target = Number(e.detail?.port ?? app?.expectedPort);
@@ -1094,7 +1137,8 @@ async function doLifecycle(alias, op, extra = '') {
   }
   lifecycleBusy = false;
   lifecycleOpKey = null;
-  await Promise.all([loadApps(), loadStatus(), loadSources(), loadHealth()]);
+  await Promise.all([loadApps(), loadStatus(), loadHealth()]);
+  await loadSources({ preferCurrent: selectNewLog && selected === alias });
   manualRefresh = false;
   pollTail();
 }
@@ -1437,7 +1481,7 @@ async function pollMergedTail() {
     handlePollError(e);
   } finally { tailBusy = false; }
 }
-async function loadSources() {
+async function loadSources({ preferCurrent = false } = {}) {
   if (fatal || (paused && !manualRefresh)) return;
   const version = ++sourcesVersion;
   sourcesController?.abort();
@@ -1471,6 +1515,7 @@ async function loadSources() {
       $('#logMeta').textContent = '';
       return;
     }
+    if (preferCurrent) { wantedHistoryRun = null; selectedHistoryRun = null; }
     const historicalSource = wantedHistoryRun ? `run:${wantedHistoryRun}.stdout` : null;
     if (historicalSource && ![...runSel.options].some(o => o.value === historicalSource)) {
       const missingRunId = wantedHistoryRun;
@@ -1501,7 +1546,8 @@ async function loadSources() {
     const streamOf = (src) => sourcesBySrc.get(src)?.stream ?? 'stdout';
     const followSrc = (src) => (d.sources ?? []).find((s) => s.current && s.stream === streamOf(src))?.src
       ?? (d.sources ?? []).find((s) => s.current)?.src;
-    const want = historicalSource
+    const want = (preferCurrent ? (d.sources ?? []).find(s => s.current && s.stream === 'stdout')?.src : null)
+      || historicalSource
       || (!logSrcStale && logSrc && sourcesBySrc.has(logSrc) ? logSrc : null)
       || (!remStale && remembered && sourcesBySrc.has(remembered) ? remembered : null)
       || ((logSrcStale || remStale) ? followSrc(logSrcStale ? logSrc : remembered) : null)

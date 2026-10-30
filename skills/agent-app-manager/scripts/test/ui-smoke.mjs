@@ -426,6 +426,43 @@ try {
     }
     assert(!/commandLine|"cmd"|"args"/i.test(JSON.stringify(detail)), 'detail 不应包含命令行字段');
   });
+  if (hasProcessProbe()) await check('确认后仅结束身份匹配的隔离端口进程并启动', async () => {
+    const listenPort = await new Promise((resolve, reject) => {
+      const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+      s.on('error', reject);
+    });
+    const occupant = spawn(process.execPath, ['-e', `require('net').createServer().listen(${listenPort},'127.0.0.1')`], { stdio: 'ignore' });
+    cleanupPids.push(occupant.pid);
+    const regFile = path.join(home, 'registry.json');
+    const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+    reg.apps.ahis.expectedPort = listenPort;
+    reg.apps.ahis.args = ['-e', 'setInterval(()=>{},1000)'];
+    fs.writeFileSync(regFile, JSON.stringify(reg));
+    try {
+      let info;
+      for (let i = 0; i < 40; i++) {
+        const diag = await get(`/api/port?port=${listenPort}`);
+        info = diag.json?.data?.occupants?.find(o => o.pid === occupant.pid);
+        if (info?.identity?.result === 'ok') break;
+        await wait(150);
+      }
+      assert.equal(info?.identity?.result, 'ok');
+      const owner = { pid: info.pid, creationFileTime: info.identity.creationFileTime, image: info.identity.image };
+      const request = (o) => get(`/api/lifecycle?app=his&op=start&owner=${encodeURIComponent(JSON.stringify(o))}`, { method: 'POST' });
+      const mismatch = await request({ ...owner, creationFileTime: '0' });
+      assert.equal(mismatch.json?.error?.code, 'PORT_OWNER_CHANGED', mismatch.body);
+      assert.equal(occupant.exitCode, null, '身份不匹配时不得结束进程');
+      const started = await request(owner);
+      assert.equal(started.status, 200, started.body);
+      assert.equal(started.json?.data?.status, 'RUNNING');
+      await get('/api/lifecycle?app=his&op=stop', { method: 'POST' });
+    } finally {
+      if (occupant.exitCode == null) occupant.kill();
+      const restore = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+      restore.apps.ahis.expectedPort = port;
+      fs.writeFileSync(regFile, JSON.stringify(restore));
+    }
+  });
   const dup = await exitInfo(spawnUi(port));
   await check('重复 ui 提示已有实例（退出码 3）', () => {
     assert.equal(dup.code, 3);

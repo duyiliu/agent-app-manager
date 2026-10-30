@@ -3,7 +3,7 @@
 import { registryPath, readRegistry, readRuntimeStrict, atomicWriteJson } from '../store.mjs';
 import { usageError, notFoundError, conflictError } from '../errors.mjs';
 import { loadManagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp } from '../desc.mjs';
-import { psProc, verifyRun, listDescendants, portConflict, TERMINATE_WAIT_MS, invalidateVerifyCache } from '../probe.mjs';
+import { psProc, verifyRun, listDescendants, portConflict, portOccupants, TERMINATE_WAIT_MS, invalidateVerifyCache } from '../probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from '../locks.mjs';
 import { resolveAppId, writeRuntime, resolveUnresolvedRun, parseAckRunId } from '../runtime.mjs';
 import { launchManaged, cleanupWrapper } from '../launch.mjs';
@@ -65,10 +65,11 @@ export async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), {
     '--ack-unresolved': 'value', '--force': 'flag', '--dry-run': 'flag',
-    '--wait-ready': 'flag', '--ready-timeout': 'value',
+    '--wait-ready': 'flag', '--ready-timeout': 'value', '--kill-port-owner': 'value',
   });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const readyOpts = parseReadyOptions(opts);
+  if (opts.has('--kill-port-owner') && (opts.has('--dry-run') || opts.has('--force'))) throw usageError('端口进程终止不可与 --dry-run 或 --force 同时使用');
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
@@ -90,6 +91,25 @@ export async function cmdStart(ctx, ref) {
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const preparedEnv = prepareLaunchEnv({ ...app, cwd });
+    let endedPortOwner = false;
+    try {
+    if (opts.has('--kill-port-owner')) {
+      let expected;
+      try { expected = JSON.parse(Buffer.from(opts.get('--kill-port-owner'), 'base64url').toString('utf8')); } catch { throw usageError('端口进程身份无效'); }
+      const owners = portOccupants(app.expectedPort);
+      const unique = [...new Map(owners.map(o => [o.pid, o])).values()];
+      if (!Number.isInteger(app.expectedPort) || unique.length !== 1 || !expected || unique[0].pid !== expected.pid || unique[0].identity?.result !== 'ok' || String(unique[0].identity.creationFileTime) !== String(expected.creationFileTime) || unique[0].identity.image !== expected.image || expected.pid === process.pid || expected.pid === process.ppid) {
+        throw conflictError('PORT_OWNER_CHANGED', '端口占用进程已变化或身份不可核验，请重新诊断后确认');
+      }
+      for (const otherId of Object.keys(readRegistry(ctx.home).apps)) {
+        if (otherId === appId) continue;
+        const other = readRuntimeStrict(ctx.home, otherId)?.current;
+        if (other?.managed && other.pid === expected.pid && other.phase === 'RUNNING') throw conflictError('PORT_OWNER_MANAGED', '占用进程属于其他受管应用，请先通过该应用的停止按钮处理');
+      }
+      const result = psProc('terminate', { id: expected.pid, creationFileTime: expected.creationFileTime, image: expected.image });
+      if (!['terminated', 'exited', 'notfound'].includes(result.result)) throw conflictError('PORT_OWNER_STOP_FAILED', '无法确认端口占用进程已退出', { result: result.result });
+      endedPortOwner = result.result === 'terminated';
+    }
     const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
     const appForLaunch = withRegistryLock(ctx.home, 'start', () => {
       const reg = readRegistry(ctx.home);
@@ -115,6 +135,10 @@ export async function cmdStart(ctx, ref) {
         ? '复用已保存启动配置并同步等待就绪；READY 证据不是业务功能验收'
         : '复用已保存启动配置；进程存活不等于业务就绪',
     };
+    } catch (error) {
+      if (endedPortOwner) error.message = `端口占用进程已结束，但启动未完成：${error.message}`;
+      throw error;
+    }
   });
 }
 

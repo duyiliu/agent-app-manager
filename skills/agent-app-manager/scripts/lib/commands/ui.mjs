@@ -45,9 +45,10 @@ function probeManagerUi(port) {
 // 子进程退出码即 ManagerError exitCode（1-6），重构错误后 errorStatus 映射不变；
 // 180s 超时兜底（CLI 前端 150s abort 通常先到），超时强杀子进程——中断的
 // start/stop 按既有语义留下 STARTING/UNKNOWN 未结证据，不静默伪造结果。
-function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = null } = {}) {
+function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = null, owner = null } = {}) {
   const args = [MANAGER_MJS, '--json', '--home', home, op, ref];
   if (ack) args.push('--ack-unresolved', ack);
+  if (owner) args.push('--kill-port-owner', Buffer.from(owner, 'utf8').toString('base64url'));
   // 仅 stop/restart 接受 --tree/--grace（调用方已校验，这里再按 op 防守一次）。
   if (op === 'stop' || op === 'restart') {
     if (tree) args.push('--tree');
@@ -170,8 +171,9 @@ export async function cmdUi(ctx) {
         // 受管启停与移除：改由 manager.mjs 子进程执行（#82-B1）——start/stop/restart
         // 可能持锁等待与进程核验数十秒，同进程同步执行会冻结 ui 事件循环、
         // 期间全部轮询停摆。--json 输出保证数据契约与直调 cmd* 一致（同一实现）。
-        lifecycle: (ref, op, ack, treeRaw, graceRaw) => {
+        lifecycle: (ref, op, ack, treeRaw, graceRaw, owner) => {
           if (!['start', 'stop', 'restart', 'remove'].includes(op)) throw usageError(`不支持的操作：${op}（仅 start|stop|restart|remove）`);
+          if (owner && (op !== 'start' || owner.length > 4096)) throw usageError('端口进程参数无效');
           // --ack-unresolved 只在支持它的操作上生效；对 stop/restart 明确拒绝而非静默丢弃，
           // 避免调用方误以为未结记录已被确认。
           if (ack && op !== 'start' && op !== 'remove') throw usageError(`${op} 不支持 ack 参数（仅 start/remove 接受 --ack-unresolved）`);
@@ -187,7 +189,7 @@ export async function cmdUi(ctx) {
             tree = raw === '1' || raw === 'true';
           }
           const graceMs = parseGraceMsValue(graceRaw);
-          return runLifecycleSubprocess(ctx.home, op, ref, ack, { tree, graceMs });
+          return runLifecycleSubprocess(ctx.home, op, ref, ack, { tree, graceMs, owner });
         },
       },
     });

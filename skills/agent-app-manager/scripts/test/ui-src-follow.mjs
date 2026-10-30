@@ -230,6 +230,34 @@ try {
   await poll('logSrc', (v) => v !== null);
 
   await check('初始选中=当前批次 stdout', () => assert.equal(run('logSrc'), 'run:rtest1.stdout'));
+  await check('内部浮层取消不执行，确认才执行操作', () => {
+    run(`globalThis.__confirmed = 0; actionDialog('测试', '进程信息', () => __confirmed++)`);
+    assert.equal(elFor('actionOverlay').hidden, false);
+    assert.equal(elFor('actionMessage').textContent, '进程信息');
+    elFor('actionCancel').onclick();
+    assert.equal(run('__confirmed'), 0);
+    assert.equal(elFor('actionOverlay').hidden, true);
+    run(`actionDialog('测试', '进程信息', () => __confirmed++)`);
+    elFor('actionConfirm').onclick();
+    assert.equal(run('__confirmed'), 1);
+    assert.equal(elFor('actionOverlay').hidden, true);
+  });
+  await check('端口冲突浮层提供强制启动并要求再次确认', async () => {
+    run(`globalThis.__origApiForConflict = api; api = async (url, ...args) => {
+      if (String(url).includes('/api/lifecycle')) throw Object.assign(new Error('端口已占用'), { code:'PORT_IN_USE', detail:{ port:8188, occupants:[{ pid:123, executablePath:'node', identity:{ result:'ok', creationFileTime:'1234', image:'node' } }] } });
+      return __origApiForConflict(url, ...args);
+    };`);
+    try {
+      await run(`doLifecycle('his','start')`);
+      assert.equal(elFor('actionOverlay').hidden, false);
+      assert.equal(elFor('actionConfirm').textContent, '强制启动');
+      assert.match(elFor('actionMessage').textContent, /PID 123/);
+      elFor('actionConfirm').onclick();
+      assert.equal(elFor('actionTitle').textContent, '确认结束占用进程');
+      assert.equal(elFor('actionConfirm').textContent, '确认结束并启动');
+      elFor('actionCancel').onclick();
+    } finally { run('api = __origApiForConflict'); }
+  });
 
   await restartAndSync('rtest2');
   await check('重启后切到新当前批次 stdout', () => assert.equal(run('logSrc'), 'run:rtest2.stdout'));
@@ -243,6 +271,10 @@ try {
   await restartAndSync('rtest4');
   await check('刻意选历史批次：重启后不抢切', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
   await check('历史选择记忆标志=非当前', () => assert.equal(sessionStorageStub.getItem('pr-ui-src-cur:his'), '0'));
+  await check('页面启动成功后优先切换当前批次', async () => {
+    await run('loadSources({ preferCurrent: true })');
+    assert.equal(run('logSrc'), 'run:rtest4.stdout');
+  });
 
   pickSrc('run:rtest4.stdout');
   await restartAndSync('rtest5');
