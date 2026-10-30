@@ -49,6 +49,8 @@ export function archiveCurrent(rt, opts = {}) {
       restartCount: cur.restartCount ?? 0,
       restartState: cur.restartState ?? null,
       lastExit: cur.lastExit ?? null,
+      stopRequested: cur.stopRequested === true ? true : null,
+      exitNote: cur.exitNote ?? null,
     };
     if (opts.reason) {
       // 显式 ack 放弃的未结记录：保留完整身份与日志证据，注明归档原因

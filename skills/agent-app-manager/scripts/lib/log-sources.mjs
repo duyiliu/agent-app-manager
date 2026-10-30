@@ -263,6 +263,140 @@ export function mergeStreamTails(a, b) {
   return out;
 }
 
+// 多路尾部归并：mergeStreamTails 的 N 源推广，同一位置比例规则（无统一时间戳，
+// 只保证各源内顺序稳定、整体确定性）。每条输出行附带来源字段（#140 logs --tag）。
+export function mergeMultiTails(parts) {
+  const ptrs = parts.map(() => 0);
+  const out = [];
+  for (;;) {
+    let best = -1;
+    let bestRatio = Infinity;
+    for (let k = 0; k < parts.length; k++) {
+      if (ptrs[k] >= parts[k].lines.length) continue;
+      const ratio = (ptrs[k] + 1) / parts[k].lines.length;
+      if (ratio < bestRatio) { best = k; bestRatio = ratio; }
+    }
+    if (best < 0) break;
+    const p = parts[best];
+    out.push({ alias: p.alias, appId: p.appId, runId: p.runId, ...p.lines[ptrs[best]++] });
+  }
+  return out;
+}
+
+// logs --tag 的多文件跟随：每源独立 offset/decoder/轮转重置，轮询内按源序公平读取
+// （每源每 tick 有界 MAX_LOG_BYTES，不饿慢源）；运行记录显示批次结束即收，
+// 全部批次结束后 drain 退出（#140）。
+export function followTagLogs(home, sources, initialLines, filterOptions = null) {
+  process.on('SIGINT', () => {
+    process.stderr.write('\n[已中止 follow]\n');
+    process.exit(0);
+  });
+  const filter = filterOptions ? createLogFilter(filterOptions) : null;
+  let reportedNoTimestamp = 0;
+  const emit = (s, line) => {
+    const text = `[${s.alias}]${s.stream === 'stderr' ? '[err]' : ''} ${line}`;
+    if (!filter) { process.stdout.write(`${text}\n`); return; }
+    for (const out of filter.feed(line)) process.stdout.write(`[${s.alias}]${s.stream === 'stderr' ? '[err]' : ''} ${out}\n`);
+  };
+  const reportSinceSkips = () => {
+    if (!filter || filterOptions?.sinceMs == null) return;
+    const n = filter.stats().noTimestamp;
+    if (n > reportedNoTimestamp) {
+      process.stderr.write(`[--since 仅按行首时间戳过滤：${n} 行无时间戳已跳过]\n`);
+      reportedNoTimestamp = n;
+    }
+  };
+  const states = sources.map((s) => ({
+    ...s,
+    pos: 0,
+    decoder: new TextDecoder('utf-8', { fatal: true }),
+    pending: '',
+    done: false,
+    lastProbeCheck: 0,
+  }));
+  for (const s of states) {
+    try {
+      for (const line of readTailLines(s.file, initialLines).lines) emit(s, line);
+      s.pos = fs.statSync(s.file).size;
+    } catch { /* 初始读取失败的源标记结束，不阻塞其余 */ s.done = true; }
+  }
+  reportSinceSkips();
+  const PROBE_BACKSTOP_MS = 60000;
+  const drainSource = (s) => {
+    let size;
+    try { size = fs.statSync(s.file).size; } catch { return; }
+    if (size < s.pos) {
+      process.stderr.write(`\n[${s.alias}] 日志已轮转，从新文件起始继续跟随\n`);
+      s.pending = '';
+      s.pos = 0;
+      s.decoder = new TextDecoder('utf-8', { fatal: true });
+    }
+    if (size <= s.pos) return;
+    const len = Math.min(size - s.pos, MAX_LOG_BYTES);
+    const fd = fs.openSync(s.file, 'r');
+    let buf;
+    try {
+      buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, s.pos);
+    } finally {
+      fs.closeSync(fd);
+    }
+    s.pos += len;
+    let text;
+    try { text = s.decoder.decode(buf, { stream: true }); }
+    catch {
+      s.pending = '';
+      s.decoder = pickDecoder('gbk');
+      text = s.decoder.decode(buf);
+    }
+    s.pending += text;
+    for (;;) {
+      const i = s.pending.indexOf('\n');
+      if (i < 0) break;
+      let line = s.pending.slice(0, i);
+      s.pending = s.pending.slice(i + 1);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      emit(s, line);
+    }
+  };
+  const sourceEnded = (s) => {
+    try {
+      const c = readRuntimeStrict(home, s.appId)?.current;
+      if (c) return c.runId !== s.runId || c.exit != null || c.endedAt != null || c.phase !== 'RUNNING';
+    } catch { /* runtime 不可读：回退探针 */ }
+    // runtime 不可读才回退身份核验，且每源 60s 一次兜底（与单源 follow 同口径，#170）。
+    if (s.managedIdentity && Date.now() - s.lastProbeCheck >= PROBE_BACKSTOP_MS) {
+      try {
+        s.lastProbeCheck = Date.now();
+        return !verifyRun(s.managedIdentity).alive;
+      } catch { return false; }
+    }
+    return false;
+  };
+  const reportedRuns = new Set();
+  const tick = setInterval(() => {
+    for (const s of states) {
+      if (s.done) continue;
+      drainSource(s);
+      if (sourceEnded(s)) {
+        drainSource(s); // 结束前最后一轮 drain，不漏退出瞬间的尾部
+        if (s.pending) { let line = s.pending; s.pending = ''; if (line.endsWith('\r')) line = line.slice(0, -1); emit(s, line); }
+        s.done = true;
+        if (!reportedRuns.has(`${s.appId}:${s.runId}`)) {
+          reportedRuns.add(`${s.appId}:${s.runId}`);
+          process.stderr.write(`[${s.alias}] 批次 ${s.runId} 已结束\n`);
+        }
+      }
+    }
+    if (states.every((s) => s.done)) {
+      clearInterval(tick);
+      reportSinceSkips();
+      process.stderr.write(`\n[全部批次已结束，follow 完成]\n`);
+      process.exit(0);
+    }
+  }, 500);
+}
+
 export function followLogs(home, appId, rt, runId, file, initialLines, filterOptions = null) {
   const cur = rt && rt.current;
   process.on('SIGINT', () => {

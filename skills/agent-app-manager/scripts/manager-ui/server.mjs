@@ -273,7 +273,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       // 外层方法守卫只挡「非 GET 且非 lifecycle-POST」，这里必须再查一次：
       // 否则 GET /api/lifecycle?op=stop 会被 <img>/导航等跨站请求触达（CSRF）。
       if (method !== 'POST') throw fail(405, '启停/移除仅接受 POST');
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null, u.searchParams.get('tree'), u.searchParams.get('grace'), u.searchParams.get('owner')) });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null, u.searchParams.get('tree'), u.searchParams.get('grace'), u.searchParams.get('owner'), u.searchParams.get('deps')) });
     }
     if (u.pathname === '/api/port') {
       // 只读端口诊断：与 CLI `port <N>` 同一实现；输出在 HTTP 层按白名单裁剪。
@@ -292,6 +292,27 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     }
     if (u.pathname === '/api/apps') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...(await collectApps()), home } });
+    }
+    if (u.pathname === '/api/snapshot') {
+      // 聚合轮询（#145）：前端单定时器一次请求拿到 apps+status+按需 health，
+      // 复用同一批单飞采集器，不增加额外的 manager 子进程开销。
+      const app = u.searchParams.get('app') || '';
+      const out = { home };
+      const jobs = [collectApps().then((d) => { out.apps = d.apps; })];
+      if (u.searchParams.get('health') === '1') {
+        jobs.push(collectHealth().then(
+          (d) => { out.health = d; },
+          (e) => { out.healthError = { code: e.code ?? null, message: e.message ?? String(e) }; },
+        ));
+      }
+      if (app) {
+        jobs.push(collectStatus(app).then(
+          (d) => { out.status = d; },
+          (e) => { out.statusError = { status: e.code === 'NOT_FOUND' ? 404 : null, code: e.code ?? null, message: e.message ?? String(e) }; },
+        ));
+      }
+      await Promise.all(jobs);
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: out });
     }
     if (u.pathname === '/api/health') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectHealth() });

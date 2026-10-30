@@ -613,7 +613,64 @@ export function sampleAppUsage(home, ref) {
   return { alias, runId: cur.runId ?? null, ...(r ?? { available: false, reason: '采样不可用' }) };
 }
 
-export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false, resourcesRequested = false) {
+// ---------- 运行历史与可用性聚合（#143）：只聚合保留期内批次，纯读不写 ----------
+
+// 结果归类沿用重启决策的三态语义：正常/崩溃（信号或非 0 码）/证据缺失/未知；
+// 人工 stop（stopRequested 标记或 exitNote 注明）归为 stopped，不算崩溃。
+function runOutcomeOf(run) {
+  if (!run || !run.managed) return 'unmanaged';
+  if (['RUNNING', 'STARTING', 'BACKOFF'].includes(run.phase)) return 'active';
+  if (run.stopRequested === true || /^人为/.test(run.exitNote ?? '')) return 'stopped';
+  if (run.phase === 'DEAD') return 'dead';
+  if (run.phase === 'UNKNOWN') return 'unknown';
+  const ex = run.exit;
+  if (ex == null) return 'evidence-missing';
+  if (ex.signal != null || (Number.isInteger(ex.code) && ex.code !== 0)) return 'crash';
+  if (ex.code === 0) return 'normal';
+  return 'evidence-missing';
+}
+
+function runDurationMs(run) {
+  const start = Date.parse(run.startedAt ?? run.intentAt ?? '');
+  const end = Date.parse(run.endedAt ?? run.archivedAt ?? '');
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+}
+
+export function buildRunHistory(rt) {
+  return [rt?.current, ...(rt?.prevRuns ?? [])].filter(Boolean).map((run) => ({
+    runId: run.runId ?? null, phase: run.phase ?? null, managed: run.managed ?? null,
+    outcome: runOutcomeOf(run),
+    startedAt: run.startedAt ?? run.intentAt ?? null,
+    endedAt: run.endedAt ?? run.archivedAt ?? null,
+    durationMs: runDurationMs(run),
+    exit: run.exit ?? null, restartCount: run.restartCount ?? null,
+    archiveReason: run.archiveReason ?? null, exitNote: run.exitNote ?? null,
+  }));
+}
+
+export function buildRunStats(history) {
+  const ended = history.filter((h) => h.outcome !== 'active' && h.outcome !== 'unmanaged');
+  if (!ended.length) return { runs: 0, note: '无已结束运行历史' };
+  const durations = ended.map((h) => h.durationMs).filter((d) => d != null);
+  const crashes = ended.filter((h) => h.outcome === 'crash' || h.outcome === 'dead');
+  const lastCrash = crashes[0] ?? null; // history 顺序为 current→prevRuns（时间倒序）
+  return {
+    runs: ended.length,
+    normalStops: ended.filter((h) => h.outcome === 'normal').length,
+    stoppedByUser: ended.filter((h) => h.outcome === 'stopped').length,
+    crashes: crashes.length,
+    dead: ended.filter((h) => h.outcome === 'dead').length,
+    unknown: ended.filter((h) => h.outcome === 'unknown').length,
+    evidenceMissing: ended.filter((h) => h.outcome === 'evidence-missing').length,
+    avgDurationMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
+    maxDurationMs: durations.length ? Math.max(...durations) : null,
+    lastCrash: lastCrash
+      ? { runId: lastCrash.runId, at: lastCrash.endedAt, code: lastCrash.exit?.code ?? null, signal: lastCrash.exit?.signal ?? null }
+      : null,
+  };
+}
+
+export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false, resourcesRequested = false, historyFlags = null) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -735,6 +792,15 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     readinessUntested: st.status === 'RUNNING' && readiness?.state !== 'READY',
     note: st.note ?? null,
     loggerNote: st.loggerNote ?? null,
+    dependsOn: app.dependsOn ?? [],
+    dependedBy: Object.values(reg.apps).filter((a) => (a.dependsOn ?? []).some((r) => { try { return resolveAppId(reg, r) === appId; } catch { return false; } })).map((a) => a.alias),
     prevRuns: (rt?.prevRuns ?? []).slice(0, 5),
+    ...(historyFlags?.history || historyFlags?.stats ? (() => {
+      const history = buildRunHistory(rt);
+      return {
+        ...(historyFlags.history ? { history } : {}),
+        ...(historyFlags.stats ? { stats: buildRunStats(history) } : {}),
+      };
+    })() : {}),
   };
 }

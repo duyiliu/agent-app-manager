@@ -114,7 +114,7 @@ export function detectProjects(root) {
       if (serverPort !== null) return { expectedPort: serverPort, source: `${cfg}:server.port` };
       const mAny = /\bport\s*:\s*(\d+)/.exec(text);
       const anyPort = mAny ? parsePort(mAny[1]) : null;
-      if (anyPort !== null) return { expectedPort: anyPort, source: `${cfg}:port（未在 server 段，可能是 preview.port，请人工核对）` };
+      if (anyPort !== null) return { expectedPort: anyPort, confidence: 'low', source: `${cfg}:port（未在 server 段，可能是 preview.port，请人工核对）` };
     }
 
     // Spring：application.properties / application-<profile>.properties / yml/yaml，
@@ -226,7 +226,7 @@ export function detectProjects(root) {
     const port = inferPort(projectRoot);
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'node', command: `${pm} run ${script}`, expectedImage: `node${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'node', command: `${pm} run ${script}`, expectedImage: `node${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort, ...(port.confidence ? { expectedPortConfidence: port.confidence } : {}) } : {}) },
       confidence: framework ? 'high' : 'medium',
       evidence: { file: rel, rule: `package-script:${script}${framework ? `; dependency:${framework}` : ''}${pmSource ? `; pm:${pm}(${pmSource})` : ''}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` },
     });
@@ -239,7 +239,7 @@ export function detectProjects(root) {
     const cmd = wrapper ? (process.platform === 'win32' ? 'mvnw.cmd spring-boot:run' : './mvnw spring-boot:run') : 'mvn spring-boot:run';
     const port = inferPort(projectRoot);
     const alias = nextAlias();
-    candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'java', command: cmd, expectedImage: `java${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) }, confidence: 'medium', evidence: { file: rel, rule: `${wrapper ? 'maven-spring-boot-wrapper' : 'maven-spring-boot-plugin'}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` } });
+    candidates.push({ desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'java', command: cmd, expectedImage: `java${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort, ...(port.confidence ? { expectedPortConfidence: port.confidence } : {}) } : {}) }, confidence: 'medium', evidence: { file: rel, rule: `${wrapper ? 'maven-spring-boot-wrapper' : 'maven-spring-boot-plugin'}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` } });
   }
   // Gradle：settings/build.gradle(.kts) 含 spring-boot 插件 → bootRun；gradlew 优先。
   for (const rel of files.filter((f) => /^build\.gradle(\.kts)?$/.test(path.basename(f)))) {
@@ -252,7 +252,7 @@ export function detectProjects(root) {
     const port = inferPort(projectRoot);
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'java', command: cmd, expectedImage: `java${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'java', command: cmd, expectedImage: `java${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort, ...(port.confidence ? { expectedPortConfidence: port.confidence } : {}) } : {}) },
       confidence: 'medium',
       evidence: { file: rel, rule: wrapper ? 'gradle-spring-boot-wrapper' : 'gradle-spring-boot-plugin' },
     });
@@ -309,7 +309,7 @@ export function detectProjects(root) {
       ...(port ? [`port:${port.expectedPort}(${port.source})`] : []),
     ];
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'python', command, expectedImage: pythonExpectedImage(venv), ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'python', command, expectedImage: pythonExpectedImage(venv), ...(port ? { expectedPort: port.expectedPort, ...(port.confidence ? { expectedPortConfidence: port.confidence } : {}) } : {}) },
       confidence: 'medium',
       evidence: { file: primary.rel, rule: evidenceParts.join('; ') },
     });
@@ -429,7 +429,7 @@ export function detectProjects(root) {
     const port = inferPort(projectRoot);
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: 'dotnet run', expectedImage, ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command: 'dotnet run', expectedImage, ...(port ? { expectedPort: port.expectedPort, ...(port.confidence ? { expectedPortConfidence: port.confidence } : {}) } : {}) },
       confidence: web ? 'medium' : 'low',
       evidence: { file: rel, rule: `dotnet-csproj:${web ? 'web' : 'exe'}${useAppHost ? '' : '; apphost:false'}${port ? `; port:${port.expectedPort}(${port.source})` : ''}` },
     });
@@ -534,7 +534,7 @@ export function detectProjects(root) {
     if (!command) continue;
     const alias = nextAlias();
     candidates.push({
-      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command, expectedImage: `php${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort } : {}) },
+      desc: { alias, root: projectRoot, cwd: projectRoot, entry: 'default', mode: 'proc', command, expectedImage: `php${exeSuffix}`, ...(port ? { expectedPort: port.expectedPort, ...(port.confidence ? { expectedPortConfidence: port.confidence } : {}) } : {}) },
       confidence: 'medium',
       evidence: { file: rel, rule },
     });

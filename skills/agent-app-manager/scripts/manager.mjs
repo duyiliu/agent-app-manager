@@ -22,7 +22,7 @@ import { detectProjects } from './lib/detect.mjs';
 import {
   parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdHealth, sampleAppUsage, cmdStart, cmdStop, cmdRestart,
   cmdRemove, cmdPrune, cmdLogs, cmdStartNew, cmdRecordUnmanaged, cmdUi, cmdCleanupWrapper,
-  cmdStartByTags, cmdStopByTags, cmdRestartByTags, cmdStatusByTags,
+  cmdStartByTags, cmdStopByTags, cmdRestartByTags, cmdStatusByTags, cmdExport, cmdImport,
 } from './lib/commands.mjs';
 import { parseTagFilters } from './lib/desc.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource } from './lib/log-sources.mjs';
@@ -63,7 +63,7 @@ function stripTagArgs(args) {
 
 // 只读命令不创建空 home/子目录；默认 home 首次升级可复制已有旧目录。
 // status 的 RUNNING→STOPPED 落账仅在 home 已存在且有记录时发生，不受影响。
-const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune', 'version']);
+const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune', 'version', 'export']);
 
 // ---------- 输出 ----------
 
@@ -257,10 +257,14 @@ function renderHuman(command, data) {
             ? `resources=${fmtBytes(data.resources.rssBytes)} rss（${data.resources.scope === 'tree' ? '含后代聚合' : '仅目标进程'}，${data.resources.processCount} 个进程，CPU ${Number(data.resources.cpuPercent ?? 0).toFixed(1)}%，采样窗口 ${data.resources.intervalMs}ms）`
             : `resources 不可用：${data.resources.reason ?? '原因不明'}`
           : null,
+        (data.dependsOn ?? []).length ? `dependsOn=${data.dependsOn.join(',')}` : null,
+        (data.dependedBy ?? []).length ? `dependedBy=${data.dependedBy.join(',')}（stop 默认不停依赖方；连带停止用 stop --with-dependents）` : null,
         data.jrebelEvidence ? `jrebelEvidence=${JSON.stringify(data.jrebelEvidence)}` : null,
         data.runtimeFile ? `证据: ${data.runtimeFile}` : null,
         ...(data.prevRuns ?? []).map((p) => `prev=${p.runId} phase=${p.phase}${p.archiveReason ? ` archiveReason=${p.archiveReason}` : ''}${p.pid != null ? ` pid=${p.pid}` : ''} archivedAt=${p.archivedAt}`),
         data.readinessUntested ? '就绪未检测：进程存活不等于业务就绪' : null,
+        ...(data.history ?? []).map((h) => `history: ${h.runId} phase=${h.phase ?? '-'} outcome=${h.outcome} started=${h.startedAt ?? '-'} ended=${h.endedAt ?? '-'}${h.durationMs != null ? ` 时长=${Math.round(h.durationMs / 1000)}s` : ''}${h.exit ? ` exit=${h.exit.signal ? `signal=${h.exit.signal}` : `code=${h.exit.code ?? '?'}`}` : ''}${h.archiveReason ? ` archiveReason=${h.archiveReason}` : ''}`),
+        data.stats ? `stats: 已结束 ${data.stats.runs} 批次（正常 ${data.stats.normalStops ?? 0} / 人工停 ${data.stats.stoppedByUser ?? 0} / 崩溃 ${data.stats.crashes ?? 0}${data.stats.dead ? ` 含DEAD ${data.stats.dead}` : ''} / 未知 ${data.stats.unknown ?? 0} / 证据缺失 ${data.stats.evidenceMissing ?? 0}）${data.stats.avgDurationMs != null ? ` 平均时长 ${Math.round(data.stats.avgDurationMs / 1000)}s` : ''}${data.stats.lastCrash ? ` 最近崩溃 ${data.stats.lastCrash.at} run=${data.stats.lastCrash.runId}` : ''}` : null,
         data.note ? `note: ${data.note}` : null,
       ].filter(Boolean).join('\n');
     case 'start-new':
@@ -269,6 +273,7 @@ function renderHuman(command, data) {
       return [
         `已启动（受管）${data.alias} (${data.appId})`,
         `run=${data.runId} pid=${data.pid} status=${data.status}`,
+        data.dependsOn ? `依赖先行：已启动 ${data.dependsOn.started.join(',') || '无'}${data.dependsOn.skipped.length ? `；已在运行 ${data.dependsOn.skipped.join(',')}` : ''}` : null,
         envWarnLine(data.envWarnings),
         data.readiness ? `readiness=${data.readiness.state} waited=${data.readiness.waitedMs}ms evidence=${JSON.stringify(data.readiness.evidence)}` : null,
         data.portEvidence?.forced ? data.portEvidence.note : null,
@@ -278,6 +283,20 @@ function renderHuman(command, data) {
         data.note ?? '',
         '观察：manager ui 可在浏览器查看全部受管应用与日志，并可对本机受管应用执行启动/停止/重启/移除（页面二次确认；Ctrl+C 退出）',
       ].filter(Boolean).join('\n');
+    case 'export':
+      return [
+        `已导出 ${data.appCount} 条登记 → ${data.file}${data.tags ? `（tags=${data.tags.join(',')}）` : ''}`,
+        ...(data.redactedEnv ?? []).map((r) => `  ${r.appId}: 未导出敏感 env 键 ${r.keys.join(',')}`),
+        data.note ?? null,
+      ].filter(Boolean).join('\n');
+    case 'import':
+      return [
+        data.dryRun ? `import 预览：将导入 ${data.wouldImport.length} 条，跳过 ${data.skipped.length} 条` : `已导入 ${data.imported.length} 条登记，跳过 ${data.skipped.length} 条`,
+        ...(data.dryRun ? data.wouldImport : data.imported).map((i) => `  + ${i.alias} (${i.appId})${i.replaces ? ' 覆盖同appId' : ''}${i.evictsAliasOwner ? ` 取代 ${i.evictsAliasOwner}` : ''}`),
+        ...(data.skipped ?? []).map((s) => `  - 跳过 ${s.alias} (${s.appId})：${s.reason}`),
+        ...(data.warnings ?? []).map((w) => `  ! ${w}`),
+        data.note ?? null,
+      ].filter(Boolean).join('\n');
     case 'record-unmanaged':
       return [
         `已记录非受管启动 ${data.alias} (${data.appId}) run=${data.runId}`,
@@ -286,7 +305,7 @@ function renderHuman(command, data) {
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'stop':
-      return `stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.treeKilled?.length ? `；后代已终止 ${data.treeKilled.length} 个` : ''}${data.note ? `；${data.note}` : ''}`;
+      return `${(data.dependentsStopped ?? []).map((s) => `stop 依赖方 ${s.alias}: ${s.result}`).join('\n')}${data.dependentsStopped?.length ? '\n' : ''}stop ${data.alias}: ${data.result}${data.runId ? ` (run=${data.runId})` : ''}${data.treeKilled?.length ? `；后代已终止 ${data.treeKilled.length} 个` : ''}${data.note ? `；${data.note}` : ''}`;
     case 'remove':
       return [
         `已移除登记 ${data.alias} (${data.appId})`,
@@ -319,6 +338,10 @@ function renderHuman(command, data) {
         data.note ?? '',
       ].filter(Boolean).join('\n');
     case 'logs': {
+      if (data.tagMode) {
+        const body = data.lines.map((l) => (l?.alias ? `[${l.alias}]${l.stream === 'stderr' ? '[err]' : ''} ${l.line}` : (l?.line ?? String(l)))).join('\n');
+        return data.note ? `${body}${body ? '\n' : ''}${data.note}` : body;
+      }
       if (data.sources) {
         return [
           `${data.alias} (${data.appId}) 的日志源（* 为当前运行）：`,
@@ -397,7 +420,7 @@ function usageText() {
     '  migrate [--dry-run]               检查或复制旧数据目录，并列出旧 Skill 安装位置；不覆盖、不合并、不卸载',
     '  version                           显示 manager 版本号（--version/-v 同效）',
     '  list [--watch [--interval <ms>]]       列出已登记应用与实时状态（含 tags 与内存列）；--watch 周期输出全应用快照',
-    '  status <alias|appId> [--probe] [--ready] [--resources] [--watch [--interval <ms>]]   单应用详情；',
+    '  status <alias|appId> [--probe] [--ready] [--resources] [--history] [--stats] [--watch [--interval <ms>]]   单应用详情；',
     '       --probe 检测本机 TCP 监听与 pid→实际监听端口（actualPorts/portMismatch），',
     '       --ready 按 desc 的 readyLogPattern/readyUrl 评估业务就绪证据；',
     '       --resources 对当前 RUNNING 受管实例做一次 RSS/CPU 有界采样（命令模式聚合目标后代）；',
@@ -410,7 +433,7 @@ function usageText() {
     '  start <alias|appId> [--force] [--ack-unresolved <runId>] [--wait-ready [--ready-timeout <ms>]] [--dry-run]',
     '       用已保存配置启动（任意目录可用；--dry-run 只解析并打印启动计划，不取锁/不写 registry/runtime/不 spawn）',
     '  start --tag <t> [--force]                  按 tags 批量启动：逐条执行，失败继续、不回滚',
-    '  stop <alias|appId> [--tree] [--grace <ms>]   停止受管实例：默认有界强制终止；',
+    '  stop <alias|appId> [--tree] [--grace <ms>] [--with-dependents]   停止受管实例：默认有界强制终止；--with-dependents 先按反向依赖序停依赖方；',
     '  stop --tag <t> [--tree] [--grace <ms>]       按 tags 批量停止：逐条执行，失败继续、不回滚；',
     '       --tree 连带终止全部后代进程（#39）；--grace 先发优雅信号（Linux SIGTERM /',
     '       Windows taskkill 无 /F），等待 <ms> 仍存活再走强制终止；restart 的 --tree/--grace',
@@ -423,6 +446,8 @@ function usageText() {
     '       [--src <run:…|hint:<hash>|tmp:…>] [--list-sources] [--grep <regex>] [--ignore-case]',
     '       [--context N] [--since <30m|2026-10-25T10:00>]    统一日志源（--src 与 --run/--stream 互斥；both 合并双流；',
     '       grep/context/since 可叠加，--since 按行首时间戳过滤，无时间戳行跳过并提示）',
+    '  logs --tag <t> [--lines N] [--stream stdout|stderr|both] [--follow] [--grep/--context/--since 同上]',
+    '       多应用 current 批次交错合并（[alias] 前缀；无批次应用跳过并注明；JSON 行内附 src 定位符）',
     '  remove <alias|appId> [--ack-unresolved <runId>]   移除登记：须无存活受管实例；运行记录与日志证据保留',
     '  prune [--dry-run] [--apply]                       回收超保留期批次日志/死锁残留/孤儿临时文件（默认 dry-run）',
     '  ui [--port N] [--open]              本地 Web 管理台（默认固定 127.0.0.1:8199，无令牌仅本机；--open 监听成功后用默认浏览器打开 URL，失败仅打印地址；Ctrl+C 退出）',
@@ -431,6 +456,8 @@ function usageText() {
     '内部入口（Skill 调用，不对用户暴露注册 CRUD）：',
     '  start-new --desc <file> [--ack-unresolved <runId>] [--wait-ready [--ready-timeout <ms>]]   首次受管启动：意图→启动→身份采集→登记',
     '  record-unmanaged --desc <file> [--log-hints p1,p2] [--force]   记录非受管启动尝试（同 appId 已有受管登记时须 --force）',
+    '  export --out <file> [--tag <t>]           导出登记清单（含校验和；envRefs 按引用、敏感 env 键不落明文）',
+    '  import --from <file> [--dry-run] [--force] 校验清单后重建登记（只登记不启动；冲突默认跳过，--force 覆盖）',
     '',
     '启动描述 mode 取值：java | jrebel | python | node | proc（其他真实可执行进程）。',
     'desc 可选 tags（字符串数组，最多 16 个）：--tag 按标签大小写不敏感匹配；可重复 --tag 或逗号分隔取并集。',
@@ -504,10 +531,11 @@ async function main() {
         break;
       }
       case 'status': {
-      const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--probe': 'flag', '--ready': 'flag', '--resources': 'flag', '--watch': 'flag', '--interval': 'value' });
+      const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--probe': 'flag', '--ready': 'flag', '--resources': 'flag', '--history': 'flag', '--stats': 'flag', '--watch': 'flag', '--interval': 'value' });
       const interval = parseWatchInterval(opts);
       if (opts.has('--tag')) {
         if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
+        if (opts.has('--history') || opts.has('--stats')) throw usageError('--history/--stats 仅用于单应用 status，不与 --tag 组合');
         const read = () => cmdStatusByTags(ctx, parseTagFilters(opts.getAll('--tag')), opts.has('--probe'), opts.has('--ready'));
         if (interval != null) {
           await runWatch(ctx, command, interval, await read(), read);
@@ -516,7 +544,8 @@ async function main() {
         data = await read();
       } else {
         if (opts.positional.length !== 1) throw usageError('status 需要 <alias|appId> 或 --tag <t>');
-        const read = () => cmdStatus(ctx, opts.positional[0], opts.has('--probe'), opts.has('--ready'), false, opts.has('--resources'));
+        const historyFlags = (opts.has('--history') || opts.has('--stats')) ? { history: opts.has('--history'), stats: opts.has('--stats') } : null;
+        const read = () => cmdStatus(ctx, opts.positional[0], opts.has('--probe'), opts.has('--ready'), false, opts.has('--resources'), historyFlags);
         if (interval != null) {
           await runWatch(ctx, command, interval, await read(), read);
           return;
@@ -553,7 +582,7 @@ async function main() {
         break;
       }
       case 'stop': {
-        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--tree': 'flag', '--grace': 'value' });
+        const opts = parseNamed(ctx.rest, { '--tag': 'multi', '--tree': 'flag', '--grace': 'value', '--with-dependents': 'flag' });
         if (opts.has('--tag')) {
           if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
           data = await cmdStopByTags(ctx, parseTagFilters(opts.getAll('--tag')), stripTagArgs(ctx.rest));
@@ -577,9 +606,11 @@ async function main() {
       }
       case 'remove': data = cmdRemove(ctx, ctx.rest[0]); break;
       case 'prune': data = cmdPrune(ctx); break;
-      case 'logs': data = cmdLogs(ctx, ctx.rest[0]); break;
+      case 'logs': data = cmdLogs(ctx); break;
       case 'start-new': data = await cmdStartNew(ctx); break;
       case 'record-unmanaged': data = cmdRecordUnmanaged(ctx); break;
+      case 'export': data = cmdExport(ctx); break;
+      case 'import': data = cmdImport(ctx); break;
       case 'workbench': data = await cmdWorkbench(ctx, ctx.rest[0], ctx.rest[1]); break;
       case 'ui': await cmdUi(ctx); return; // 前台常驻直到 Ctrl+C，不走 emitOk
       default: throw usageError(`未知命令：${command}\n${usageText()}`);

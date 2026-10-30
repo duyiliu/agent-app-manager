@@ -62,7 +62,7 @@ export const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024; // 单次运行日志的写�
 // desc 键级白名单（#134）：归一化只输出固定字段，拼错键会被静默丢弃导致探针/端口校验失效。
 // x- 前缀为显式扩展豁免通道；allowed 由归一化目标对象的键派生，新增字段不会漏同步。
 const UNMANAGED_DESC_KEYS = new Set([
-  'alias', 'displayName', 'root', 'entry', 'mode', 'cwd', 'expectedPort', 'logHints', 'tags',
+  'alias', 'displayName', 'root', 'entry', 'mode', 'cwd', 'expectedPort', 'expectedPortConfidence', 'logHints', 'tags',
 ]);
 
 function editDistance(a, b) {
@@ -142,6 +142,7 @@ export function loadManagedDesc(file) {
   else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需为 1-65535 的整数');
+  if (d.expectedPortConfidence != null && !['low', 'medium', 'high'].includes(d.expectedPortConfidence)) errs.push('expectedPortConfidence 只能是 low/medium/high');
   if (d.readyLogPattern != null) {
     if (typeof d.readyLogPattern !== 'string' || !d.readyLogPattern) errs.push('readyLogPattern 必须是非空字符串（正则）');
     else { try { new RegExp(d.readyLogPattern); } catch { errs.push('readyLogPattern 不是合法正则'); } }
@@ -155,6 +156,7 @@ export function loadManagedDesc(file) {
   // onExit 是本机可信的回调命令（Skill 写入的 desc 或 ~/.agent-app-manager/config.json），
   // 不来自任何远程/不可信来源；仅限制长度，命令内容按本机信任边界放行。
   if (d.onExit != null && (typeof d.onExit !== 'string' || !d.onExit.trim() || d.onExit.length > 1000)) errs.push('onExit 必须是不超过 1000 字符的非空命令字符串');
+  if (d.dependsOn != null && (!Array.isArray(d.dependsOn) || d.dependsOn.length > 16 || d.dependsOn.some((r) => typeof r !== 'string' || !r.trim()))) errs.push('dependsOn 必须是不超过 16 个非空 alias/appId 字符串的数组');
   const normalized = {
     alias: d.alias,
     displayName: typeof d.displayName === 'string' && d.displayName ? d.displayName : d.alias,
@@ -172,11 +174,13 @@ export function loadManagedDesc(file) {
     envFile: typeof d.envFile === 'string' ? d.envFile : null,
     env: d.env ?? {},
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
+    expectedPortConfidence: ['low', 'medium', 'high'].includes(d.expectedPortConfidence) ? d.expectedPortConfidence : null,
     readyLogPattern: d.readyLogPattern ?? null,
     readyUrl: d.readyUrl ?? null,
     logMaxBytes: d.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     ...normalizeRestartFields(d),
     onExit: d.onExit ?? null,
+    dependsOn: Array.isArray(d.dependsOn) ? d.dependsOn.map((r) => r.trim()).filter(Boolean) : [],
     sourceFingerprint: typeof d.sourceFingerprint === 'string' ? d.sourceFingerprint : null,
     ...Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('x-'))),
   };
@@ -204,6 +208,7 @@ export function loadUnmanagedDesc(file) {
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
   if (d.cwd != null && (typeof d.cwd !== 'string' || !path.isAbsolute(d.cwd))) errs.push('cwd 必须是绝对路径');
   if (d.expectedPort != null && (!Number.isInteger(d.expectedPort) || d.expectedPort < 1 || d.expectedPort > 65535)) errs.push('expectedPort 需 1-65535 的整数');
+  if (d.expectedPortConfidence != null && !['low', 'medium', 'high'].includes(d.expectedPortConfidence)) errs.push('expectedPortConfidence 只能是 low/medium/high');
   if (d.logHints != null && (!Array.isArray(d.logHints) || d.logHints.some((h) => typeof h !== 'string'))) errs.push('logHints 必须是字符串数组');
   validateTags(d.tags, errs);
   errs.push(...unknownKeyErrors(d, UNMANAGED_DESC_KEYS));
@@ -383,10 +388,12 @@ export function upsertApp(reg, appId, desc) {
       command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
       discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
       envFile: desc.envFile ?? null, env: desc.env ?? {},
-      expectedPort: desc.expectedPort ?? null, readyLogPattern: desc.readyLogPattern ?? null,
+      expectedPort: desc.expectedPort ?? null, expectedPortConfidence: desc.expectedPortConfidence ?? null,
+      readyLogPattern: desc.readyLogPattern ?? null,
       readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
       restartPolicy: desc.restartPolicy ?? 'never', maxRestarts: desc.maxRestarts ?? null,
       backoffMs: desc.backoffMs ?? null, onExit: desc.onExit ?? null,
+      dependsOn: desc.dependsOn ?? [],
       sourceFingerprint: desc.sourceFingerprint ?? null,
       ...Object.fromEntries(Object.entries(desc).filter(([k]) => k.startsWith('x-'))),
       configRevision: keep.configRevision + 1, createdAt: keep.createdAt ?? now, updatedAt: now,
@@ -400,11 +407,13 @@ export function upsertApp(reg, appId, desc) {
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
     discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
     envFile: desc.envFile ?? null, env: desc.env ?? {},
-    expectedPort: desc.expectedPort ?? null, readyLogPattern: desc.readyLogPattern ?? null,
+    expectedPort: desc.expectedPort ?? null, expectedPortConfidence: desc.expectedPortConfidence ?? null,
+    readyLogPattern: desc.readyLogPattern ?? null,
     readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     restartPolicy: desc.restartPolicy ?? 'never', maxRestarts: desc.maxRestarts ?? null,
     backoffMs: desc.backoffMs ?? null,
     onExit: desc.onExit ?? null,
+    dependsOn: desc.dependsOn ?? [],
     sourceFingerprint: desc.sourceFingerprint ?? null,
     ...Object.fromEntries(Object.entries(desc).filter(([k]) => k.startsWith('x-'))),
     configRevision: 1, createdAt: now, updatedAt: now,
