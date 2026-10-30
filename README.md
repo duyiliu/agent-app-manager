@@ -1,8 +1,8 @@
-# Project Runner
+# Agent App Manager
 
-[![CI](https://github.com/duyiliu/project-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/duyiliu/project-runner/actions/workflows/ci.yml)
+[![CI](https://github.com/duyiliu/agent-app-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/duyiliu/agent-app-manager/actions/workflows/ci.yml)
 
-**Agent 驱动的本地项目启动与运行管理 Skill。**
+**Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应用，提供跨 Agent、跨会话的生命周期管理、状态监控、日志和 Web 控制台。**
 
 在业务仓库中让 Agent 识别并启动项目、查看日志和验证热加载。受管应用会统一登记，之后可在其他目录或 Agent 会话中查看状态、启停和查日志；无法安全托管的启动会标记为非受管。附带本机 Web 管理台。
 
@@ -12,16 +12,16 @@
 
 ### 1. 安装
 
-**官方安装（固定版本 `v0.5.0`）：**
+**直接安装旧版本（固定版本 `v0.5.0`，不自动迁移数据）：**
 
 ```bash
-npx skills add duyiliu/project-runner#v0.5.0 --skill project-runner -g
+npx skills add duyiliu/agent-app-manager#v0.5.0 --skill project-runner -g
 ```
 
-**国内网络加速安装（第三方 `skills-cn`）：**
+**国内网络加速安装旧版本（第三方 `skills-cn`，不自动迁移数据）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/project-runner#v0.5.0 --skill project-runner -g -y
+npx skills-cn@latest add duyiliu/agent-app-manager#v0.5.0 --skill project-runner -g -y
 ```
 
 两种方式均从本仓库安装相同的 `project-runner` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
@@ -30,13 +30,35 @@ npx skills-cn@latest add duyiliu/project-runner#v0.5.0 --skill project-runner -g
 
 原 `jrebel-start` 已由 `project-runner` 取代。安装不会自动清理旧副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
 
+### 从旧版本升级
+
+`v0.5.0` 是旧版本，仍使用 `~/.project-runner/`，不包含下述自动复制功能。安装支持数据复制的新版本后，按以下顺序升级：
+
+1. 停止旧版管理台及其受管应用，确保旧日志进程退出。
+2. 使用 `npx skills add` 安装支持迁移的新版本。安装本身不会迁移数据；首次运行新版普通管理命令（例如 `list`）时自动检查并尝试复制。
+3. 仅存在旧数据目录时，新版会复制数据到 `~/.agent-app-manager/`；新旧目录都存在时不会自动复制或合并。检查应用登记、配置和历史日志是否正常。
+4. 确认新版可用后，检查是否仍有单独的旧 Skill 副本；如有，按对应运行器的安装位置清理，避免同时加载。旧数据目录可暂留作备份。
+
+复制后的两个数据目录相互独立，后续更改不会同步；不要同时使用新旧版本管理应用。退出通知脚本使用的 `PROJECT_RUNNER_*` 环境变量继续兼容。旧版仍可继续使用旧目录，但不会自动升级到新版本。
+
+支持复制的新版本也可手动检查和重试（将 `<skill-dir>` 替换为新版 Skill 实际安装目录）：
+
+```bash
+node "<skill-dir>/scripts/manager.mjs" migrate --dry-run
+node "<skill-dir>/scripts/manager.mjs" migrate
+```
+
+预览列出旧目录、新目录和发现的活动进程或锁，不写入；正式命令有阻塞时返回错误，处理后可重试。新目录已存在时不会覆盖或合并；该命令只处理默认目录，不接受 `--home`。复制完成后旧目录保留。
+
 ### 2. 让 Agent 启动项目
 
 在目标仓库中直接说：
 
 > 启动这个项目
 
-Agent 会读取项目说明、已有启动脚本和构建配置，识别启动方式。目标明确且可安全托管时，启动并自动登记；存在多个候选或无法托管时，会先说明情况。运行数据保存在 `~/.project-runner/`。
+Agent 会读取项目说明、已有启动脚本和构建配置，识别启动方式。目标明确且可安全托管时，启动并自动登记；存在多个候选或无法托管时，会先说明情况。运行数据保存在 `~/.agent-app-manager/`。
+
+默认数据目录为 `~/.agent-app-manager/`。仅存在旧 `~/.project-runner/` 时，首次普通命令会复制到新目录，完整保留旧目录；新旧目录同时存在时，升级逻辑不做任何操作，正常使用新目录。复制期间仅调整副本中运行记录的数据目录路径，不改旧记录。检测到旧应用、日志进程或锁仍活跃时，暂缓复制并提示，本次继续使用旧目录，停止后下次命令重试。显式 `--home` 和 `start/restart --dry-run` 不触发复制。Skill 名称仍为 `project-runner`。
 
 Java 项目默认 `mode: java`；只有项目已有 JRebel 配置（启动脚本引用 agent、仓库有 `rebel.xml`、构建文件含插件）或你明确要求时，才走 `mode: jrebel` 并检查 standalone JRebel 环境。
 
@@ -167,7 +189,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 ## 数据目录
 
 ```text
-~/.project-runner/                 # Windows: %USERPROFILE%\.project-runner\
+~/.agent-app-manager/                 # Windows: %USERPROFILE%\.agent-app-manager\
 ├── registry.json                  # 已登记应用与可复用启动描述
 ├── runtime/<appId>.json           # 当前 / 最近运行实例与证据
 ├── logs/<appId>/<runId>.*.log     # 受管批次日志

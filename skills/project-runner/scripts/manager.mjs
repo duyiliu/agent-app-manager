@@ -4,7 +4,7 @@
 // - 只管理本 Skill 启动并记录的应用进程（Java/Python/Node/其他真实可执行进程）；外部进程绝不接管或终止。
 // - 受管启停依赖 ps/proc.ps1 的"同句柄身份核验 + 终止"，防 PID 复用误杀。
 // - 启动前先持久化意图（runId/STARTING），中断保留证据并拒绝自动重试。
-// - 数据目录 ~/.project-runner/（或 --home 绝对路径）；注册表/运行记录带 schemaVersion，
+// - 数据目录 ~/.agent-app-manager/（自动复制旧目录，或 --home 绝对路径）；注册表/运行记录带 schemaVersion，
 //   损坏或不兼容版本拒绝覆盖并保留原件；写入均为临时文件 + 原子替换。
 // - stdout 只输出管理结果，不混入被启动应用的日志（--follow 是用户显式要求的例外）。
 //
@@ -13,10 +13,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { EXIT, SCHEMA_VERSION, MANAGER_VERSION, ManagerError } from './lib/constants.mjs';
 import { usageError } from './lib/errors.mjs';
+import { resolveHome, migrateHome } from './lib/home.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
   parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdHealth, sampleAppUsage, cmdStart, cmdStop, cmdRestart,
@@ -60,17 +60,7 @@ function stripTagArgs(args) {
   return out;
 }
 
-function resolveHome(argHome, readOnly = false) {
-  const raw = argHome || path.join(os.homedir(), '.project-runner');
-  if (!path.isAbsolute(raw)) throw usageError(`--home 需要绝对路径：${raw}`);
-  if (readOnly) return fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
-  fs.mkdirSync(raw, { recursive: true });
-  const home = fs.realpathSync.native(raw);
-  for (const d of ['runtime', 'logs', 'locks']) fs.mkdirSync(path.join(home, d), { recursive: true });
-  return home;
-}
-
-// 只读命令绝不创建 home/子目录；数据缺失由数据层按空数据处理。
+// 只读命令不创建空 home/子目录；默认 home 首次升级可复制已有旧目录。
 // status 的 RUNNING→STOPPED 落账仅在 home 已存在且有记录时发生，不受影响。
 const READ_ONLY_COMMANDS = new Set(['doctor', 'port', 'status', 'detect', 'list', 'logs', 'prune', 'version']);
 
@@ -214,6 +204,8 @@ async function runWatch(ctx, command, interval, firstData, produce) {
 function renderHuman(command, data) {
   if (data?.batch) return renderBatch(command, data);
   switch (command) {
+    case 'migrate':
+      return `旧目录：${data.source}\n新目录：${data.target}\n操作：${data.action}（${data.reason}）${data.evidence.length ? `\n阻塞证据：${JSON.stringify(data.evidence)}` : ''}`;
     case 'version':
       return `project-runner manager v${data.version}`;
     case 'list': {
@@ -399,6 +391,7 @@ function usageText() {
     '用法：node manager.mjs [--home <绝对路径>] [--json] <命令> [参数]',
     '',
     '命令：',
+    '  migrate [--dry-run]               检查或复制旧数据目录；不覆盖或合并',
     '  version                           显示 manager 版本号（--version/-v 同效）',
     '  list [--watch [--interval <ms>]]       列出已登记应用与实时状态（含 tags 与内存列）；--watch 周期输出全应用快照',
     '  status <alias|appId> [--probe] [--ready] [--resources] [--watch [--interval <ms>]]   单应用详情；',
@@ -473,7 +466,8 @@ async function main() {
     // 但该分支不取锁/不写 registry/runtime，因此按只读方式解析 home。
     const dryRunReadOnly = (command === 'start' || command === 'restart') && ctx.rest.includes('--dry-run');
     const workbenchReadOnly = command === 'workbench' && ctx.rest[0] === 'status';
-    ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command) || dryRunReadOnly || workbenchReadOnly);
+    if (command !== 'migrate') ctx.home = resolveHome(ctx.home, READ_ONLY_COMMANDS.has(command) || dryRunReadOnly || workbenchReadOnly,
+      { migrate: !dryRunReadOnly });
   } catch (e) {
     const c = command ?? 'cli';
     if (e instanceof ManagerError) { emitErr({ json: false }, c, e); return; }
@@ -488,6 +482,12 @@ async function main() {
       if (ctx.rest.length > 1) throw usageError(`无法识别的参数：${ctx.rest[1]}`);
     }
     switch (command) {
+      case 'migrate': {
+        if (ctx.home) throw usageError('migrate 不支持 --home；仅迁移默认数据目录');
+        if (ctx.rest.some(x => x !== '--dry-run') || ctx.rest.length > 1) throw usageError('migrate 仅支持 --dry-run');
+        data = migrateHome({ dryRun: ctx.rest.includes('--dry-run') });
+        break;
+      }
       case 'version': if (ctx.rest.length) throw usageError(`无法识别的参数：${ctx.rest[0]}`); data = { version: MANAGER_VERSION }; break;
       case 'list': {
         const opts = parseNamed(ctx.rest, { '--watch': 'flag', '--interval': 'value' });

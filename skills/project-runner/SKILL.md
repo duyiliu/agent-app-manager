@@ -1,9 +1,11 @@
 ---
 name: project-runner
-description: Agent 驱动的本地项目启动与运行管理：识别并启动 Java/Spring Boot（含 standalone JRebel）、Python、Node/前端与其他主流栈项目，查看日志并验证热更新；支持跨项目 manager.mjs 管理与本机 Web 管理台（manager ui，默认 http://127.0.0.1:8199）。用户要求启动/重启/停止本地项目、排查 JRebel、查看运行日志或打开管理台时使用。
+description: Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应用，提供跨 Agent、跨会话的生命周期管理、状态监控、日志和 Web 控制台。
 ---
 
-# Project Runner · 多语言项目启动 / Standalone JRebel 流程
+# Agent App Manager
+
+默认数据目录为 `~/.agent-app-manager/`；仅有旧 `~/.project-runner/` 时由 manager 自动复制升级，保留旧目录。旧应用或日志进程仍运行时暂缓复制并提示停止后重试；新旧目录并存时升级逻辑不做任何操作。显式 `--home` 和 `start/restart --dry-run` 不复制。
 
 本 Skill 覆盖 Java/JRebel 单项目流程（第 0–7 节）、非 Java 主流栈（第 1A 节）与跨项目 `manager.mjs` 管理（第 8 节）。只操作**由本 Skill 启动并登记**的应用，不接管外部进程，不声称全机启停。不要要求用户手工提供可从项目中识别的构建工具、主类、classpath、端口或插件信息。Java 默认 `mode: java`；仅当项目已有 JRebel 配置（启动脚本引用 agent、仓库有 `rebel.xml`、构建文件含插件）或用户明确要求时才用 `mode: jrebel`，否则不做 JRebel 环境检查。非 Java 的 `mode` 只是登记标签，受管能力取决于能否解析真实目标进程。
 
