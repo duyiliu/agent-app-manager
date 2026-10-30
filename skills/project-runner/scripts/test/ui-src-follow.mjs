@@ -129,6 +129,7 @@ const documentStub = {
   documentElement: new El('html'),
   body: new El('body'),
   createElement: (t) => { const e = new El(t); allEls.push(e); return e; },
+  createElementNS: (_ns, t) => { const e = new El(t); allEls.push(e); return e; },
   createDocumentFragment: () => new Frag(),
   querySelector: (sel) => sel.startsWith('#') ? elFor(sel.slice(1)) : (allEls.find((e) => matchEl(e, sel)) ?? null),
   querySelectorAll: (sel) => {

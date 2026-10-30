@@ -181,14 +181,18 @@ function drawResChart() {
   const last = resSeries[resSeries.length - 1];
   const now = $('#resChartNow');
   if (now && last) now.replaceChildren(el('span', 'res-chart-value cpu', `CPU ${last.cpu == null ? '不可用' : last.cpu.toFixed(0) + '%'}`), el('span', 'res-chart-value rss', `内存 ${fmtSize(last.rss)}`));
-  if (resSeries.length < 2) {
+  const hint = $('.res-chart-hint');
+  if (hint) hint.textContent = resSeries.length < RES_SERIES_MAX ? `已采样 ${resSeries.length} 次 · 每 5 秒` : '近 5 分钟';
+  if (!resSeries.length) {
     ctx.textAlign = 'center';
     ctx.fillText('采样中…', plotW / 2, padT + plotH / 2);
     return;
   }
   // 留 15% 余量，否则窗口内最大值总贴顶、小波动被放大成满屏起伏。
-  // 按已采集的窗口铺满曲线，起步阶段也能看清趋势；提示同时标明采样次数。
-  const xOf = (i) => (i / Math.max(1, resSeries.length - 1)) * plotW;
+  // 固定五分钟时间尺度，采样间隔不规律时也按实际时间定位。
+  const windowMs = RES_SERIES_MAX * RES_SAMPLE_INTERVAL_MS;
+  const start = last.t - windowMs;
+  const xOf = (i) => Math.max(0, Math.min(1, (resSeries[i].t - start) / windowMs)) * plotW;
   const yOfCpu = (v) => padT + plotH * (1 - Math.min(v, maxCpu) / maxCpu);
   const yOfRss = (v) => padT + plotH * (1 - v / maxRss);
   const drawLine = (pick, yOf, color) => {
@@ -196,11 +200,12 @@ function drawResChart() {
     let drawing = false;
     resSeries.forEach((p, i) => { const v = pick(p); if (v == null) { drawing = false; return; } const x = xOf(i), y = yOf(v); if (drawing) ctx.lineTo(x, y); else ctx.moveTo(x, y); drawing = true; });
     ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.stroke();
+    if (resSeries.length === 1 && pick(resSeries[0]) != null) {
+      ctx.beginPath(); ctx.arc(xOf(0), yOf(pick(resSeries[0])), 2, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    }
   };
   drawLine(p => p.cpu, yOfCpu, '#ff8a30');
   drawLine(p => p.rss, yOfRss, '#4099ff');
-  const hint = $('.res-chart-hint');
-  if (hint) hint.textContent = resSeries.length < RES_SERIES_MAX ? `已采样 ${resSeries.length} 次 · 每 5 秒` : '近 5 分钟';
 }
 
 // 展开详情时那次实时采样的缓存：轮询重绘（不带 resources）时继续显示它，避免数字来回跳。
@@ -389,7 +394,21 @@ function renderApps() {
           const title = actualPorts.length && a.expectedPort != null && a.expectedPort !== port
             ? `实际监听端口 ${port}（配置 expectedPort=${a.expectedPort}）`
             : '新标签页打开该应用端口';
-          meta.appendChild(portAnchor(port, title));
+          const portInfo = el('span', 'app-port');
+          portInfo.appendChild(el('span', null, ':' + port));
+          const link = portAnchor(port, title);
+          link.classList.add('port-icon');
+          link.textContent = '';
+          const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          icon.setAttribute('viewBox', '0 0 16 16');
+          icon.setAttribute('aria-hidden', 'true');
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', 'M7 3H3.5v9.5H13V9M9 3h4v4M13 3 7 9');
+          icon.appendChild(path);
+          link.appendChild(icon);
+          link.setAttribute('aria-label', `在新标签页打开端口 ${port}`);
+          portInfo.appendChild(link);
+          meta.appendChild(portInfo);
         }
       } else meta.appendChild(el('span', null, ':' + (a.expectedPort ?? shownPorts[0])));
     }
@@ -1641,6 +1660,62 @@ function applyTreeFilter() {
 }
 $('#fdFilter').addEventListener('input', applyTreeFilter);
 $('#fdFilterClear').addEventListener('click', () => { $('#fdFilter').value = ''; applyTreeFilter(); $('#fdFilter').focus(); });
+
+// 左侧宽度只影响桌面布局，记住用户调整；保留右侧内容空间。
+const sidebarResize = $('#sidebarResize');
+if (sidebarResize) {
+  const layout = document.querySelector('.layout');
+  const setWidth = (value, persist = false) => {
+    const max = Math.max(200, Math.min(600, layout.clientWidth - 360));
+    const width = Math.round(Math.max(200, Math.min(max, value)));
+    layout.style.setProperty('--sidebar-width', `${width}px`);
+    sidebarResize.setAttribute('aria-valuenow', String(width));
+    if (persist) { try { localStorage.setItem('pr-ui-sidebar-width', String(width)); } catch {} }
+  };
+  try { const saved = Number(localStorage.getItem('pr-ui-sidebar-width')); if (saved > 0) setWidth(saved); } catch {}
+  sidebarResize.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    sidebarResize.setPointerCapture(e.pointerId);
+    const move = (event) => setWidth(event.clientX - layout.getBoundingClientRect().left, true);
+    const end = () => { sidebarResize.removeEventListener('pointermove', move); sidebarResize.removeEventListener('pointerup', end); sidebarResize.removeEventListener('pointercancel', end); };
+    sidebarResize.addEventListener('pointermove', move);
+    sidebarResize.addEventListener('pointerup', end);
+    sidebarResize.addEventListener('pointercancel', end);
+  });
+  sidebarResize.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    setWidth(Number(sidebarResize.getAttribute('aria-valuenow')) + (e.key === 'ArrowRight' ? 10 : -10), true);
+  });
+}
+
+const drawerResize = $('#drawerResize');
+if (drawerResize) {
+  const drawer = $('#fileDrawer');
+  const setDrawerWidth = (value, persist = false) => {
+    const width = Math.round(Math.max(280, Math.min(1200, window.innerWidth * 0.92, value)));
+    drawer.style.setProperty('--drawer-width', `${width}px`);
+    drawerResize.setAttribute('aria-valuenow', String(width));
+    if (persist) { try { localStorage.setItem('pr-ui-drawer-width', String(width)); } catch {} }
+  };
+  try { const saved = Number(localStorage.getItem('pr-ui-drawer-width')); if (saved > 0) setDrawerWidth(saved); } catch {}
+  drawerResize.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    drawerResize.setPointerCapture(e.pointerId);
+    const move = (event) => setDrawerWidth(window.innerWidth - event.clientX, true);
+    const end = () => { drawerResize.removeEventListener('pointermove', move); drawerResize.removeEventListener('pointerup', end); drawerResize.removeEventListener('pointercancel', end); };
+    drawerResize.addEventListener('pointermove', move);
+    drawerResize.addEventListener('pointerup', end);
+    drawerResize.addEventListener('pointercancel', end);
+  });
+  drawerResize.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    setDrawerWidth(Number(drawerResize.getAttribute('aria-valuenow')) + (e.key === 'ArrowLeft' ? 10 : -10), true);
+  });
+}
 
 // ---------- 启动 ----------
 api('/api/meta').then((m) => { if (m?.version) $('#verBadge').textContent = `本地 · v${m.version}`; }).catch(() => {});

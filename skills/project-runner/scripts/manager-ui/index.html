@@ -198,7 +198,10 @@ select option { background:var(--panel-2); color:var(--text) }
   flex:1;
   min-height:0;
   display:grid;
-  grid-template-columns:292px minmax(0,1fr)}
+  grid-template-columns:var(--sidebar-width, 292px) minmax(0,1fr)}
+ .layout > aside { position:relative; min-width:0 }
+.sidebar-resize { position:absolute; z-index:2; top:0; right:-4px; bottom:0; width:8px; cursor:col-resize; touch-action:none }
+.sidebar-resize:hover, .sidebar-resize:focus-visible { background:var(--line-strong); outline:none }
 aside {
   min-height:0;
   display:flex;
@@ -222,6 +225,11 @@ aside {
 .app-search input:focus { border-color:var(--line-strong) }
 .port-link { color:var(--accent); text-decoration:none }
 .port-link:hover { text-decoration:underline }
+.app-port { display:inline-flex; align-items:center; gap:3px }
+.port-icon { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; color:var(--text-faint) }
+.port-icon svg { width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; stroke-linejoin:round }
+.port-icon:hover { color:var(--text); text-decoration:none }
+.port-icon:focus-visible { color:var(--text); outline:1px solid var(--text-dim); outline-offset:1px }
 .app-card {
   display:block;
   width:100%;
@@ -623,13 +631,15 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .file-drawer {
   position:fixed;
   top:0; right:0; bottom:0;
-  width:min(460px,92vw);
+  width:min(var(--drawer-width, 460px), 92vw);
   display:flex;
   flex-direction:column;
   background:var(--panel);
   border-left:1px solid var(--line);
   box-shadow:var(--shadow);
   z-index:30}
+.drawer-resize { position:absolute; top:0; bottom:0; left:-4px; width:8px; cursor:col-resize; touch-action:none }
+.drawer-resize:hover, .drawer-resize:focus-visible { background:var(--line-strong); outline:none }
 .fd-head { display:flex; align-items:center; gap:8px; height:46px; padding:0 12px; border-bottom:1px solid var(--line) }
 .fd-head strong { font-size:12.5px; color:var(--text) }
 .fd-head .badge { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:180px }
@@ -656,6 +666,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 
 @media(max-width:860px) {
   .layout { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(150px,38%) minmax(0,1fr) }
+  .sidebar-resize { display:none }
   aside { border-right:0; border-bottom:1px solid var(--line) }
   #detail { max-height:none; flex:1 }
   .log-panel { flex:0 0 44% }
@@ -688,6 +699,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 <div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">
   <aside aria-label="应用列表">
+    <div id="sidebarResize" class="sidebar-resize" role="separator" tabindex="0" aria-label="调整应用列表宽度" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="600" aria-valuenow="292"></div>
     <div class="panel-title">
       <div class="panel-heading"><span class="panel-kicker">Applications</span><strong>应用</strong></div>
       <span class="badge" id="appCount">0</span>
@@ -722,6 +734,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   </section>
 </main>
 <aside id="fileDrawer" class="file-drawer" hidden aria-label="项目文件">
+  <div id="drawerResize" class="drawer-resize" role="separator" tabindex="0" aria-label="调整文件抽屉宽度" aria-orientation="vertical" aria-valuemin="280" aria-valuemax="1200" aria-valuenow="460"></div>
   <div class="fd-head">
     <strong>项目文件</strong>
     <span class="badge" id="fdRoot"></span>
