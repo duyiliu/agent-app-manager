@@ -1,4 +1,4 @@
-"""Project Runner 的本地 Flask 示例。"""
+"""Agent App Manager 的本地 Flask 示例。"""
 import logging
 import os
 from datetime import datetime, timezone
@@ -16,7 +16,7 @@ def health():
 
 @app.get('/api/hello')
 def hello():
-    return jsonify(message=f"Hello, {request.args.get('name', 'Project Runner')}!", version='v1')
+    return jsonify(message=f"Hello, {request.args.get('name', 'Agent App Manager')}!", version='v1')
 
 
 @app.post('/api/logs')

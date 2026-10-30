@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// project-runner 跨项目管理器（P0）
+// agent-app-manager 跨项目管理器（P0）
 // 设计基线：docs/design.md v2。要点：
 // - 只管理本 Skill 启动并记录的应用进程（Java/Python/Node/其他真实可执行进程）；外部进程绝不接管或终止。
 // - 受管启停依赖 ps/proc.ps1 的"同句柄身份核验 + 终止"，防 PID 复用误杀。
@@ -207,7 +207,7 @@ function renderHuman(command, data) {
     case 'migrate':
       return `旧目录：${data.source}\n新目录：${data.target}\n操作：${data.action}（${data.reason}）${data.evidence.length ? `\n阻塞证据：${JSON.stringify(data.evidence)}` : ''}`;
     case 'version':
-      return `project-runner manager v${data.version}`;
+      return `agent-app-manager manager v${data.version}`;
     case 'list': {
       if (!data.apps?.length) return data.note ?? '（空）';
       const exitText = (a) => a.exit
@@ -454,7 +454,7 @@ export { resolveHome, cmdList, cmdStatus, listRuns, resolveLogFile, listSources,
 async function main() {
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
-    process.stderr.write(`project-runner manager 需要 Node.js 20 或更高版本；当前版本：${process.versions.node}\n`);
+    process.stderr.write(`agent-app-manager manager 需要 Node.js 20 或更高版本；当前版本：${process.versions.node}\n`);
     process.exit(1);
   }
   let ctx;

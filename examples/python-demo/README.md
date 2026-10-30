@@ -1,6 +1,6 @@
 # Python 测试项目
 
-用于验证 Project Runner 对 Flask 项目的识别、受管启动、就绪检查和日志查看。只监听 `127.0.0.1:18274`，不依赖数据库或其他服务，不用于生产。
+用于验证 Agent App Manager 对 Flask 项目的识别、受管启动、就绪检查和日志查看。只监听 `127.0.0.1:18274`，不依赖数据库或其他服务，不用于生产。
 
 ## 安装与启动
 
@@ -24,7 +24,7 @@ Linux：
 .venv/bin/python app.py
 ```
 
-也可以让已安装 `project-runner` 的 Agent 启动 `examples/python-demo`，建议别名 `python-demo`。请按本 README 使用虚拟环境中的真实 Python 可执行文件和 `app.py`，设置预期端口 `18274` 及就绪地址 `http://127.0.0.1:18274/api/health`。`detect` 返回的 Flask 命令是候选，需要按此项目端口调整。
+也可以让已安装 `agent-app-manager` 的 Agent 启动 `examples/python-demo`，建议别名 `python-demo`。请按本 README 使用虚拟环境中的真实 Python 可执行文件和 `app.py`，设置预期端口 `18274` 及就绪地址 `http://127.0.0.1:18274/api/health`。`detect` 返回的 Flask 命令是候选，需要按此项目端口调整。
 
 手工启动后按 Ctrl+C 退出；受管启动后可通过 `manager ui` 或 `manager status/logs/stop python-demo` 管理。不要同时启动两份。
 

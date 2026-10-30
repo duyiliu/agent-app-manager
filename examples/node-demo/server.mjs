@@ -11,7 +11,7 @@ http.createServer((req, res) => {
     return send(res, 200, { status: 'UP', application: 'node-demo', pid: process.pid, time: new Date().toISOString() });
   }
   if (req.method === 'GET' && url.pathname === '/api/hello') {
-    return send(res, 200, { message: `Hello, ${url.searchParams.get('name') ?? 'Project Runner'}!`, version: 'v1' });
+    return send(res, 200, { message: `Hello, ${url.searchParams.get('name') ?? 'Agent App Manager'}!`, version: 'v1' });
   }
   if (req.method === 'POST' && url.pathname === '/api/logs') {
     const level = url.searchParams.get('level') ?? 'INFO';

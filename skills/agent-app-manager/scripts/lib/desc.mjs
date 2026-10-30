@@ -152,7 +152,7 @@ export function loadManagedDesc(file) {
   }
   if (d.logMaxBytes != null && (!Number.isSafeInteger(d.logMaxBytes) || d.logMaxBytes < 1024 || d.logMaxBytes > 1024 * 1024 * 1024)) errs.push('logMaxBytes 需为 1024 到 1073741824 的整数');
   validateRestartFields(d, errs);
-  // onExit 是本机可信的回调命令（Skill 写入的 desc 或 ~/.project-runner/config.json），
+  // onExit 是本机可信的回调命令（Skill 写入的 desc 或 ~/.agent-app-manager/config.json），
   // 不来自任何远程/不可信来源；仅限制长度，命令内容按本机信任边界放行。
   if (d.onExit != null && (typeof d.onExit !== 'string' || !d.onExit.trim() || d.onExit.length > 1000)) errs.push('onExit 必须是不超过 1000 字符的非空命令字符串');
   const normalized = {

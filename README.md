@@ -12,23 +12,23 @@
 
 ### 1. 安装
 
-**官方安装（固定版本 `v0.7.0`）：**
+**官方安装（固定版本 `v0.8.0`）：**
 
 ```bash
-npx skills add duyiliu/agent-app-manager#v0.7.0 --skill project-runner -g
+npx skills add duyiliu/agent-app-manager#v0.8.0 --skill agent-app-manager -g
 ```
 
 **国内网络加速安装（第三方 `skills-cn`）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/agent-app-manager#v0.7.0 --skill project-runner -g -y
+npx skills-cn@latest add duyiliu/agent-app-manager#v0.8.0 --skill agent-app-manager -g -y
 ```
 
-两种方式均从本仓库安装相同的 `project-runner` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
+两种方式均从本仓库安装相同的 `agent-app-manager` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
 
-安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对；去掉 `#vX.Y.Z` 则安装 `main` 最新提交，升级后重跑安装命令即可。
+安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对；升级后重跑安装命令即可。
 
-原 `jrebel-start` 已由 `project-runner` 取代。安装不会自动清理旧副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
+原 `project-runner` Skill 已更名为 `agent-app-manager`。安装不会自动清理旧副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
 
 ### 从旧版本升级
 
@@ -58,7 +58,7 @@ node "<skill-dir>/scripts/manager.mjs" migrate
 
 Agent 会读取项目说明、已有启动脚本和构建配置，识别启动方式。目标明确且可安全托管时，启动并自动登记；存在多个候选或无法托管时，会先说明情况。运行数据保存在 `~/.agent-app-manager/`。
 
-默认数据目录为 `~/.agent-app-manager/`。仅存在旧 `~/.project-runner/` 时，首次普通命令会复制到新目录，完整保留旧目录；新旧目录同时存在时，升级逻辑不做任何操作，正常使用新目录。复制期间仅调整副本中运行记录的数据目录路径，不改旧记录。检测到旧应用、日志进程或锁仍活跃时，暂缓复制并提示，本次继续使用旧目录，停止后下次命令重试。显式 `--home` 和 `start/restart --dry-run` 不触发复制。Skill 名称仍为 `project-runner`。
+默认数据目录为 `~/.agent-app-manager/`。仅存在旧 `~/.project-runner/` 时，首次普通命令会复制到新目录，完整保留旧目录；新旧目录同时存在时，升级逻辑不做任何操作，正常使用新目录。复制期间仅调整副本中运行记录的数据目录路径，不改旧记录。检测到旧应用、日志进程或锁仍活跃时，暂缓复制并提示，本次继续使用旧目录，停止后下次命令重试。显式 `--home` 和 `start/restart --dry-run` 不触发复制。Skill 名称为 `agent-app-manager`。
 
 Java 项目默认 `mode: java`；只有项目已有 JRebel 配置（启动脚本引用 agent、仓库有 `rebel.xml`、构建文件含插件）或你明确要求时，才走 `mode: jrebel` 并检查 standalone JRebel 环境。
 
@@ -77,7 +77,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 在应用详情中，若项目包含 scenario-test 接入目录（默认 `scenario-test`，缺失时自动发现项目内自定义目录）且包含配置、`index.html` 和项目内 CLI，可点击「打开场景测试」启动并打开独立工作台；再次点击会复用，停止工作台不影响业务应用。工作台使用独立的本地端口，新标签被拦截时可点击显示的地址。打开工作台不会自动执行场景。
 
-完整参数见 [manager 参考](skills/project-runner/references/manager.md)，Agent 侧规程见 [SKILL.md](skills/project-runner/SKILL.md) 第 8 节。
+完整参数见 [manager 参考](skills/agent-app-manager/references/manager.md)，Agent 侧规程见 [SKILL.md](skills/agent-app-manager/SKILL.md) 第 8 节。
 
 ## 能力
 
@@ -207,7 +207,7 @@ docs/
 ├── images/                        # README 管理台截图
 ├── ops/                           # 运维记录
 └── verification/                  # 验收证据
-skills/project-runner/
+skills/agent-app-manager/
 ├── SKILL.md                       # Agent 路由与通用边界
 ├── references/                    # 按需加载：java / python / node / other-stacks / manager / jrebel-setup
 └── scripts/

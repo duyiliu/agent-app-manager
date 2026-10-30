@@ -1,5 +1,5 @@
 ---
-name: project-runner
+name: agent-app-manager
 description: Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应用，提供跨 Agent、跨会话的生命周期管理、状态监控、日志和 Web 控制台。
 ---
 
@@ -89,7 +89,7 @@ Standalone JRebel 不依赖 IDE 插件；安装路径、`REBEL_HOME`/`REBEL_BASE
 - Java/JRebel 的 banner、`Reloading class`、mapper XML 与 `jrebel.log` 位置见 [Java 启动参考](references/java.md) 第 3 节；`mode: java` 没有热加载，验证方式只能是重新编译并重启，重启前说明服务中断影响。
 - **统一日志网页（manager ui）**：本 Skill 执行任何受管操作（detect/start-new/start/stop/restart/record-unmanaged）时，先后台确保 ui 已运行并把固定地址 `http://127.0.0.1:8199` 交给用户，不等用户询问：
   ```bash
-  node "<当前实际安装的 project-runner Skill 目录>/scripts/manager.mjs" ui [--port N]
+  node "<当前实际安装的 agent-app-manager Skill 目录>/scripts/manager.mjs" ui [--port N]
   ```
   该命令前台常驻，须以 detached/后台方式拉起；退出码 3 表示已有实例，直接复用地址；启动前确认 `node --version` 可用。日志源、文件树、生命周期按钮、`?app=` 直达与安全边界详见 [manager 参考](references/manager.md) 第 7 节。
 - 无需网页时可跟踪最新日志：

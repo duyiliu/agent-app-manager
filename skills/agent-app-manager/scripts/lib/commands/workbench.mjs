@@ -22,7 +22,7 @@ function within(root, file) {
 // scenario-test 接入目录的标记文件：config + 工作台页面 + 项目内 CLI 运行时副本。
 const SCENARIO_FILES = ['scenario.config.js', 'index.html', path.join('.scenario-test', 'scenario-test-cli.cjs')];
 const scenarioExists = (dir) => SCENARIO_FILES.map((f) => fs.existsSync(path.join(dir, f)));
-// 自定义目录发现：project-runner 无从预知项目的 scenario-test 目录，只能靠扫描。
+// 自定义目录发现：agent-app-manager 无从预知项目的 scenario-test 目录，只能靠扫描。
 // 为控制性能：默认 `scenario-test` 存在时零扫描；缺失时才浅扫描项目根两层
 // （跳过常见非业务目录），并把结果缓存到 home 缓存文件（默认 5 分钟有效），
 // 避免详情轮询反复遍历同一项目。候选须命中 scenario-test 特有标记

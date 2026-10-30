@@ -1,4 +1,4 @@
-// project-runner 本地 Web 管理台服务（design.md §2.2 / AC08）。
+// agent-app-manager 本地 Web 管理台服务（design.md §2.2 / AC08）。
 // 仅 127.0.0.1 + Host 校验，无令牌（本机可信用户）；GET 全部只读，启停仅 POST /api/lifecycle
 // （start|stop|restart，复用 CLI 同一实现）。数据层全部经 api 注入复用 manager.mjs，
 // 本文件不实现任何业务逻辑。前台常驻直到 Ctrl+C，无守护、无自动重启。
@@ -169,11 +169,11 @@ function openInBrowser(url) {
       child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
     }
     child.on('error', () => {
-      process.stdout.write(`[project-runner] 自动打开浏览器失败，请手动访问上方地址\n`);
+      process.stdout.write(`[agent-app-manager] 自动打开浏览器失败，请手动访问上方地址\n`);
     });
     child.unref();
   } catch {
-    process.stdout.write(`[project-runner] 自动打开浏览器失败，请手动访问上方地址\n`);
+    process.stdout.write(`[agent-app-manager] 自动打开浏览器失败，请手动访问上方地址\n`);
   }
 }
 
@@ -392,7 +392,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
 
   const server = http.createServer(handle);
   // 端口占用由 manager.mjs 统一给出可操作提示，这里只记录其他运行期错误
-  server.on('error', (e) => { if (e.code !== 'EADDRINUSE') console.error(`[project-runner ui] ${e.message}`); });
+  server.on('error', (e) => { if (e.code !== 'EADDRINUSE') console.error(`[agent-app-manager ui] ${e.message}`); });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {
@@ -404,7 +404,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   const uiUrl = `http://127.0.0.1:${boundPort}/`;
   process.stdout.write([
     '',
-    `[project-runner] 运行管理台: ${uiUrl}`,
+    `[agent-app-manager] 运行管理台: ${uiUrl}`,
     `  数据目录: ${home}`,
     '  仅监听 127.0.0.1，供本机可信用户使用；页面可启停受管应用且日志可能含敏感信息，勿对外转发。',
     '  Ctrl+C 退出（无常驻服务，退出即停止）。',

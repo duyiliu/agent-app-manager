@@ -73,11 +73,11 @@ function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = nu
       try { j = JSON.parse(out); } catch { /* stdout 非 JSON：走通用错误 */ }
       // prepareLaunchEnv 在任何启动副作用前把机密 env 告警写到 stderr；
       // 成功响应已有结构化告警，失败时也把这一行（不含值）附到错误里，避免 UI 丢失。
-      const envWarningLine = String(err).split(/\r?\n/).find((line) => line.startsWith('[project-runner] 警告：'))?.trim() ?? null;
+      const envWarningLine = String(err).split(/\r?\n/).find((line) => line.startsWith('[agent-app-manager] 警告：'))?.trim() ?? null;
       if (j?.ok === true) {
         const data = j.data ?? {};
         if (envWarningLine && !data.envWarning) {
-          data.envWarning = envWarningLine.replace(/^\[project-runner\]\s*/, '');
+          data.envWarning = envWarningLine.replace(/^\[agent-app-manager\]\s*/, '');
         }
         return resolve(data);
       }

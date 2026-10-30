@@ -22,7 +22,7 @@ let selfIdentity = null;
 // 不静默降级成不可靠的探针。
 function ensureSupported() {
   if (!IS_WIN && !IS_LINUX) {
-    throw new ManagerError('PLATFORM_UNSUPPORTED', `project-runner 当前仅支持 Windows 与 Linux；当前平台：${process.platform}`, EXIT.DEPENDENCY);
+    throw new ManagerError('PLATFORM_UNSUPPORTED', `agent-app-manager 当前仅支持 Windows 与 Linux；当前平台：${process.platform}`, EXIT.DEPENDENCY);
   }
 }
 

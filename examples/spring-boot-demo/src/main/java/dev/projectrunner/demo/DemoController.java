@@ -20,12 +20,12 @@ public class DemoController {
 
     @GetMapping("/health")
     public Map<String, Object> health() {
-        return Map.of("status", "UP", "application", "project-runner-demo",
+        return Map.of("status", "UP", "application", "agent-app-manager-demo",
                 "pid", ProcessHandle.current().pid(), "time", Instant.now().toString());
     }
 
     @GetMapping("/hello")
-    public Map<String, String> hello(@RequestParam(defaultValue = "Project Runner") String name) {
+    public Map<String, String> hello(@RequestParam(defaultValue = "Agent App Manager") String name) {
         return Map.of("message", "Hello, " + name + "!", "version", "v2");
     }
 

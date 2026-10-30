@@ -1,6 +1,6 @@
 # Spring Boot 测试项目
 
-供 Project Runner 验证项目识别、受管启动、全局管理台日志及 JRebel 热加载。独立 Maven 项目，使用 Java 17、Spring Boot 3.3.5，不依赖数据库、Redis、Nacos 或其他业务服务。
+供 Agent App Manager 验证项目识别、受管启动、全局管理台日志及 JRebel 热加载。独立 Maven 项目，使用 Java 17、Spring Boot 3.3.5，不依赖数据库、Redis、Nacos 或其他业务服务。
 
 默认只监听 `127.0.0.1:18273`，不对局域网开放。不要用于生产。
 
@@ -12,7 +12,7 @@
 mvn -B -q -f examples/spring-boot-demo/pom.xml compile dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=target/dependency
 ```
 
-然后让加载了 `project-runner` Skill 的 Agent 启动 `examples/spring-boot-demo`，建议别名 `runner-demo`。启动识别信息：
+然后让加载了 `agent-app-manager` Skill 的 Agent 启动 `examples/spring-boot-demo`，建议别名 `runner-demo`。启动识别信息：
 
 - `root` / `cwd`：本项目目录的绝对路径。
 - 主类：`dev.projectrunner.demo.DemoApplication`。
@@ -28,10 +28,10 @@ mvn -B -q -f examples/spring-boot-demo/pom.xml compile dependency:copy-dependenc
 以下命令从仓库根目录执行；全局安装 Skill 时可将脚本路径替换为实际安装位置：
 
 ```bash
-node skills/project-runner/scripts/manager.mjs start runner-demo
-node skills/project-runner/scripts/manager.mjs status runner-demo
-node skills/project-runner/scripts/manager.mjs logs runner-demo --lines 80
-node skills/project-runner/scripts/manager.mjs stop runner-demo
+node skills/agent-app-manager/scripts/manager.mjs start runner-demo
+node skills/agent-app-manager/scripts/manager.mjs status runner-demo
+node skills/agent-app-manager/scripts/manager.mjs logs runner-demo --lines 80
+node skills/agent-app-manager/scripts/manager.mjs stop runner-demo
 ```
 
 需要观察日志与项目文件时另运行 `manager ui`：默认固定 `http://127.0.0.1:8199`，无令牌仅本机可访问，页面可显式二次确认启停/移除受管应用。`stop` 是身份核验后的强制终止，不承诺优雅关机。

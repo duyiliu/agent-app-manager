@@ -1,4 +1,4 @@
-# project-runner 进程身份核验与终止适配（PowerShell 7）。
+# agent-app-manager 进程身份核验与终止适配（PowerShell 7）。
 # 设计基线：docs/design.md v2 —— 身份核验与终止必须针对同一进程句柄，防止"先查 PID 再按 PID 杀"的复用竞态。
 # 输出：单行 JSON。result ∈ ok | mismatch | exited | notfound | terminated | terminateTimeout | error。
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。

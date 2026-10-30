@@ -246,7 +246,7 @@ function notifyExit(runId, status, note) {
   // 已挪到首次点击页面时询问（见事件区）。
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(`project-runner · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
+      new Notification(`agent-app-manager · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
     }
   } catch { /* 通知不可用时仅保留页面横幅 */ }
 }
@@ -464,7 +464,7 @@ function copyButton(text) {
 }
 function updateTitle() {
   const running = appsCache.filter(a => a.status === 'RUNNING').length;
-  document.title = (running > 0 ? `(${running}) ` : '') + 'Project Runner · 运行管理台';
+  document.title = (running > 0 ? `(${running}) ` : '') + 'Agent App Manager · 运行管理台';
 }
 async function loadApps() {
   if (fatal || (paused && !manualRefresh) || appsBusy) return;

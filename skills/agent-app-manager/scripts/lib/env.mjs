@@ -160,7 +160,7 @@ export function prepareLaunchEnv(app) {
   const warnings = envSecretWarnings(app.env ?? {});
   // 告警必须在 registry 写入/进程拉起等副作用之前输出；即使随后环境校验失败或
   // 进程拉不起来，用户也已看到“改用 envRefs/envFile”的提示。
-  if (warnings.length) process.stderr.write(`[project-runner] 警告：${envWarningMessage(warnings)}\n`);
+  if (warnings.length) process.stderr.write(`[agent-app-manager] 警告：${envWarningMessage(warnings)}\n`);
   const envRefs = Array.isArray(app.envRefs) ? app.envRefs : [];
   const fileEnv = app.envFile ? readEnvFile(app.envFile, app.cwd) : {};
   const env = mergeEnvLayers(process.env, fileEnv, app.env ?? {});

@@ -153,7 +153,7 @@ function persistExitState() {
 function supervisorLog(message) {
   if (errFd == null) return;
   try {
-    const line = `[project-runner] ${message}\n`;
+    const line = `[agent-app-manager] ${message}\n`;
     fs.writeSync(errFd, line);
     errSize += Buffer.byteLength(line);
   } catch { /* logging failure must never affect supervision/lifecycle */ }
@@ -341,7 +341,7 @@ function spawnTarget({ initial, attempt = null }) {
     childSpawnFailed = true;
     try {
       fs.writeFileSync(config.pidFile, '0');
-      const line = `[project-runner] target spawn failed: ${err.code ?? ''} ${err.message} (file=${file})\n`;
+      const line = `[agent-app-manager] target spawn failed: ${err.code ?? ''} ${err.message} (file=${file})\n`;
       fs.writeSync(errFd, line);
       errSize += Buffer.byteLength(line);
     } catch { /* 尽力而为 */ }

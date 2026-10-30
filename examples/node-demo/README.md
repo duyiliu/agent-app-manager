@@ -1,6 +1,6 @@
 # Node.js 测试项目
 
-用于验证 Project Runner 对 Node.js 项目的识别、受管启动、就绪检查和日志查看。只监听 `127.0.0.1:18275`，使用 Node.js 20+ 内置模块，无需安装依赖，不用于生产。
+用于验证 Agent App Manager 对 Node.js 项目的识别、受管启动、就绪检查和日志查看。只监听 `127.0.0.1:18275`，使用 Node.js 20+ 内置模块，无需安装依赖，不用于生产。
 
 ## 启动
 
@@ -10,7 +10,7 @@
 npm start
 ```
 
-也可以让已安装 `project-runner` 的 Agent 启动 `examples/node-demo`，建议别名 `node-demo`。可直接托管真实 Node 可执行文件并运行 `server.mjs`，设置预期端口 `18275` 及就绪地址 `http://127.0.0.1:18275/api/health`；`detect` 也可识别 `npm start` 对应的命令候选。
+也可以让已安装 `agent-app-manager` 的 Agent 启动 `examples/node-demo`，建议别名 `node-demo`。可直接托管真实 Node 可执行文件并运行 `server.mjs`，设置预期端口 `18275` 及就绪地址 `http://127.0.0.1:18275/api/health`；`detect` 也可识别 `npm start` 对应的命令候选。
 
 手工启动后按 Ctrl+C 退出；受管启动后可通过 `manager ui` 或 `manager status/logs/stop node-demo` 管理。不要同时启动两份。
 

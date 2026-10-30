@@ -1,5 +1,5 @@
 // 受管进程退出通知钩子（issue #135）：desc `onExit`（登记进注册表）或全局
-// `~/.project-runner/config.json` 的 `onExit` 配置的回调命令。触发路径有二：
+// `~/.agent-app-manager/config.json` 的 `onExit` 配置的回调命令。触发路径有二：
 // ① 查询首次观测到 RUNNING→已退出的落账路径执行一次（运行记录
 // `notifiedAt`/`notifyResult` 留证）；② restartPolicy=on-failure 的监督型应用，
 // 由 log-writer 在监督 finalize（不重启/clean-exit、重启耗尽 DEAD）时认领执行一次，

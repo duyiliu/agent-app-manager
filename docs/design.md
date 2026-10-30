@@ -7,7 +7,7 @@ Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应�
 > **v2.3（2026-10-21，多语言）**：受管范围由 JVM 推广到任意真实可执行进程——desc `mode` 扩展为 `java|jrebel|python|node|proc`；`resolveExe` 收紧为"必须解析为 .exe/.com 真实可执行文件"，拒绝 `.cmd`/`.bat`/`.ps1` 包装与 `Microsoft\WindowsApps` 应用执行别名 reparse point（npm/pnpm 等 shim 场景须先解析到底层 `node <entry>.js`）；`.tmp` 兼容日志新增 `runner-local-*` 通用名。生命周期、未结记录、锁与 ui 机制全部不变；冒烟见 `scripts/test/runtime-smoke.mjs`。
 > **v2.4（2026-10-21，命令模式）**：desc 新增 `command` + `expectedImage`（+可选 `discoverTimeoutMs`），与 `exe/args` 二选一。manager 亲自用 `cmd /d /s /c <command>` 拉起脚本/复合命令（`npm run dev`、`mvn spring-boot:run`、`*.cmd` 编排等），再按 PPID 链在后代进程中有界轮询匹配 `expectedImage` 映像基名：首次匹配后再观察 ~1.5s 取最终清单（防"假唯一"），恰好 1 个 → 采集 pid+创建时间+映像进既有受管模型（kind=`command`，wrapper 身份一并记录供清理佐证）；≥2 个 → `DISCOVERY_AMBIGUOUS` 拒绝并列候选，wrapper 留证标 UNKNOWN；wrapper 先退出且无目标 → `SPAWN_FAILED`；超时 → UNKNOWN。`stop` 终止目标进程（同句柄核验不变）并尽力终止残留 wrapper；`restart`=`stop`+重放命令+重新发现。**实测约束**：5ec3fb4 起 logger 与 wrapper 一律 `detached: true`——非 detached 子进程在 Windows 会被放入 kill-on-close 作业对象，CLI 退出即整树终止；detached 后 stdout 经 pipe 转发不受影响（Windows cmd 与 Linux sh 均已实测）。安全边界不变：管理目标仍只能是 manager 自己启动的后代，不凭端口/事后断言认领外部进程。
 > **v2.5（issue #110，tags 分组批量）**：desc 可选 `tags: string[]`（最多 16 个，大小写不敏感去重）透传注册表；`list`/`status` 展示。`start|stop|restart|status --tag <t>` 对同标签应用逐条执行：**单条失败不中断后续、不回滚已完成部分**，`--tree/--grace/--force` 逐条透传；结果含 `matched/succeeded/failed/results[]`，调用方须检查每条 `ok`；无匹配 → `NOT_FOUND`。`start --tag` 不接受 `--ack-unresolved`。
-> 依赖：原 agent-skills PR #5 迁移来的 `skills/project-runner/` Java/JRebel Skill；日志查看能力自 v2.2 起并入 `manager ui`（原单项目 Viewer 已移除）
+> 依赖：原 agent-skills PR #5 迁移来的 `skills/agent-app-manager/` Java/JRebel Skill；日志查看能力自 v2.2 起并入 `manager ui`（原单项目 Viewer 已移除）
 > 评审说明：v1 的 same-context PASS 不继承为 v2 的代码审查或运行验证结论；实施后须按本文件验收。
 
 ## 1. 目标与非目标
@@ -24,7 +24,7 @@ Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应�
 
 验收：HOME01 仅旧目录时复制且旧目录快照不变，副本登记、配置、历史日志路径可读；HOME02 两个目录并存时二者快照不变，不操作已有升级锁；HOME03 显式路径与 dry-run 不复制；HOME04 空目录只读零写入、普通写入使用新目录；HOME05 活跃实例暂缓、停止后重试，升级锁互斥，复制失败无半成品且可重试。以上使用隔离临时用户目录验证；设计自查为 same-context，不触碰真实用户数据。
 
-**定位**：全局安装一次 `project-runner` Skill，在不同业务目录和不同 Agent 会话中，**统一查看与管理由该 Skill 启动并记录的应用进程**（v2.3 起覆盖 Java/Python/Node/其他真实进程）。不是 Windows 全机进程管理器，也不是独立 CLI 产品。
+**定位**：全局安装一次 `agent-app-manager` Skill，在不同业务目录和不同 Agent 会话中，**统一查看与管理由该 Skill 启动并记录的应用进程**（v2.3 起覆盖 Java/Python/Node/其他真实进程）。不是 Windows 全机进程管理器，也不是独立 CLI 产品。
 
 核心体验：
 
@@ -48,7 +48,7 @@ Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应�
 ~~~text
 Codex / Pi / Claude Code
            │
-     project-runner Skill
+     agent-app-manager Skill
      ├─ 现有能力（PR #5）：识别项目、选择启动方式、JRebel 初始化与验证
      └─ 跨项目能力（PR #6）：调用 scripts/manager.mjs
                               ├─ 自动登记/读取注册表
