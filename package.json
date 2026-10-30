@@ -1,7 +1,7 @@
 {
   "name": "agent-app-manager",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应用，提供跨 Agent、跨会话的生命周期管理、状态监控、日志和 Web 控制台。",
   "engines": {
     "node": ">=20"
