@@ -155,7 +155,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 | Linux | 支持；走 `/proc`，不依赖 pwsh |
 | macOS | 不支持（无 `/proc`），命令以 `PLATFORM_UNSUPPORTED` 拒绝 |
 
-- Node.js 20+（CI 使用 22）。
+- Node.js 20+（CI 使用 20）。
 - Linux 安全停止需要 Python 3.9+ 与内核 pidfd 支持；缺少时明确拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`。
 - 不新增 npm 依赖、Daemon、数据库或 MCP，仅使用 Node 内置模块。
 
@@ -169,7 +169,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 ### 使用细节
 
-1. **连接与刷新**：打开地址后，顶栏显示数据目录与最近连接时间；列表 / 状态约 4 秒、日志尾部约 1 秒自动刷新，页面隐藏时统一降频至 30 秒，也可点列表右上角手动刷新。Ctrl+C 退出 `ui` 后地址即不可用，仅关闭浏览器页面不会停止该进程。
+1. **连接与刷新**：打开地址后，顶栏显示数据目录与最近连接时间；列表 / 状态约 4 秒、日志尾部约 1 秒自动刷新，页面隐藏时列表/状态/日志/日志源降频至 30 秒、健康与场景入口降频至 60 秒，也可点列表右上角手动刷新。Ctrl+C 退出 `ui` 后地址即不可用，仅关闭浏览器页面不会停止该进程。
 2. **选择与筛选应用**：点击卡片切换应用。卡片展示进程状态、受管 / 非受管、就绪状态、模式、标签、pid、端口和内存快照；搜索框支持别名、显示名、ID、模式、端口、路径与标签。`STARTING` / `UNKNOWN` 等未结记录会在卡片和详情中标出，不能直接重复启动。
 3. **详情与资源曲线**：点右上角「详情」展开。健康区给出端口监听、业务就绪证据（`readyLogPattern` / `readyUrl`）与诊断信息；`prevRuns` 与未结记录证据也在这里核对。详情展开后每 5 秒采样一次 CPU / RSS，绘制最近 5 分钟的曲线，收起详情即停止采样。
 
@@ -243,7 +243,7 @@ npm test          # 完整冒烟
 npm run check     # 全部 .mjs 语法检查 + 脱敏 / 健康 / 环境 / 运行时冒烟
 ```
 
-`npm test` 依次覆盖：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期。CI 在 `windows-latest` 与 `ubuntu-latest` 上运行语法检查与核心冒烟；macOS 未纳入支持范围。
+`npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 在 `ubuntu-latest` 上运行语法检查与全量冒烟，并在 `windows-latest` 上运行语法检查；macOS 未纳入支持范围。
 
 ## 开发边界
 

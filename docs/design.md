@@ -191,7 +191,6 @@ STARTING/UNKNOWN 未结记录默认拒绝 `start`/`remove`，必须先人工核�
 | AC08 | `manager ui` 默认不运行；启动后仅本机 127.0.0.1 可访问（无令牌），Host 不符一律 403；GET 只读展示 list、status（含未结记录证据）、统一日志源（批次/线索/.tmp）、项目文件（路径白名单、拒绝穿越与符号链接）与端口诊断（`GET /api/port`，字段白名单、不暴露命令行），启停与移除仅 POST `/api/lifecycle`（与 CLI 同一实现，页面显式二次确认，跨站写一律拒绝，错误 detail 经白名单回传）；Ctrl+C 后无残留服务与监听；数据损坏时原样报错 |
 | AC09 | Linux（`ubuntu-latest`，无 pwsh）上 `start-new`（直连 node/python）→ `status`/`logs` → `stop`/`restart` 可用；安全停止使用 pidfd 锚定进程身份，pidfd 不可用时明确拒绝；命令模式经 `/bin/sh -c` 后代发现唯一目标；身份核验使用 `boot_id:starttime` + exe，PID 复用不误停；`.sh`/`#!` 脚本作为 exe 被拒绝；端口诊断可降级为仅端口；Windows 全量冒烟保持通过 |
 | AC10 | `restartPolicy=never`（默认）行为不变；`on-failure` 下异常退出由 detached log-writer 在 `maxRestarts`/`backoffMs` 内有界重启并写回同一 run 记录，连续失败进入 `DEAD`（`BACKOFF`/`DEAD` 在 list/status/UI 可见）；人为 `stop`、正常 `code=0` 退出、`remove` 或换新 run 不触发重启；命令模式重启后重新发现并记录新目标身份 |
-=======
 | AC11 | `status <ref> --watch --json` 与 `list --watch --json` 输出可逐行消费的 NDJSON 帧流；`--interval` 越界为 usageError（默认 2000、下限 500、上限 60000）；Ctrl+C / stdout 管道断开干净退出且不残留锁；`--probe`/`--ready` 证据随帧输出；无 `--watch` 时输出与单次命令一致 |
 
 验证优先使用**隔离 `--home` + 临时可控 JVM 应用**；不停止或改造现有业务服务。若 AC03/AC05 尚未实测，不得标为验收通过。
