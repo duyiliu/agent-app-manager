@@ -5,7 +5,9 @@ description: Agent App Manager：统一管理由 AI Coding Agent 启动并登记
 
 # Agent App Manager
 
-默认数据目录为 `~/.agent-app-manager/`；仅有旧 `~/.project-runner/` 时由 manager 自动复制升级，保留旧目录。旧应用或日志进程仍运行时暂缓复制并提示停止后重试；新旧目录并存时升级逻辑不做任何操作。显式 `--home` 和 `start/restart --dry-run` 不复制。
+默认数据目录为 `~/.agent-app-manager/`；仅有旧 `~/.project-runner/` 时由 manager 自动复制升级，保留旧目录。旧应用或日志进程仍运行时暂缓复制并提示停止后重试；新旧目录并存时升级逻辑不做任何操作。显式 `--home` 和 `start/restart --dry-run` 不复制。`migrate`、`doctor` 和首次升级提示会列出仍存在的旧 `project-runner` Skill 路径（只提示，不自动卸载）；确认新版能查看应用与日志后，再提示用户自行清理旧副本。
+
+**首次运行的升级提示要转述给用户**：管理命令输出中出现"数据目录升级暂缓"、旧数据目录路径或旧 Skill 路径时，把路径和给出的 `migrate` / 删除命令原样报告，不要代执行删除，也不要因此中止当前任务。
 
 本 Skill 覆盖 Java/JRebel 单项目流程（第 0–7 节）、非 Java 主流栈（第 1A 节）与跨项目 `manager.mjs` 管理（第 8 节）。只操作**由本 Skill 启动并登记**的应用，不接管外部进程，不声称全机启停。不要要求用户手工提供可从项目中识别的构建工具、主类、classpath、端口或插件信息。Java 默认 `mode: java`；仅当项目已有 JRebel 配置（启动脚本引用 agent、仓库有 `rebel.xml`、构建文件含插件）或用户明确要求时才用 `mode: jrebel`，否则不做 JRebel 环境检查。非 Java 的 `mode` 只是登记标签，受管能力取决于能否解析真实目标进程。
 

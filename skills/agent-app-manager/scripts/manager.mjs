@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { EXIT, SCHEMA_VERSION, MANAGER_VERSION, ManagerError } from './lib/constants.mjs';
 import { usageError } from './lib/errors.mjs';
 import { resolveHome, migrateHome } from './lib/home.mjs';
+import { legacySkillNotice } from './lib/legacy-skill.mjs';
 import { detectProjects } from './lib/detect.mjs';
 import {
   parseNamed, cmdList, cmdStatus, cmdPort, cmdDoctor, cmdHealth, sampleAppUsage, cmdStart, cmdStop, cmdRestart,
@@ -204,8 +205,10 @@ async function runWatch(ctx, command, interval, firstData, produce) {
 function renderHuman(command, data) {
   if (data?.batch) return renderBatch(command, data);
   switch (command) {
-    case 'migrate':
-      return `旧目录：${data.source}\n新目录：${data.target}\n操作：${data.action}（${data.reason}）${data.evidence.length ? `\n阻塞证据：${JSON.stringify(data.evidence)}` : ''}`;
+    case 'migrate': {
+      const legacy = legacySkillNotice(data.legacySkills);
+      return `旧目录：${data.source}\n新目录：${data.target}\n操作：${data.action}（${data.reason}）${data.evidence.length ? `\n阻塞证据：${JSON.stringify(data.evidence)}` : ''}${legacy ? `\n${legacy}` : ''}`;
+    }
     case 'version':
       return `agent-app-manager manager v${data.version}`;
     case 'list': {
@@ -391,7 +394,7 @@ function usageText() {
     '用法：node manager.mjs [--home <绝对路径>] [--json] <命令> [参数]',
     '',
     '命令：',
-    '  migrate [--dry-run]               检查或复制旧数据目录；不覆盖或合并',
+    '  migrate [--dry-run]               检查或复制旧数据目录，并列出旧 Skill 安装位置；不覆盖、不合并、不卸载',
     '  version                           显示 manager 版本号（--version/-v 同效）',
     '  list [--watch [--interval <ms>]]       列出已登记应用与实时状态（含 tags 与内存列）；--watch 周期输出全应用快照',
     '  status <alias|appId> [--probe] [--ready] [--resources] [--watch [--interval <ms>]]   单应用详情；',

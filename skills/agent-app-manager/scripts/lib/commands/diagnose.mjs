@@ -1,5 +1,6 @@
 // 诊断与状态命令：port/doctor/list/status 与就绪证据评估（只读，不改状态）。
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
@@ -15,6 +16,7 @@ import { bootId } from '../proc-linux.mjs';
 import { displayEnv } from '../env.mjs';
 import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from '../restart.mjs';
 import { sampleRunResources } from '../resources.mjs';
+import { detectLegacySkills } from '../legacy-skill.mjs';
 
 // 实际监听端口去重排序：同一端口可能在 0.0.0.0 与 :: 各有一条监听记录。
 function uniqueListeningPorts(entries) {
@@ -109,6 +111,9 @@ export function cmdDoctor(ctx) {
     : null;
   const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
   const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
+  // 旧 Skill 安装探测只报告；是否卸载由用户决定，doctor 不删除任何文件。
+  let legacySkills = [];
+  try { legacySkills = detectLegacySkills({ userHome: os.homedir() }); } catch (e) { addProblem(os.homedir(), e); }
   return Promise.all(portSummary.map(async (p) => ({ ...p, listening: await p.listening }))).then((ports) => ({
     nodeVersion: process.version, platform: process.platform,
     procBackend: isLinux ? 'linux-proc' : (isWin ? 'pwsh-win32' : null),
@@ -116,7 +121,8 @@ export function cmdDoctor(ctx) {
     bootId: isLinux ? bootId() : null,
     procReadable,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports, problems,
-    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪',
+    legacySkills,
+    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪；legacySkills 仅列出旧 Skill 安装位置，不自动卸载',
   }));
 }
 

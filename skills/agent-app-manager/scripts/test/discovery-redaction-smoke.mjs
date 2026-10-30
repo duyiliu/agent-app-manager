@@ -97,7 +97,8 @@ try {
     'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1e3)"],{stdio:"ignore"});\n'
     + 'setInterval(() => {}, 1000);\n', 'utf8');
 
-  const commandPrefix = isWindows ? targetName : `./${targetName}`;
+  // Windows 上 NoDefaultCurrentDirectoryInExePath=1 时 cmd 不搜索当前目录，必须加 .\ 前缀。
+  const commandPrefix = isWindows ? `.\\${targetName}` : `./${targetName}`;
   const writeDesc = (filename, entry, expectedImage, discoverTimeoutMs) => {
     const file = path.join(base, filename);
     fs.writeFileSync(file, JSON.stringify({

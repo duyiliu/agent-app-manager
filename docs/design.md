@@ -22,6 +22,10 @@ Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应�
 
 提供 `migrate --dry-run` 查看源、目标、预期动作及活动进程/锁证据，不写入；`migrate` 执行相同复制规则，遇阻返回冲突，可重试。仅支持默认目录；目标已存在或源不存在时不执行复制。
 
+旧 Skill 探测（2026-10-30）：`migrate`、`doctor` 与首次升级提示检查 `~/.agents/skills`、`~/.codex/skills`、`~/.claude/skills` 下的 `project-runner`，以 `SKILL.md` frontmatter 的 `name` 判定，结果写入 `legacySkills`。只输出路径与可直接执行的删除命令，由用户自行执行；不自动删除、不阻止任何命令、不影响数据目录复制判定，探测异常不阻断升级。提示默认每个数据目录只出现一次（`.legacy-skill-notice` 标记），只读命令只在本次确实复制后提示。
+
+验收：HOME06 三处安装根均能识别旧 Skill，同名但 `name` 不同的目录不误报；`migrate`/`doctor` 输出含 `legacySkills` 且不删除旧文件；复制完成后提示一次，重复命令不再提示。
+
 验收：HOME01 仅旧目录时复制且旧目录快照不变，副本登记、配置、历史日志路径可读；HOME02 两个目录并存时二者快照不变，不操作已有升级锁；HOME03 显式路径与 dry-run 不复制；HOME04 空目录只读零写入、普通写入使用新目录；HOME05 活跃实例暂缓、停止后重试，升级锁互斥，复制失败无半成品且可重试。以上使用隔离临时用户目录验证；设计自查为 same-context，不触碰真实用户数据。
 
 **定位**：全局安装一次 `agent-app-manager` Skill，在不同业务目录和不同 Agent 会话中，**统一查看与管理由该 Skill 启动并记录的应用进程**（v2.3 起覆盖 Java/Python/Node/其他真实进程）。不是 Windows 全机进程管理器，也不是独立 CLI 产品。

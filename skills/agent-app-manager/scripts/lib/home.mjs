@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { usageError, conflictError, dataError } from './errors.mjs';
+import { detectLegacySkills, noticeLegacySkillsOnce, legacySkillNotice } from './legacy-skill.mjs';
 
 function exists(file) {
   try { fs.lstatSync(file); return true; }
@@ -54,7 +55,10 @@ export function migrateHome({ userHome = os.homedir(), dryRun = false } = {}) {
   const source = path.join(userHome, '.project-runner');
   const target = path.join(userHome, '.agent-app-manager');
   const sourceExists = exists(source), targetExists = exists(target);
-  const result = { source, target, sourceExists, targetExists, dryRun, evidence: [] };
+  const result = { source, target, sourceExists, targetExists, dryRun, evidence: [], legacySkills: [] };
+  // 旧 Skill 探测独立于数据目录：两个都只报告，不删除、不阻止命令。
+  try { result.legacySkills = detectLegacySkills({ userHome }); }
+  catch (e) { result.legacySkillsError = e.message; }
   if (targetExists) return { ...result, action: 'none', reason: 'target_exists' };
   if (!sourceExists) return { ...result, action: 'none', reason: 'source_missing' };
   const stat = fs.lstatSync(source);
@@ -71,6 +75,12 @@ export function migrateHome({ userHome = os.homedir(), dryRun = false } = {}) {
   if (!outcome) throw conflictError('HOME_MIGRATION_BUSY', '复制期间发现活动实例，请检查后重试', result);
   if (outcome === 'skipped') return { ...result, action: 'none', reason: exists(target) ? 'target_exists' : 'source_missing', targetExists: exists(target) };
   return { ...result, action: 'copied', reason: 'completed', targetExists: true };
+}
+
+// 首次运行提示要能直接照着做：给出当前 manager 入口的 migrate 命令。
+function migrateHint() {
+  const entry = process.argv[1] ?? '';
+  return entry.endsWith('manager.mjs') ? `node "${entry}" migrate` : 'manager.mjs migrate';
 }
 
 function migrateLegacyHome(legacy, target) {
@@ -90,7 +100,7 @@ function migrateLegacyHome(legacy, target) {
       throw dataError('HOME_MIGRATION_FAILED', `旧数据目录不是普通目录，未自动复制：${legacy}`);
     }
     if (hasLiveWriter(legacy)) {
-      process.stderr.write(`数据目录复制暂缓：旧目录仍有运行进程或锁；本次继续使用 ${legacy}，停止相关应用后下次命令重试。\n`);
+      process.stderr.write(`数据目录升级暂缓：旧目录 ${legacy} 仍有受管应用或日志进程在运行，本次继续使用旧目录。\n停止这些应用后执行：${migrateHint()}\n`);
       return false;
     }
     staging = fs.mkdtempSync(`${target}.copy-`);
@@ -115,7 +125,7 @@ function migrateLegacyHome(legacy, target) {
     // 发布前再次检查；两个目录都存在时不覆盖、不合并。
     if (exists(target)) return 'skipped';
     if (hasLiveWriter(legacy)) {
-      process.stderr.write('数据目录复制暂缓：复制期间旧目录出现活动实例，下次命令重试。\n');
+      process.stderr.write(`数据目录升级暂缓：复制期间旧目录 ${legacy} 出现活动应用，本次继续使用旧目录。\n停止这些应用后执行：${migrateHint()}\n`);
       return false;
     }
     fs.renameSync(staging, target);
@@ -137,21 +147,36 @@ function migrateLegacyHome(legacy, target) {
   }
 }
 
+function notifyLegacySkills(userHome) {
+  try {
+    const notice = legacySkillNotice(detectLegacySkills({ userHome }));
+    if (notice) process.stderr.write(`${notice}\n`);
+  } catch { /* 探测失败不影响数据目录升级 */ }
+}
+
 export function resolveHome(argHome, readOnly = false, { userHome = os.homedir(), migrate = true } = {}) {
   let raw = argHome;
+  let copied = false;
+  let legacyPending = false;
   if (!raw) {
     const target = path.join(userHome, '.agent-app-manager');
     const legacy = path.join(userHome, '.project-runner');
     if (!exists(target) && exists(legacy)) {
-      if (migrate) { if (!migrateLegacyHome(legacy, target)) raw = legacy; }
+      if (migrate) { if (migrateLegacyHome(legacy, target)) copied = true; else { raw = legacy; legacyPending = true; } }
       else raw = legacy; // dry-run 保持零写入，同时仍能读取旧登记。
     }
     raw ||= target;
   }
   if (!path.isAbsolute(raw)) throw usageError(`--home 需要绝对路径：${raw}`);
-  if (readOnly) return fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
+  if (readOnly) {
+    // 只读命令不落提示标记：复制完成或升级受阻时顺带提示一次。
+    if (copied || legacyPending) notifyLegacySkills(userHome);
+    return fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
+  }
   fs.mkdirSync(raw, { recursive: true });
   const home = fs.realpathSync.native(raw);
   for (const d of ['runtime', 'logs', 'locks']) fs.mkdirSync(path.join(home, d), { recursive: true });
+  if (copied) notifyLegacySkills(userHome);
+  else if (!argHome) noticeLegacySkillsOnce(home, { userHome });
   return home;
 }

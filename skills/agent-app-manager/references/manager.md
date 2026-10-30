@@ -8,6 +8,8 @@
 
 手动升级可运行 `manager.mjs migrate --dry-run` 预览目录、操作和阻塞进程/锁，运行 `manager.mjs migrate` 执行或重试。命令仅处理默认目录，不支持 `--home`；目标已存在时不复制、不合并。正式执行遇到活动进程或锁返回 `HOME_MIGRATION_BUSY`。
 
+`migrate`、`doctor` 与首次升级提示会检查 `~/.agents/skills`、`~/.codex/skills`、`~/.claude/skills` 下是否仍有旧 `project-runner` Skill（以 `SKILL.md` 的 `name` 为准），结果在 `legacySkills`。**只输出路径和可直接执行的删除命令，不自动卸载、不阻止命令**：由用户确认新版能查看应用与日志后自行执行，避免两个 Skill 同时响应启停请求。
+
 定位：全局安装一次本 Skill 后，在任意业务目录用同一数据目录（默认 `~/.agent-app-manager/`）查看与管理**由本 Skill 启动并记录**的应用进程（Java/Python/Node/其他真实进程同理）。不是全机进程管理器；IDEA/手工命令行/Docker 启动的进程一律不接管、不停止，只可在端口冲突诊断时查看。统一入口（路径按实际安装位置解析，无需 cd 到业务目录）：
 
 ```bash

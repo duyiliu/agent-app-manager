@@ -12,23 +12,23 @@
 
 ### 1. 安装
 
-**官方安装（固定版本 `v0.8.0`）：**
+**官方安装（固定版本 `v0.9.0`）：**
 
 ```bash
-npx skills add duyiliu/agent-app-manager#v0.8.0 --skill agent-app-manager -g
+npx skills add duyiliu/agent-app-manager#v0.9.0 --skill agent-app-manager -g
 ```
 
 **国内网络加速安装（第三方 `skills-cn`）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/agent-app-manager#v0.8.0 --skill agent-app-manager -g -y
+npx skills-cn@latest add duyiliu/agent-app-manager#v0.9.0 --skill agent-app-manager -g -y
 ```
 
 两种方式均从本仓库安装相同的 `agent-app-manager` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
 
 安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对；升级后重跑安装命令即可。
 
-原 `project-runner` Skill 已更名为 `agent-app-manager`。安装不会自动清理旧副本；确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
+原 `project-runner` Skill 已更名为 `agent-app-manager`。安装不会自动清理旧副本；新版 `migrate`、`doctor` 和首次升级提示会列出仍存在的旧 Skill 路径，但不会自动删除。确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
 
 ### 从旧版本升级
 
@@ -37,7 +37,7 @@ npx skills-cn@latest add duyiliu/agent-app-manager#v0.8.0 --skill agent-app-mana
 1. 停止旧版管理台及其受管应用，确保旧日志进程退出。
 2. 使用 `npx skills add` 安装支持迁移的新版本。安装本身不会迁移数据；首次运行新版普通管理命令（例如 `list`）时自动检查并尝试复制。
 3. 仅存在旧数据目录时，新版会复制数据到 `~/.agent-app-manager/`；新旧目录都存在时不会自动复制或合并。检查应用登记、配置和历史日志是否正常。
-4. 确认新版可用后，检查是否仍有单独的旧 Skill 副本；如有，按对应运行器的安装位置清理，避免同时加载。旧数据目录可暂留作备份。
+4. **卸载旧 Skill**：新版 `migrate`、`doctor` 和首次升级提示会列出 `~/.agents/skills`、`~/.codex/skills`、`~/.claude/skills` 下仍存在的 `project-runner`，并给出可直接执行的删除命令；manager 不自动删除。确认新版可用后自行执行，避免同时加载。旧数据目录可暂留作备份。
 
 复制后的两个数据目录相互独立，后续更改不会同步；不要同时使用新旧版本管理应用。退出通知脚本使用的 `PROJECT_RUNNER_*` 环境变量继续兼容。旧版仍可继续使用旧目录，但不会自动升级到新版本。
 
@@ -48,7 +48,7 @@ node "<skill-dir>/scripts/manager.mjs" migrate --dry-run
 node "<skill-dir>/scripts/manager.mjs" migrate
 ```
 
-预览列出旧目录、新目录和发现的活动进程或锁，不写入；正式命令有阻塞时返回错误，处理后可重试。新目录已存在时不会覆盖或合并；该命令只处理默认目录，不接受 `--home`。复制完成后旧目录保留。
+预览列出旧目录、新目录和发现的活动进程或锁，不写入；正式命令有阻塞时返回错误，处理后可重试。新目录已存在时不会覆盖或合并；该命令只处理默认目录，不接受 `--home`。复制完成后旧目录保留。输出中的 `legacySkills` 为探测到的旧 Skill 安装位置，仅报告，不卸载。
 
 ### 2. 让 Agent 启动项目
 
