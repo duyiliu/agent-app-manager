@@ -17,6 +17,7 @@ import { displayEnv } from '../env.mjs';
 import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from '../restart.mjs';
 import { sampleRunResources } from '../resources.mjs';
 import { detectLegacySkills } from '../legacy-skill.mjs';
+import { loadGlobalOnExit } from '../notify.mjs';
 
 // 实际监听端口去重排序：同一端口可能在 0.0.0.0 与 :: 各有一条监听记录。
 function uniqueListeningPorts(entries) {
@@ -129,6 +130,21 @@ export function cmdDoctor(ctx) {
     problems.push({ file: '(dependency)', code: 'DEPENDENCY', message: `Linux 受管 terminate/wait 需要 python3>=3.9 与 pidfd API（os.pidfd_open / signal.pidfd_send_signal）：${pidfdProbe.error}` });
   }
   const homeWritable = (() => { try { fs.accessSync(home, fs.constants.W_OK); return true; } catch { return false; } })();
+  // onExit 副作用审计（#160）：status/list 首次观测到退出会同步执行已配置钩子（≤15s）。
+  // 这里暴露"哪些应用配置了钩子/全局兜底是否生效/最近一次执行结果"，让副作用可见可审计；
+  // 不回显命令本身（属本机配置，可能含敏感参数）。
+  const globalOnExit = loadGlobalOnExit(home);
+  const onExitAudit = [];
+  for (const [appId, app] of Object.entries(reg.apps)) {
+    let cur = null;
+    try { cur = readRuntimeStrict(home, appId)?.current ?? null; } catch { /* 单条失败不阻断 */ }
+    if (!app.onExit && !cur?.notifyResult && !cur?.notifiedAt) continue;
+    onExitAudit.push({
+      alias: app.alias, appId,
+      configured: Boolean(app.onExit),
+      notifiedAt: cur?.notifiedAt ?? null, notifyResult: cur?.notifyResult ?? null,
+    });
+  }
   const portSummary = Object.values(reg.apps).filter((a) => Number.isInteger(a.expectedPort)).map((a) => ({ alias: a.alias, port: a.expectedPort, listening: tcpListening(a.expectedPort) }));
   // 旧 Skill 安装探测只报告；是否卸载由用户决定，doctor 不删除任何文件。
   let legacySkills = [];
@@ -142,7 +158,8 @@ export function cmdDoctor(ctx) {
     pidfd: pidfdProbe,
     home, homeWritable, registrySchemaVersion: reg.schemaVersion, runtime: runtimes, locks, orphanTmpFiles: tempFiles, portSummary: ports, problems,
     legacySkills,
-    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪；legacySkills 仅列出旧 Skill 安装位置，不自动卸载',
+    onExit: { globalConfigured: Boolean(globalOnExit), apps: onExitAudit },
+    note: '只读诊断；locks 项仅列出，不回收；problems 为诊断发现，不自动修复；orphanTmpFiles 可由 prune 按保留集回收；端口监听不代表业务就绪；legacySkills 仅列出旧 Skill 安装位置，不自动卸载；status/list 首次观测到受管进程退出时会同步执行已配置的 onExit 钩子（≤15s），执行证据见 onExit.apps',
   }));
 }
 
@@ -613,7 +630,64 @@ export function sampleAppUsage(home, ref) {
   return { alias, runId: cur.runId ?? null, ...(r ?? { available: false, reason: '采样不可用' }) };
 }
 
-export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false, resourcesRequested = false) {
+// ---------- 运行历史与可用性聚合（#143）：只聚合保留期内批次，纯读不写 ----------
+
+// 结果归类沿用重启决策的三态语义：正常/崩溃（信号或非 0 码）/证据缺失/未知；
+// 人工 stop（stopRequested 标记或 exitNote 注明）归为 stopped，不算崩溃。
+function runOutcomeOf(run) {
+  if (!run || !run.managed) return 'unmanaged';
+  if (['RUNNING', 'STARTING', 'BACKOFF'].includes(run.phase)) return 'active';
+  if (run.stopRequested === true || /^人为/.test(run.exitNote ?? '')) return 'stopped';
+  if (run.phase === 'DEAD') return 'dead';
+  if (run.phase === 'UNKNOWN') return 'unknown';
+  const ex = run.exit;
+  if (ex == null) return 'evidence-missing';
+  if (ex.signal != null || (Number.isInteger(ex.code) && ex.code !== 0)) return 'crash';
+  if (ex.code === 0) return 'normal';
+  return 'evidence-missing';
+}
+
+function runDurationMs(run) {
+  const start = Date.parse(run.startedAt ?? run.intentAt ?? '');
+  const end = Date.parse(run.endedAt ?? run.archivedAt ?? '');
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+}
+
+export function buildRunHistory(rt) {
+  return [rt?.current, ...(rt?.prevRuns ?? [])].filter(Boolean).map((run) => ({
+    runId: run.runId ?? null, phase: run.phase ?? null, managed: run.managed ?? null,
+    outcome: runOutcomeOf(run),
+    startedAt: run.startedAt ?? run.intentAt ?? null,
+    endedAt: run.endedAt ?? run.archivedAt ?? null,
+    durationMs: runDurationMs(run),
+    exit: run.exit ?? null, restartCount: run.restartCount ?? null,
+    archiveReason: run.archiveReason ?? null, exitNote: run.exitNote ?? null,
+  }));
+}
+
+export function buildRunStats(history) {
+  const ended = history.filter((h) => h.outcome !== 'active' && h.outcome !== 'unmanaged');
+  if (!ended.length) return { runs: 0, note: '无已结束运行历史' };
+  const durations = ended.map((h) => h.durationMs).filter((d) => d != null);
+  const crashes = ended.filter((h) => h.outcome === 'crash' || h.outcome === 'dead');
+  const lastCrash = crashes[0] ?? null; // history 顺序为 current→prevRuns（时间倒序）
+  return {
+    runs: ended.length,
+    normalStops: ended.filter((h) => h.outcome === 'normal').length,
+    stoppedByUser: ended.filter((h) => h.outcome === 'stopped').length,
+    crashes: crashes.length,
+    dead: ended.filter((h) => h.outcome === 'dead').length,
+    unknown: ended.filter((h) => h.outcome === 'unknown').length,
+    evidenceMissing: ended.filter((h) => h.outcome === 'evidence-missing').length,
+    avgDurationMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
+    maxDurationMs: durations.length ? Math.max(...durations) : null,
+    lastCrash: lastCrash
+      ? { runId: lastCrash.runId, at: lastCrash.endedAt, code: lastCrash.exit?.code ?? null, signal: lastCrash.exit?.signal ?? null }
+      : null,
+  };
+}
+
+export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested = false, portsRequested = false, resourcesRequested = false, historyFlags = null) {
   if (!ref) throw usageError('status 需要 <alias|appId>');
   const reg = readRegistry(ctx.home);
   const appId = resolveAppId(reg, ref);
@@ -735,6 +809,15 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     readinessUntested: st.status === 'RUNNING' && readiness?.state !== 'READY',
     note: st.note ?? null,
     loggerNote: st.loggerNote ?? null,
+    dependsOn: app.dependsOn ?? [],
+    dependedBy: Object.values(reg.apps).filter((a) => (a.dependsOn ?? []).some((r) => { try { return resolveAppId(reg, r) === appId; } catch { return false; } })).map((a) => a.alias),
     prevRuns: (rt?.prevRuns ?? []).slice(0, 5),
+    ...(historyFlags?.history || historyFlags?.stats ? (() => {
+      const history = buildRunHistory(rt);
+      return {
+        ...(historyFlags.history ? { history } : {}),
+        ...(historyFlags.stats ? { stats: buildRunStats(history) } : {}),
+      };
+    })() : {}),
   };
 }

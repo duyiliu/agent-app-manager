@@ -345,11 +345,11 @@ function drawResChart() {
 // runId 变了（重启）或切换应用时自动失效。
 let liveResources = null; // { alias, runId, rssBytes, scope, reason?, at }
 
-async function api(path, signal, method = 'GET') {
+async function api(path, signal, method = 'GET', body = undefined) {
   const u = new URL(path, location.origin);
   // GET 轮询必须超时：服务端若挂起，请求永不应答时 in-flight 守卫会永久置位、轮询停摆（#166）。
   // 显式 signal（AbortController/AbortSignal.timeout）优先；未给的 GET 默认 30s 超时。
-  const r = await fetch(u, { cache: 'no-store', signal: signal ?? AbortSignal.timeout(30_000), method });
+  const r = await fetch(u, { cache: 'no-store', signal: signal ?? AbortSignal.timeout(30_000), method, ...(body !== undefined ? { body } : {}) });
   const j = await r.json().catch(() => ({ ok: false, error: { code: 'BAD_JSON', message: '响应解析失败' } }));
   if (!r.ok) {
     const e = new Error(j?.error?.message || `请求失败（${r.status}）`);
@@ -383,10 +383,26 @@ function hideBanner() {
   if (bannerFadeTimer) { clearTimeout(bannerFadeTimer); bannerFadeTimer = null; }
 }
 function conn(text, bad = false) { const c = $('#connState'); c.textContent = text; c.classList.toggle('bad', bad); }
+// #141：状态变化提醒——同一批次按 runId+status 去重（BACKOFF→DEAD 属同一 runId 的不同阶段，各提醒一次）。
+let alertFlashTimer = null;
+function startTitleFlash(text) {
+  if (alertFlashTimer || !document.hidden) return; // 标签页可见时横幅已足够，不闪
+  let on = false;
+  alertFlashTimer = setInterval(() => {
+    on = !on;
+    document.title = on ? `【提醒】${text}` : 'Agent App Manager · 运行管理台';
+  }, 1000);
+}
+function stopTitleFlash() { if (alertFlashTimer) { clearInterval(alertFlashTimer); alertFlashTimer = null; updateTitle(); } }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) stopTitleFlash(); });
+window.addEventListener?.('focus', stopTitleFlash);
 function notifyExit(runId, status, note) {
-  if (!runId || notifiedRuns.has(runId)) return;
-  notifiedRuns.add(runId);
+  if (!runId) return;
+  const dedupKey = `${runId}:${status}`;
+  if (notifiedRuns.has(dedupKey)) return;
+  notifiedRuns.add(dedupKey);
   try { sessionStorage.setItem('pr-ui-notified-runs', JSON.stringify([...notifiedRuns])); } catch {}
+  startTitleFlash(`${status} · ${runId}`);
   const banner = $('#exitBanner');
   banner.hidden = false;
   // #165：横幅驻留 + 显式关闭；#168：通知授权入口挪到横幅按钮（用户手势上下文内申请）。
@@ -648,13 +664,10 @@ function updateTitle() {
   const running = appsCache.filter(a => a.status === 'RUNNING').length;
   document.title = (running > 0 ? `(${running}) ` : '') + 'Agent App Manager · 运行管理台';
 }
-async function loadApps() {
-  if (fatal || (paused && !manualRefresh) || appsBusy) return;
-  appsBusy = true;
-  try {
-    const d = await api('/api/apps');
-    hideBannerIfRecovered();
-    appsCache = d.apps ?? [];
+// #145：列表数据处理抽到 applyAppsData，/api/apps 与 /api/snapshot 两路复用。
+async function applyAppsData(d) {
+  hideBannerIfRecovered();
+  appsCache = d.apps ?? [];
     for (const a of appsCache) {
       const old = previousStatuses.get(a.alias);
       const runId = a.lastRunId ?? null;
@@ -663,6 +676,12 @@ async function loadApps() {
           const detail = await api('/api/status?app=' + encodeURIComponent(a.alias));
           notifyExit(runId, a.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || a.error || '退出说明不可用');
         } catch { notifyExit(runId, a.status, a.error || '退出说明不可用'); }
+      } else if (old && old.status !== a.status && ['BACKOFF', 'DEAD'].includes(a.status)) {
+        // #141：监督重启进入退避/死亡态主动提醒（同 runId 下与退出提醒按状态分别去重）
+        try {
+          const detail = await api('/api/status?app=' + encodeURIComponent(a.alias));
+          notifyExit(runId, a.status, detail.run?.lastError || detail.run?.exitNote || detail.note || (a.status === 'BACKOFF' ? '崩溃后将自动重试' : '重启预算已耗尽，需人工介入'));
+        } catch { notifyExit(runId, a.status, a.status === 'BACKOFF' ? '崩溃后将自动重试' : '重启预算已耗尽，需人工介入'); }
       }
       previousStatuses.set(a.alias, { status: a.status, runId });
     }
@@ -682,7 +701,12 @@ async function loadApps() {
     renderApps();
     if (!selected) renderDetail(null);
     conn('已连接 · ' + new Date().toLocaleTimeString());
-  } catch (e) { handlePollError(e); }
+}
+async function loadApps() {
+  if (fatal || (paused && !manualRefresh) || appsBusy) return;
+  appsBusy = true;
+  try { await applyAppsData(await api('/api/apps')); }
+  catch (e) { handlePollError(e); }
   finally { appsBusy = false; }
 }
 // 任一轮询成功即视为数据层恢复可读：清掉 degrading 让日志跟随恢复轮询并隐藏横幅。
@@ -700,7 +724,7 @@ let detailOpen = false, detailTouched = false;
 let detailMoreOpen = false; // 「更多诊断信息」折叠区是否展开，跨轮询重绘保留
 let detailInitialized = false; // 该应用的详情是否已按「首次」规则决定过展开状态
 // 停止/重启的附加参数：控件在详情卡内，值跨轮询重绘保留；启动/移除不使用。
-let lifecycleTree = false, lifecycleGrace = '';
+let lifecycleTree = false, lifecycleGrace = '', lifecycleDeps = false;
 let lifecycleOptionsOpen = false, healthEvidenceOpen = false;
 function applyDetail(open) {
   $('#detail').hidden = !open;
@@ -799,7 +823,7 @@ function lifecycleOptions() {
   details.addEventListener('toggle', () => { lifecycleOptionsOpen = details.open; });
   const summary = el('summary', 'lifecycle-summary', '停止和重启选项');
   const active = el('span', 'lifecycle-active');
-  const refreshActive = () => { active.textContent = [lifecycleTree ? '包含子进程' : '', lifecycleGrace !== '' ? `优雅退出 ${lifecycleGrace} ms` : ''].filter(Boolean).join(' · '); };
+  const refreshActive = () => { active.textContent = [lifecycleTree ? '包含子进程' : '', lifecycleGrace !== '' ? `优雅退出 ${lifecycleGrace} ms` : '', lifecycleDeps ? '连带停止依赖方' : ''].filter(Boolean).join(' · '); };
   refreshActive();
   summary.appendChild(active);
   details.appendChild(summary);
@@ -822,7 +846,14 @@ function lifecycleOptions() {
   grace.title = '停止/重启前先等待优雅退出的毫秒数（0-600000，同 CLI --grace）；留空=现有强制终止';
   grace.addEventListener('input', e => { lifecycleGrace = e.target.value; refreshActive(); });
   graceLabel.append(el('span', null, '优雅退出'), grace, el('span', 'lifecycle-unit', 'ms'));
-  row.append(treeLabel, graceLabel, el('span', 'lifecycle-note', '仅停止/重启生效；留空=不等待'));
+  const depsLabel = el('label', 'lifecycle-opt');
+  const deps = el('input', 'lifecycle-deps');
+  deps.type = 'checkbox';
+  deps.checked = lifecycleDeps;
+  deps.title = '停止时先按反向依赖序停掉依赖本应用的其他应用（同 CLI --with-dependents）；仅停止生效';
+  deps.addEventListener('change', e => { lifecycleDeps = !!e.target.checked; refreshActive(); });
+  depsLabel.append(deps, el('span', null, '连带停止依赖方'));
+  row.append(treeLabel, graceLabel, depsLabel, el('span', 'lifecycle-note', '仅停止/重启生效；留空=不等待'));
   details.appendChild(row);
   return details;
 }
@@ -1097,6 +1128,8 @@ function renderDetail(d) {
   kvRow(moreGrid, '仓库', d.root, 'dim');
   kvRow(moreGrid, '入口', d.entry, 'dim');
   kvRow(moreGrid, 'tags', d.tags?.length ? d.tags.join(', ') : null, 'dim');
+  kvRow(moreGrid, '依赖', d.dependsOn?.length ? d.dependsOn.join(', ') : null, 'dim');
+  kvRow(moreGrid, '被依赖', d.dependedBy?.length ? d.dependedBy.join(', ') : null, 'dim');
   kvRow(moreGrid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
   kvRow(moreGrid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
   const envRows = Object.entries(d.env ?? {});
@@ -1234,6 +1267,7 @@ function lifecycleRequestPath(alias, op, extra = '') {
     const extraParams = new URLSearchParams(extra.replace(/^&/, ''));
     for (const [k, v] of extraParams) q.set(k, v);
   }
+  if (op === 'stop' && lifecycleDeps) q.set('deps', '1');
   if (op === 'stop' || op === 'restart') {
     if (lifecycleTree) q.set('tree', '1');
     const grace = String(lifecycleGrace ?? '').trim();
@@ -1300,19 +1334,7 @@ async function loadStatus(opts = {}) {
   try {
     const detail = await api('/api/status?app=' + encodeURIComponent(alias) + (opts.sample ? '&sample=1' : ''));
     if (alias !== selected) return;
-    // 实时采样结果留在本地：后续 4s 轮询不带 resources，靠它继续显示同一份"当前值"。
-    if (opts.sample && detail.resources) {
-      liveResources = { alias, runId: detail.run?.runId ?? null, at: Date.now(), ...detail.resources };
-    }
-    const old = previousStatuses.get(alias);
-    const runId = detail.run?.runId;
-    if (old?.status === 'RUNNING' && old.runId === runId && ['STOPPED', 'UNKNOWN'].includes(detail.status)) {
-      notifyExit(runId, detail.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || '退出说明不可用');
-    }
-    previousStatuses.set(alias, { status: detail.status, runId });
-    detailCache.set(alias, detail);
-    detailPending = false;
-    renderDetail(detail);
+    applyStatusDetail(alias, detail, opts.sample);
   } catch (e) {
     if (alias !== selected) return;
     detailPending = false;
@@ -1321,14 +1343,33 @@ async function loadStatus(opts = {}) {
     handlePollError(e);
   } finally { if (opts.sample) statusSampleBusy = false; else statusBusy = false; }
 }
+// #145：详情数据处理抽出，/api/status 与 /api/snapshot 两路复用。
+function applyStatusDetail(alias, detail, sampled = false) {
+  // 实时采样结果留在本地：后续轮询不带 resources，靠它继续显示同一份"当前值"。
+  if (sampled && detail.resources) {
+    liveResources = { alias, runId: detail.run?.runId ?? null, at: Date.now(), ...detail.resources };
+  }
+  const old = previousStatuses.get(alias);
+  const runId = detail.run?.runId;
+  if (old?.status === 'RUNNING' && old.runId === runId && ['STOPPED', 'UNKNOWN'].includes(detail.status)) {
+    notifyExit(runId, detail.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || '退出说明不可用');
+  }
+  previousStatuses.set(alias, { status: detail.status, runId });
+  detailCache.set(alias, detail);
+  detailPending = false;
+  renderDetail(detail);
+}
+// #145：健康数据处理抽出，/api/health 与 /api/snapshot 两路复用。
+function applyHealthData(d) {
+  healthByAlias = new Map((d.apps ?? []).map(h => [h.appId, h]));
+  if (appsCache.length) renderApps();
+  if (selected && currentDetail?.alias === selected) renderDetail(currentDetail);
+}
 async function loadHealth() {
   if (fatal || (paused && !manualRefresh) || healthBusy) return;
   healthBusy = true;
   try {
-    const d = await api('/api/health');
-    healthByAlias = new Map((d.apps ?? []).map(h => [h.appId, h]));
-    if (appsCache.length) renderApps();
-    if (selected && currentDetail?.alias === selected) renderDetail(currentDetail);
+    applyHealthData(await api('/api/health'));
   } catch (e) {
     if (e.status !== 404) handlePollError(e); // 旧服务无此接口时仅保留通用提示
   } finally { healthBusy = false; }
@@ -1843,11 +1884,26 @@ $('#docBtn').addEventListener('click', async () => {
   try { $('#docBody').textContent = JSON.stringify(await api('/api/doctor'), null, 2); }
   catch (e) { $('#docBody').textContent = `诊断失败：${e.message}`; }
 });
+$('#backupBtn').addEventListener('click', () => { $('#backupOverlay').hidden = false; });
+$('#backupClose').addEventListener('click', () => { $('#backupOverlay').hidden = true; });
+$('#backupOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.hidden = true; });
+$('#backupImportBtn').addEventListener('click', async () => {
+  const out = $('#backupResult');
+  const text = $('#backupImportText').value.trim();
+  if (!text) { out.textContent = '请先粘贴备份 JSON'; return; }
+  out.textContent = '导入中…';
+  try {
+    const q = `?dry=${$('#backupImportDry').checked ? 1 : 0}&force=${$('#backupImportForce').checked ? 1 : 0}`;
+    const r = await api('/api/import' + q, AbortSignal.timeout(30000), 'POST', text);
+    out.textContent = JSON.stringify(r, null, 2);
+  } catch (e) { out.textContent = `导入失败：${e.message}`; }
+});
 $('#docClose').addEventListener('click', () => { $('#docOverlay').hidden = true; });
 $('#docOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.hidden = true; });
 // Esc 关闭诊断浮层（#167）；操作确认框的 Esc 由 actionDialog 自己的 keydown 处理
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#docOverlay').hidden) $('#docOverlay').hidden = true;
+  if (e.key === 'Escape' && !$('#backupOverlay').hidden) $('#backupOverlay').hidden = true;
 });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
@@ -2031,16 +2087,37 @@ loadApps().then(() => {
 });
 loadHealth();
 let pollTimers = [];
+let pollSlow = false;
+let snapTick = 0;
+// #145：聚合轮询——单一定时器一次请求取回 apps+status（+按节流的 health），
+// 取代原先 apps/status/health 三路各自 4s/15s 的独立往返；低频职责在同一节拍内按周期分派。
+async function pollSnapshot() {
+  if (fatal || (paused && !manualRefresh)) return;
+  const healthEvery = pollSlow ? 2 : 4;    // 4s 节拍下 ≈16s；30s 节拍下 ≈60s（与原频率一致）
+  const sourcesEvery = pollSlow ? 1 : 2;   // ≈8s / 30s
+  const workbenchEvery = pollSlow ? 2 : 4; // ≈16s / 60s
+  const wantHealth = snapTick % healthEvery === 0;
+  const reqAlias = selected;
+  try {
+    const d = await api(`/api/snapshot?health=${wantHealth ? 1 : 0}${reqAlias ? '&app=' + encodeURIComponent(reqAlias) : ''}`);
+    await applyAppsData(d);
+    if (reqAlias === selected && reqAlias) {
+      if (d.status) applyStatusDetail(reqAlias, d.status);
+      else if (d.statusError?.status === 404) { detailMissing = true; detailPending = false; renderDetail(null); }
+      // 采集型错误（非 404）交给下一帧重试，详情区保留现有内容
+    }
+    if (d.health) applyHealthData(d.health);
+  } catch (e) { handlePollError(e); }
+  snapTick++;
+  if (snapTick % sourcesEvery === 0) loadSources();
+  if (snapTick % workbenchEvery === 0) loadWorkbench();
+}
 function schedulePolling() {
   pollTimers.forEach(clearInterval);
-  const slow = document.visibilityState === 'hidden';
+  pollSlow = document.visibilityState === 'hidden';
   pollTimers = [
-    setInterval(loadApps, slow ? 30000 : 4000),
-    setInterval(loadStatus, slow ? 30000 : 4000),
-    setInterval(loadHealth, slow ? 60000 : 15000), // 健康探测较重：低频轮询，启停/手动刷新时额外立即刷新
-    setInterval(loadWorkbench, slow ? 60000 : 15000),
-    setInterval(loadSources, slow ? 30000 : 8000),
-    setInterval(pollTail, slow ? 30000 : 1000),
+    setInterval(pollSnapshot, pollSlow ? 30000 : 4000),
+    setInterval(pollTail, pollSlow ? 30000 : 1000),
   ];
 }
 document.addEventListener('visibilitychange', schedulePolling);

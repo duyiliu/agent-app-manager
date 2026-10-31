@@ -1,6 +1,9 @@
 // 本地只读 Web 管理台（ui，design.md §2.2 / AC08）。
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { usageError, conflictError } from '../errors.mjs';
@@ -44,7 +47,7 @@ function probeManagerUi(port) {
 // 子进程退出码即 ManagerError exitCode（1-6），重构错误后 errorStatus 映射不变；
 // 180s 超时兜底（CLI 前端 150s abort 通常先到），超时强杀子进程——中断的
 // start/stop 按既有语义留下 STARTING/UNKNOWN 未结证据，不静默伪造结果。
-function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = null, owner = null } = {}) {
+function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = null, owner = null, deps = false } = {}) {
   const args = [MANAGER_MJS, '--json', '--home', home, op, ref];
   if (ack) args.push('--ack-unresolved', ack);
   if (owner) args.push('--kill-port-owner', Buffer.from(owner, 'utf8').toString('base64url'));
@@ -53,6 +56,7 @@ function runLifecycleSubprocess(home, op, ref, ack, { tree = false, graceMs = nu
     if (tree) args.push('--tree');
     if (graceMs != null) args.push('--grace', String(graceMs));
   }
+  if (deps && op === 'stop') args.push('--with-dependents');
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -172,7 +176,7 @@ export async function cmdUi(ctx) {
         // 受管启停与移除：改由 manager.mjs 子进程执行（#82-B1）——start/stop/restart
         // 可能持锁等待与进程核验数十秒，同进程同步执行会冻结 ui 事件循环、
         // 期间全部轮询停摆。--json 输出保证数据契约与直调 cmd* 一致（同一实现）。
-        lifecycle: (ref, op, ack, treeRaw, graceRaw, owner) => {
+        lifecycle: (ref, op, ack, treeRaw, graceRaw, owner, depsRaw) => {
           if (!['start', 'stop', 'restart', 'remove'].includes(op)) throw usageError(`不支持的操作：${op}（仅 start|stop|restart|remove）`);
           if (owner && (op !== 'start' || owner.length > 4096)) throw usageError('端口进程参数无效');
           // --ack-unresolved 只在支持它的操作上生效；对 stop/restart 明确拒绝而非静默丢弃，
@@ -190,7 +194,31 @@ export async function cmdUi(ctx) {
             tree = raw === '1' || raw === 'true';
           }
           const graceMs = parseGraceMsValue(graceRaw);
-          return runLifecycleSubprocess(ctx.home, op, ref, ack, { tree, graceMs, owner });
+          const deps = depsRaw != null && ['1', 'true'].includes(String(depsRaw));
+          if (depsRaw != null && (!['1', 'true', '0', 'false'].includes(String(depsRaw)) || op !== 'stop')) {
+            throw usageError('deps 需要 1/true/0/false 且仅 stop 支持');
+          }
+          return runLifecycleSubprocess(ctx.home, op, ref, ack, { tree, graceMs, owner, deps });
+        },
+        // 登记备份（#142）：导出经 manager export --out 临时文件，读回后删除；
+        // 导入把上传体写临时文件再交 manager import（同一 CLI 实现，校验/冲突语义一致）。
+        exportBackup: async () => {
+          const tmp = path.join(os.tmpdir(), `aam-export-${process.pid}-${crypto.randomBytes(4).toString('hex')}.json`);
+          try {
+            const r = await runManagerJson(ctx.home, ['export', '--out', tmp], { timeoutMs: 30000 });
+            const content = fs.readFileSync(tmp, 'utf8');
+            return { ...r, content };
+          } finally { try { fs.unlinkSync(tmp); } catch { /* 已删则忽略 */ } }
+        },
+        importBackup: async (bodyText, { dryRun = false, force = false } = {}) => {
+          const tmp = path.join(os.tmpdir(), `aam-import-${process.pid}-${crypto.randomBytes(4).toString('hex')}.json`);
+          try {
+            fs.writeFileSync(tmp, bodyText);
+            const args = ['import', '--from', tmp];
+            if (dryRun) args.push('--dry-run');
+            if (force) args.push('--force');
+            return await runManagerJson(ctx.home, args, { timeoutMs: 30000 });
+          } finally { try { fs.unlinkSync(tmp); } catch { /* 已删则忽略 */ } }
         },
       },
     });

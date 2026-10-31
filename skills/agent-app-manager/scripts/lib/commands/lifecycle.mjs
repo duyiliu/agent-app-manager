@@ -2,14 +2,40 @@
 // 生命周期命令均在 manager.mjs 的 per-app advisory lock 内执行。
 import { registryPath, readRegistry, readRuntimeStrict, atomicWriteJson } from '../store.mjs';
 import { usageError, notFoundError, conflictError } from '../errors.mjs';
+import { EXIT, ManagerError } from '../constants.mjs';
 import { loadManagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp } from '../desc.mjs';
 import { psProc, verifyRun, listDescendants, portConflict, portOccupants, TERMINATE_WAIT_MS, invalidateVerifyCache } from '../probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from '../locks.mjs';
-import { resolveAppId, writeRuntime, resolveUnresolvedRun, parseAckRunId } from '../runtime.mjs';
+import { resolveAppId, writeRuntime, resolveUnresolvedRun, parseAckRunId, computeStatus } from '../runtime.mjs';
 import { launchManaged, cleanupWrapper } from '../launch.mjs';
 import { prepareLaunchEnv } from '../env.mjs';
 import { parseNamed } from './common.mjs';
 import { parseReadyOptions, requireReadyEvidence, waitForReady, startReadyFields, cmdStatus } from './diagnose.mjs';
+
+// expectedPort 启动预检（#149）：占用者明确时 fail-fast 并附占用证据；
+// detect 标 low 的推断端口（如 preview.port 误猜）只 WARN 不阻断；
+// 预检探测本身失败（pwsh 不可用等）跳过，绝不阻塞启动主路径（TOCTOU best-effort）。
+function portPrecheck(app, force, ignorePid = null) {
+  if (!Number.isInteger(app?.expectedPort)) return null;
+  if (app.expectedPortConfidence === 'low') {
+    let occupants = [];
+    try { occupants = portOccupants(app.expectedPort).filter((p) => p.pid !== ignorePid); }
+    catch { return { checked: false, port: app.expectedPort, note: '低置信度端口预检探测失败，已跳过' }; }
+    if (!occupants.length) return { checked: true, conflict: false, port: app.expectedPort };
+    return {
+      checked: true, conflict: true, warnOnly: true, port: app.expectedPort, occupants,
+      note: `expectedPort=${app.expectedPort} 为低置信度推断（来源提示可能是非服务端口，请人工核对）；已有 ${occupants.length} 个进程监听，仅警告不阻断`,
+    };
+  }
+  try {
+    return portConflict(app.expectedPort, force, ignorePid);
+  } catch (e) {
+    if (e instanceof ManagerError && e.exitCode === EXIT.DEPENDENCY) {
+      return { checked: false, port: app.expectedPort, note: `端口预检探测失败（${e.message}），已跳过不阻断` };
+    }
+    throw e;
+  }
+}
 
 export async function cmdStartNew(ctx) {
   const opts = parseNamed(ctx.rest, {
@@ -34,13 +60,15 @@ export async function cmdStartNew(ctx) {
     // STARTING/UNKNOWN 未结记录默认拒绝；显式 ack 且复核通过后才归档旧账并继续
     const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
     const preparedEnv = prepareLaunchEnv(desc);
-    const portEvidence = portConflict(desc.expectedPort, opts.has('--force'));
+    const portEvidence = portPrecheck(desc, opts.has('--force'));
     const app = withRegistryLock(ctx.home, 'start-new', () => {
       const reg = readRegistry(ctx.home);
       const a = upsertApp(reg, appId, desc);
       atomicWriteJson(registryPath(ctx.home), reg);
       return a;
     });
+    // 登记完成后即可在注册表中解析依赖：依赖先行，自身最后起（#150）
+    const { depsStarted, depsSkipped } = await startDeps(ctx, appId, opts);
     const cur = await launchManaged(ctx.home, appId, app, { abandonRunId: abandon?.runId ?? null, preparedEnv });
     const readiness = readyOpts.waitReady
       ? await waitForReady(ctx.home, app, cur, readyOpts.timeoutMs)
@@ -50,6 +78,7 @@ export async function cmdStartNew(ctx) {
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       ...(cur.wrapperPid ? { wrapperPid: cur.wrapperPid } : {}),
       ...startReadyFields(readiness), logPaths: cur.logPaths,
+      ...(depsStarted.length || depsSkipped.length ? { dependsOn: { started: depsStarted, skipped: depsSkipped } } : {}),
       ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}),
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
@@ -61,6 +90,85 @@ export async function cmdStartNew(ctx) {
 }
 
 // 公开 start：已登记应用复用保存的配置，从任意目录启动
+// ---------- 依赖编排（#150）：dependsOn 拓扑展开、环检测、反向依赖停止序 ----------
+
+// 自根应用出发的依赖先行序（不含根）。未知依赖别名、自依赖与环在启动前即拒绝。
+function depStartOrder(reg, rootAppId) {
+  const order = [], visiting = new Set(), done = new Set();
+  const visit = (appId, trail) => {
+    if (done.has(appId)) return;
+    if (visiting.has(appId)) {
+      throw conflictError('DEP_CYCLE', `依赖环：${[...trail, appId].map((id) => reg.apps[id]?.alias ?? id).join(' → ')}`);
+    }
+    visiting.add(appId);
+    const app = reg.apps[appId];
+    for (const depRef of app?.dependsOn ?? []) {
+      let depId;
+      try { depId = resolveAppId(reg, depRef); }
+      catch { throw conflictError('DEP_UNKNOWN', `${app.alias} 的依赖 ${depRef} 未登记（可用 list 查看）`); }
+      visit(depId, [...trail, appId]);
+    }
+    visiting.delete(appId); done.add(appId); order.push(appId);
+  };
+  visit(rootAppId, []);
+  order.pop(); // 末尾是根自身
+  return order;
+}
+
+// 依赖目标的应用停止序（被依赖最深的最后停，目标自身排最末之外的另行处理）。
+// 反向邻接：depId → 依赖它的应用集合；后续 DFS 让 dependents 先于目标返回。
+function dependentsStopOrder(reg, rootAppId) {
+  const rev = new Map();
+  for (const [id, a] of Object.entries(reg.apps)) {
+    for (const depRef of a.dependsOn ?? []) {
+      let depId;
+      try { depId = resolveAppId(reg, depRef); } catch { continue; } // 悬空依赖不影响停止序
+      if (!rev.has(depId)) rev.set(depId, []);
+      rev.get(depId).push(id);
+    }
+  }
+  const order = [], done = new Set();
+  const visit = (id) => {
+    for (const c of rev.get(id) ?? []) {
+      if (done.has(c)) continue;
+      done.add(c); visit(c); order.push(c);
+    }
+  };
+  done.add(rootAppId); visit(rootAppId);
+  return order;
+}
+
+// 依赖先行启动：已 RUNNING 跳过，DEAD/缺失在前置校验即失败；声明了就绪证据的依赖
+// 按其自身配置等待 READY；单个依赖失败即停，已启动的依赖保留运行并在错误中指认。
+async function startDeps(ctx, appId, opts, depOrder = null, reg0 = null) {
+  reg0 ??= readRegistry(ctx.home);
+  depOrder ??= depStartOrder(reg0, appId);
+  const depsStarted = [], depsSkipped = [];
+  for (const depId of depOrder) {
+    const depApp = readRegistry(ctx.home).apps[depId];
+    const depRt = readRuntimeStrict(ctx.home, depId);
+    const depStatus = depRt?.current ? computeStatus(ctx.home, depId, depRt).status : 'STOPPED';
+    if (depStatus === 'RUNNING') { depsSkipped.push(depApp.alias); continue; }
+    if (depStatus === 'DEAD') {
+      throw conflictError('DEP_NOT_VIABLE', `依赖 ${depApp.alias} 处于 DEAD（重启预算已耗尽），需人工恢复后再启动 ${reg0.apps[appId].alias}`, { depAppId: depId, depsStarted });
+    }
+    const depRest = [depApp.alias,
+      // 依赖声明了就绪证据才等待；无证据的依赖起进程即可（--wait-ready 会被 usageError 拒绝）
+      ...(depApp.readyLogPattern || depApp.readyUrl ? ['--wait-ready'] : []),
+      ...(opts.has('--force') ? ['--force'] : []),
+      ...(opts.get('--ready-timeout') ? ['--ready-timeout', opts.get('--ready-timeout')] : [])];
+    try {
+      await cmdStart({ ...ctx, rest: depRest }, depApp.alias);
+      depsStarted.push(depApp.alias);
+    } catch (e) {
+      throw conflictError('DEP_START_FAILED',
+        `依赖 ${depApp.alias} 启动失败[${e.code ?? 'ERR'}]：${e.message}；已启动的依赖保留运行（${depsStarted.join(',') || '无'}），${reg0.apps[appId].alias} 未启动`,
+        { depAppId: depId, depStatus, depsStarted, cause: e.code ?? null });
+    }
+  }
+  return { depsStarted, depsSkipped };
+}
+
 export async function cmdStart(ctx, ref) {
   if (!ref) throw usageError('start 需要 <alias|appId>');
   const opts = parseNamed(ctx.rest.slice(1), {
@@ -73,7 +181,13 @@ export async function cmdStart(ctx, ref) {
   const ackRunId = parseAckRunId(opts.get('--ack-unresolved'));
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
-  if (opts.has('--dry-run')) return startDryRun(ctx, appId, reg0.apps[appId], opts, ackRunId);
+  const depOrder = depStartOrder(reg0, appId); // 拓扑展开 + 环/未知校验，先于任何启动
+  if (opts.has('--dry-run')) {
+    const plan = startDryRun(ctx, appId, reg0.apps[appId], opts, ackRunId);
+    if (depOrder.length) plan.dependsOn = depOrder.map((id) => ({ appId: id, alias: reg0.apps[id]?.alias ?? id }));
+    return plan;
+  }
+  const { depsStarted, depsSkipped } = await startDeps(ctx, appId, opts, depOrder, reg0);
   return withLockAsync(ctx.home, appId, 'start', async () => {
     const app = readRegistry(ctx.home).apps[appId];
     if (!app.exe && !app.command) {
@@ -110,7 +224,7 @@ export async function cmdStart(ctx, ref) {
       if (!['terminated', 'exited', 'notfound'].includes(result.result)) throw conflictError('PORT_OWNER_STOP_FAILED', '无法确认端口占用进程已退出', { result: result.result });
       endedPortOwner = result.result === 'terminated';
     }
-    const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
+    const portEvidence = portPrecheck(app, opts.has('--force'));
     const appForLaunch = withRegistryLock(ctx.home, 'start', () => {
       const reg = readRegistry(ctx.home);
       const a = reg.apps[appId];
@@ -129,6 +243,7 @@ export async function cmdStart(ctx, ref) {
       runId: cur.runId, pid: cur.pid, status: 'RUNNING', managed: true,
       ...startReadyFields(readiness), logPaths: cur.logPaths,
       ...(cur.envWarnings?.length ? { envWarnings: cur.envWarnings, ...(cur.envWarning ? { envWarning: cur.envWarning } : {}) } : {}),
+      ...(depsStarted.length || depsSkipped.length ? { dependsOn: { started: depsStarted, skipped: depsSkipped } } : {}),
       ...(portEvidence ? { portEvidence } : {}),
       ...(abandon ? { abandonedRunId: abandon.runId, abandonedReason: 'abandoned-by-ack' } : {}),
       note: readiness
@@ -392,7 +507,7 @@ function startDryRun(ctx, appId, app, opts, ackRunId) {
   const exe = app.command ? null : resolveExe(app.exe, cwd);
   const rt = readRuntimeStrict(ctx.home, appId);
   const abandon = resolveUnresolvedRun(ctx.home, appId, rt, ackRunId);
-  const portEvidence = portConflict(app.expectedPort, opts.has('--force'));
+  const portEvidence = portPrecheck(app, opts.has('--force'));
   const cur = rt?.current ?? null;
   return {
     dryRun: true,
@@ -410,7 +525,7 @@ function restartDryRun(ctx, appId, app, opts, graceMs) {
   assertStoppable(cur, app);
   const cwd = realpathOrConflict('cwd', app.cwd);
   const exe = app.command ? null : resolveExe(app.exe, cwd);
-  const portEvidence = portConflict(app.expectedPort, opts.has('--force'), cur.pid);
+  const portEvidence = portPrecheck(app, opts.has('--force'), cur.pid);
   return {
     dryRun: true,
     appId, alias: app.alias,
@@ -427,17 +542,36 @@ function restartDryRun(ctx, appId, app, opts, graceMs) {
 
 export function cmdStop(ctx, ref) {
   if (!ref) throw usageError('stop 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), { '--tree': 'flag', '--grace': 'value' });
+  const opts = parseNamed(ctx.rest.slice(1), { '--tree': 'flag', '--grace': 'value', '--with-dependents': 'flag' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   const graceMs = parseGraceMs(opts);
   const reg0 = readRegistry(ctx.home);
   const appId = resolveAppId(reg0, ref);
+  // --with-dependents：先按反向依赖序停掉依赖本目标的应用（最深的 dependents 先停），再停目标本身；
+  // 单个失败即停并指认位置，已停的保留已停状态。
+  const depStops = [];
+  if (opts.has('--with-dependents')) {
+    for (const depId of dependentsStopOrder(reg0, appId)) {
+      const depAlias = reg0.apps[depId]?.alias ?? depId;
+      const depRest = [depAlias,
+        ...(opts.has('--tree') ? ['--tree'] : []),
+        ...(opts.get('--grace') ? ['--grace', opts.get('--grace')] : [])];
+      try {
+        depStops.push(cmdStop({ ...ctx, rest: depRest }, depAlias));
+      } catch (e) {
+        throw conflictError('DEP_STOP_FAILED',
+          `依赖方 ${depAlias} 停止失败[${e.code ?? 'ERR'}]：${e.message}；目标 ${reg0.apps[appId].alias} 未停止，已停的依赖方保留已停状态`,
+          { depAppId: depId, depStops, cause: e.code ?? null });
+      }
+    }
+  }
   return withLock(ctx.home, appId, 'stop', () => {
     const reg = readRegistry(ctx.home);
     const app = reg.apps[appId];
     const rt = readRuntimeStrict(ctx.home, appId);
     if (!rt || !rt.current) throw notFoundError(`${app.alias} 无运行记录`);
-    return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }) };
+    return { appId, alias: app.alias, ...stopCurrent(ctx.home, appId, app, rt, { tree: opts.has('--tree'), graceMs }),
+      ...(depStops.length ? { dependentsStopped: depStops.map((s) => ({ alias: s.alias, result: s.result })) } : {}) };
   });
 }
 
@@ -464,7 +598,7 @@ export async function cmdRestart(ctx, ref) {
     const exe = app.command ? null : resolveExe(app.exe, cwd);
     // 环境校验必须在停止旧实例之前：缺失 envRefs/envFile 不可读时不得先停后败。
     const preparedEnv = prepareLaunchEnv({ ...app, cwd });
-    const portEvidence = portConflict(app.expectedPort, opts.has('--force'), rt.current.pid);
+    const portEvidence = portPrecheck(app, opts.has('--force'), rt.current.pid);
     // 注册表写入必须先于停止旧实例：锁忙时直接报错，不能把旧实例停了才发现写不进登记表。
     const appForLaunch = withRegistryLock(ctx.home, 'restart', () => {
       const reg = readRegistry(ctx.home);
@@ -494,7 +628,7 @@ export async function cmdRestart(ctx, ref) {
 
 // 标签匹配大小写不敏感；一个应用可属于多个标签，--tag 多值按并集去重。
 // 返回顺序沿用注册表插入顺序，便于多次批量操作结果稳定。
-function selectAppsByTags(home, tags) {
+export function selectAppsByTags(home, tags) {
   const wanted = new Set(tags.map((t) => String(t).toLowerCase()));
   const reg = readRegistry(home);
   return Object.values(reg.apps).filter((app) => Array.isArray(app.tags)

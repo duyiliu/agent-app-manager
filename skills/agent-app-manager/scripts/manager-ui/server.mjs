@@ -273,7 +273,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       // 外层方法守卫只挡「非 GET 且非 lifecycle-POST」，这里必须再查一次：
       // 否则 GET /api/lifecycle?op=stop 会被 <img>/导航等跨站请求触达（CSRF）。
       if (method !== 'POST') throw fail(405, '启停/移除仅接受 POST');
-      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null, u.searchParams.get('tree'), u.searchParams.get('grace'), u.searchParams.get('owner')) });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await api.lifecycle(u.searchParams.get('app') || '', u.searchParams.get('op') || '', u.searchParams.get('ack') || null, u.searchParams.get('tree'), u.searchParams.get('grace'), u.searchParams.get('owner'), u.searchParams.get('deps')) });
     }
     if (u.pathname === '/api/port') {
       // 只读端口诊断：与 CLI `port <N>` 同一实现；输出在 HTTP 层按白名单裁剪。
@@ -290,8 +290,51 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     if (u.pathname === '/api/meta') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { version: MANAGER_VERSION } });
     }
+    if (u.pathname === '/api/export') {
+      // 登记备份导出（#142）：附件下载，Content-Disposition 触发浏览器保存对话框。
+      const r = await api.exportBackup();
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(r.content),
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': 'attachment; filename="agent-app-manager-registry.json"',
+      });
+      res.end(r.content);
+      return;
+    }
+    if (u.pathname === '/api/import') {
+      if (method !== 'POST') throw fail(405, '导入仅接受 POST');
+      const body = await readBody(req, 4 * 1024 * 1024);
+      const r = await api.importBackup(body, {
+        dryRun: u.searchParams.get('dry') === '1',
+        force: u.searchParams.get('force') === '1',
+      });
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: r });
+    }
     if (u.pathname === '/api/apps') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: { ...(await collectApps()), home } });
+    }
+    if (u.pathname === '/api/snapshot') {
+      // 聚合轮询（#145）：前端单定时器一次请求拿到 apps+status+按需 health，
+      // 复用同一批单飞采集器，不增加额外的 manager 子进程开销。
+      const app = u.searchParams.get('app') || '';
+      const out = { home };
+      const jobs = [collectApps().then((d) => { out.apps = d.apps; })];
+      if (u.searchParams.get('health') === '1') {
+        jobs.push(collectHealth().then(
+          (d) => { out.health = d; },
+          (e) => { out.healthError = { code: e.code ?? null, message: e.message ?? String(e) }; },
+        ));
+      }
+      if (app) {
+        jobs.push(collectStatus(app).then(
+          (d) => { out.status = d; },
+          (e) => { out.statusError = { status: e.code === 'NOT_FOUND' ? 404 : null, code: e.code ?? null, message: e.message ?? String(e) }; },
+        ));
+      }
+      await Promise.all(jobs);
+      return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: out });
     }
     if (u.pathname === '/api/health') {
       return sendJson(res, 200, { schemaVersion: SCHEMA_VERSION, ok: true, data: await collectHealth() });
@@ -391,6 +434,20 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     throw fail(404, '接口不存在');
   }
 
+  // 有界请求体读取（/api/import）：超限即拒绝，防内存膨胀。
+  function readBody(req, limit) {
+    return new Promise((resolve, reject) => {
+      let size = 0; const chunks = [];
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > limit) { reject(fail(413, '请求体超过大小限制')); req.destroy(); return; }
+        chunks.push(c);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
+    });
+  }
+
   function handle(req, res) {
     let u;
     try {
@@ -405,10 +462,10 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       if (dest === 'iframe' || dest === 'frame') {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '不允许在 iframe 中访问管理台' } });
       }
-      if (req.method !== 'GET' && !(req.method === 'POST' && ['/api/lifecycle', '/api/workbench'].includes(u.pathname))) {
+      if (req.method !== 'GET' && !(req.method === 'POST' && ['/api/lifecycle', '/api/workbench', '/api/import'].includes(u.pathname))) {
         return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '仅支持 GET 与 POST /api/lifecycle' } });
       }
-      if (u.pathname === '/api/lifecycle' || (u.pathname === '/api/workbench' && req.method === 'POST')) {
+      if (u.pathname === '/api/lifecycle' || (u.pathname === '/api/workbench' && req.method === 'POST') || (u.pathname === '/api/import' && req.method === 'POST')) {
         // 跨站写操作拦截：POST 属 simple request 无 CORS 预检，仅靠 Host 校验挡不住
         // 浏览器里恶意页面直接 fetch 本服务。Sec-Fetch-Site=cross-site 一律拒；
         // Origin 存在时必须同源（curl/脚本不带这两个头，不受影响）。

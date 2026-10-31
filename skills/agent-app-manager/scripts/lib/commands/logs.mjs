@@ -3,13 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readRuntimeStrict } from '../store.mjs';
 import { usageError, notFoundError } from '../errors.mjs';
-import { resolveLogFile, listSources, resolveSource, mergeStreamTails, followLogs } from '../log-sources.mjs';
+import { resolveLogFile, listSources, resolveSource, mergeStreamTails, mergeMultiTails, followLogs, followTagLogs } from '../log-sources.mjs';
 import { readTailLines, filterLogEntries, parseSinceValue } from '../logs.mjs';
+import { parseTagFilters } from '../desc.mjs';
 import { parseNamed } from './common.mjs';
+import { selectAppsByTags } from './lifecycle.mjs';
 
 const LOG_OPTION_SPEC = {
   '--lines': 'value', '--run': 'value', '--stream': 'value', '--follow': 'flag', '--src': 'value', '--list-sources': 'flag',
-  '--grep': 'value', '--ignore-case': 'flag', '--context': 'value', '--since': 'value',
+  '--grep': 'value', '--ignore-case': 'flag', '--context': 'value', '--since': 'value', '--tag': 'multi',
 };
 
 function hasLogFilterArg(opts) {
@@ -79,10 +81,99 @@ function filterMergedLog(data, merged, filterInfo) {
   return withLogFilterMeta({ ...data, lines: f.lines }, filterInfo, f.stats);
 }
 
+// ---------- logs --tag：多应用 current 批次交错合并（#140/#144） ----------
+
+// 每应用取 current 受管批次的 stdout/stderr（或 --stream 指定单流），先各自双流归并、
+// 再按位置比例跨应用交错；JSON 行内附 appId/src 定位符，命中可直接 --src 跟进。
+export function cmdLogsByTags(ctx, opts) {
+  if (opts.positional.length) throw usageError('--tag 与 <alias|appId> 不能同时使用');
+  if (opts.has('--src')) throw usageError('--tag 与 --src 不能同时使用');
+  if (opts.has('--run')) throw usageError('--tag 按各应用 current 批次合并，与 --run 不能同时使用');
+  if (opts.has('--list-sources')) throw usageError('--list-sources 限单应用，与 --tag 不能同时使用');
+  const tags = parseTagFilters(opts.getAll('--tag'));
+  const stream = opts.get('--stream') ?? 'both';
+  if (!['stdout', 'stderr', 'both'].includes(stream)) throw usageError('--stream 只能是 stdout、stderr 或 both');
+  const lines = opts.has('--lines') ? Number(opts.get('--lines')) : 200;
+  if (!Number.isInteger(lines) || lines < 1) throw usageError('--lines 需要正整数');
+  const filterInfo = parseLogFilters(opts);
+  const apps = selectAppsByTags(ctx.home, tags);
+  if (!apps.length) throw notFoundError(`没有应用带有标签：${tags.join(', ')}（可用 list 查看 tags）`);
+  const streams = stream === 'both' ? ['stdout', 'stderr'] : [stream];
+  const skipped = [];
+  const truncatedApps = [];
+  const parts = [];
+  const followSources = [];
+  for (const app of apps) {
+    let rt = null;
+    try { rt = readRuntimeStrict(ctx.home, app.appId); } catch { /* 记录损坏/缺失按无可读批次跳过，不整体失败 */ }
+    const cur = rt?.current;
+    if (!cur || !cur.managed || !cur.runId) {
+      skipped.push({ alias: app.alias, appId: app.appId, reason: '无受管运行批次' });
+      continue;
+    }
+    const files = {};
+    for (const s of streams) {
+      const file = cur.logPaths?.[s] ?? path.join(ctx.home, 'logs', app.appId, `${cur.runId}.${s}.log`);
+      if (fs.existsSync(file)) files[s] = file;
+    }
+    if (!Object.keys(files).length) {
+      skipped.push({ alias: app.alias, appId: app.appId, runId: cur.runId, reason: '批次日志不存在' });
+      continue;
+    }
+    if (opts.has('--follow')) {
+      for (const [s, file] of Object.entries(files)) {
+        followSources.push({
+          appId: app.appId, alias: app.alias, runId: cur.runId, file, stream: s,
+          managedIdentity: cur.pid != null && cur.creationFileTime && cur.image ? cur : null,
+        });
+      }
+      continue;
+    }
+    const tails = {};
+    for (const [s, file] of Object.entries(files)) tails[s] = readTailLines(file, lines);
+    if (Object.values(tails).some((t) => t.truncated)) truncatedApps.push(app.alias);
+    const mergedLines = streams.length === 2
+      ? mergeStreamTails(tails.stdout?.lines ?? [], tails.stderr?.lines ?? [])
+      : (tails[streams[0]]?.lines ?? []).map((line) => ({ stream: streams[0], line }));
+    parts.push({ alias: app.alias, appId: app.appId, runId: cur.runId, lines: mergedLines });
+  }
+  if (opts.has('--follow')) {
+    if (ctx.json) throw usageError('--follow 与 --json 不兼容');
+    if (!followSources.length) throw notFoundError(`标签 ${tags.join(', ')} 下的应用均无可跟随的受管日志批次`);
+    for (const s of skipped) process.stderr.write(`[跳过 ${s.alias}：${s.reason}]\n`);
+    followTagLogs(ctx.home, followSources, lines, filterInfo.active ? filterInfo.options : null);
+    return { following: true };
+  }
+  if (!parts.length) throw notFoundError(`标签 ${tags.join(', ')} 下的应用均无可读日志批次`);
+  const merged = mergeMultiTails(parts).map((e) => ({ ...e, src: `run:${e.runId}.${e.stream}` }));
+  const data = {
+    tagMode: true, tags, stream, apps: parts.map((p) => ({ alias: p.alias, appId: p.appId, runId: p.runId })),
+    lines: merged,
+    ...(skipped.length ? { skipped } : {}),
+    ...(truncatedApps.length ? { truncatedApps } : {}),
+  };
+  const notes = [];
+  if (skipped.length) notes.push(`跳过：${skipped.map((s) => `${s.alias}（${s.reason}）`).join('、')}`);
+  if (truncatedApps.length) notes.push(`以下应用日志量超上限，仅尾部窗口参与合并：${truncatedApps.join('、')}（完整内容可用 logs <alias> --src run:<runId>.<stream> 查看）`);
+  if (filterInfo.active) {
+    const f = filterLogEntries(merged, {
+      ...filterInfo.options,
+      textOf: (entry) => entry.line,
+      separator: () => ({ alias: null, appId: null, runId: null, stream: null, line: '--', src: null }),
+    });
+    const hitApps = [...new Set(f.lines.filter((l) => l.alias).map((l) => l.alias))];
+    if (hitApps.length) notes.push(`命中可用 logs <alias> --src run:<runId>.<stream> 跟进上下文（行内 src 字段）`);
+    return { ...withLogFilterMeta({ ...data, lines: f.lines }, filterInfo, f.stats), ...(notes.length ? { note: notes.join('；') } : {}) };
+  }
+  return { ...data, ...(notes.length ? { note: notes.join('；') } : {}) };
+}
+
 // Bounded log tail implementation lives in scripts/lib/logs.mjs.
-export function cmdLogs(ctx, ref) {
-  if (!ref) throw usageError('logs 需要 <alias|appId>');
-  const opts = parseNamed(ctx.rest.slice(1), LOG_OPTION_SPEC);
+export function cmdLogs(ctx) {
+  const opts = parseNamed(ctx.rest, LOG_OPTION_SPEC);
+  if (opts.has('--tag')) return cmdLogsByTags(ctx, opts);
+  if (opts.positional.length !== 1) throw usageError('logs 需要 <alias|appId> 或 --tag <t>');
+  const ref = opts.positional[0];
   const lines = opts.has('--lines') ? Number(opts.get('--lines')) : 200;
   if (!Number.isInteger(lines) || lines < 1) throw usageError('--lines 需要正整数');
 
