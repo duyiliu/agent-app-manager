@@ -11,12 +11,15 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { computeAppId } from '../lib/desc.mjs';
+import { discoveryFailureEvidence, launchManaged } from '../lib/launch.mjs';
 import { isWindows, hasProcessProbe, killTree, listDescendants } from './platform.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const SENTINEL = 'PR_REDACTION_SENTINEL_DB_PASSWORD_7b2e5c91';
+const ALLOWED_CANDIDATE_KEYS = new Set(['pid', 'image', 'comm', 'creationFileTime', 'cmdHash', 'cmdLength']);
 const MAIN_ENTRY = 'redact';
 const TIMEOUT_ENTRY = 'timeout';
+const FAILURE_ENTRY = 'failure';
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-discovery-redaction-'));
 const home = path.join(base, 'home');
 const project = path.join(base, 'app');
@@ -25,7 +28,8 @@ fs.mkdirSync(project, { recursive: true });
 const projectRoot = fs.realpathSync.native(project);
 const appIdMain = computeAppId(projectRoot, MAIN_ENTRY);
 const appIdTimeout = computeAppId(projectRoot, TIMEOUT_ENTRY);
-const pendingAppIds = new Set([appIdMain, appIdTimeout]);
+const appIdFailure = computeAppId(projectRoot, FAILURE_ENTRY);
+const pendingAppIds = new Set([appIdMain, appIdTimeout, appIdFailure]);
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const cli = (...args) => {
@@ -72,6 +76,20 @@ async function cleanupApps(appIds, extraPids = []) {
   if (left.length) throw new Error(`测试临时进程未清理（${appIds.join(', ')}）：${left.join(', ')}`);
   return ids;
 }
+
+// 可控发现结果覆盖 DISCOVERY_FAILED：该分支不能因探针当前不返回带候选的 error 而漏测。
+const failedDiscovery = {
+  result: 'error', code: 'cimFailed',
+  candidates: [{ pid: 1, image: '/usr/bin/node', comm: 'node', creationFileTime: 'boot:1', cmd: `node --db-password=${SENTINEL}` }],
+};
+const failure = discoveryFailureEvidence(failedDiscovery);
+assert(!failure.lastError.includes(SENTINEL), 'DISCOVERY_FAILED lastError 泄露候选命令行原文');
+assert(!/"cmd"\s*:/.test(failure.lastError), 'DISCOVERY_FAILED lastError 含原始 cmd 字段');
+assert.equal(failure.detail.code, 'cimFailed');
+assert.equal(failure.detail.candidates[0].cmd, undefined, 'DISCOVERY_FAILED detail 仍含原始 cmd');
+assert.equal(failure.detail.candidates[0].cmdLength, failedDiscovery.candidates[0].cmd.length);
+assert.match(failure.detail.candidates[0].cmdHash, /^[0-9a-f]{16}$/);
+assert(Object.keys(failure.detail.candidates[0]).every((k) => ALLOWED_CANDIDATE_KEYS.has(k)), 'DISCOVERY_FAILED detail 含非白名单字段');
 
 if (isWindows && !hasProcessProbe()) {
   console.log('discovery redaction smoke skipped: 缺 pwsh 7');
@@ -127,6 +145,41 @@ try {
     pendingAppIds.delete(appIdTimeout);
     console.log('discovery timeout cleanup fallback ok');
 
+    // 可控发现结果直接走 launchManaged 的 DISCOVERY_FAILED 分支：探针当前不会在 error
+    // 结果里返回候选，因此用注入的 discoverProc 覆盖该分支的 runtime/错误 detail 持久化。
+    let failureError = null;
+    try {
+      await launchManaged(home, appIdFailure, {
+        alias: `redact-${FAILURE_ENTRY}`, root: projectRoot, cwd: projectRoot, entry: FAILURE_ENTRY, mode: 'node',
+        command: `${commandPrefix} two.js --db-password=${SENTINEL}`,
+        expectedImage: targetName, discoverTimeoutMs: 15000, envRefs: [], env: {},
+      }, {
+        discoverProc: () => ({
+          result: 'error', code: 'cimFailed', message: 'controlled discovery failure',
+          candidates: [{ pid: 4242, image: '/usr/bin/node', comm: 'node', creationFileTime: 'boot:1', cmd: `node --db-password=${SENTINEL}` }],
+        }),
+      });
+    } catch (e) {
+      failureError = e;
+    }
+    assert.equal(failureError?.code, 'DISCOVERY_FAILED', `预期 DISCOVERY_FAILED，实际：${failureError?.code ?? '无错误'}`);
+    const failedDetail = failureError.detail?.detail?.candidates ?? [];
+    assert.equal(failedDetail.length, 1, `DISCOVERY_FAILED detail 缺候选：${JSON.stringify(failureError.detail)}`);
+    assert.equal(failedDetail[0].cmd, undefined, 'DISCOVERY_FAILED detail 仍含原始 cmd');
+    assert.equal(typeof failedDetail[0].cmdLength, 'number', 'DISCOVERY_FAILED detail 缺 cmdLength');
+    assert.match(failedDetail[0].cmdHash, /^[0-9a-f]{16}$/, 'DISCOVERY_FAILED detail 缺 cmdHash');
+    assert(Object.keys(failedDetail[0]).every((k) => ALLOWED_CANDIDATE_KEYS.has(k)), 'DISCOVERY_FAILED detail 含非白名单字段');
+    const failedRuntime = readRuntime(appIdFailure)?.current;
+    assert(failedRuntime, 'DISCOVERY_FAILED 未写入运行记录');
+    assert.equal(failedRuntime.phase, 'UNKNOWN');
+    for (const [label, text] of [['错误 detail', JSON.stringify(failureError.detail)], ['runtime lastError', failedRuntime.lastError]]) {
+      assert(!text.includes(SENTINEL), `${label} 泄露候选命令行原文`);
+      assert(!/"cmd"\s*:/.test(text), `${label} 含原始 cmd 字段`);
+    }
+    await cleanupApps([appIdFailure]);
+    pendingAppIds.delete(appIdFailure);
+    console.log('discovery failed projection smoke ok');
+
     const r = cli('start-new', '--desc', writeDesc('main.json', MAIN_ENTRY, targetName, 15000));
     // 先登记兜底证据，再做断言：即使返回非 DISCOVERY_AMBIGUOUS，finally 也能清理已创建进程。
     const detail = r.json?.error?.detail ?? {};
@@ -138,7 +191,7 @@ try {
     assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS', r.text);
     const candidates = detail.candidates ?? [];
     assert(candidates.length >= 2, `歧义候选不足：${JSON.stringify(candidates)}`);
-    const allowedKeys = new Set(['pid', 'image', 'comm', 'creationFileTime', 'cmdHash', 'cmdLength']);
+    const allowedKeys = ALLOWED_CANDIDATE_KEYS;
     for (const c of candidates) {
       assert(Object.keys(c).every((k) => allowedKeys.has(k)), `候选含非白名单字段：${Object.keys(c).join(',')}`);
       assert.equal(c.cmd, undefined, 'CLI 候选仍携带原始 cmd');
