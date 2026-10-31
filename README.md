@@ -12,16 +12,16 @@
 
 ### 1. 安装
 
-**官方安装（固定版本 `v0.11.0`）：**
+**官方安装（固定版本 `v0.11.1`）：**
 
 ```bash
-npx skills add duyiliu/agent-app-manager#v0.11.0 --skill agent-app-manager -g
+npx skills add duyiliu/agent-app-manager#v0.11.1 --skill agent-app-manager -g
 ```
 
 **国内网络加速安装（第三方 `skills-cn`）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/agent-app-manager#v0.11.0 --skill agent-app-manager -g -y
+npx skills-cn@latest add duyiliu/agent-app-manager#v0.11.1 --skill agent-app-manager -g -y
 ```
 
 两种方式均从本仓库安装相同的 `agent-app-manager` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
