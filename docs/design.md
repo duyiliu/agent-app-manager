@@ -244,7 +244,6 @@ Windows 行为与安全边界不变；同一 `--home` 不跨操作系统共享�
 
 
 **v2.11（2026-10-26，资源用量可见性，issue #111）**：新增受管进程 RSS/CPU 单次采样，回应“内存膨胀只能自己开任务管理器对照 pid”的可观测性缺口。平台层：Windows 在 `ps/proc.ps1` 用 `GetProcessMemoryInfo` 取 WorkingSet/PagefileUsage、`GetProcessTimes` 两次计数算 CPU 利用率；Linux 读 `/proc/<pid>/status` 的 `VmRSS` 与 `/proc/<pid>/stat` 的 utime/stime，CLK_TCK 由 `getconf` 解析并缓存。接口层：`status <ref> --resources` 输出单次 `resources` 快照（scope=process|tree、rssBytes、privateBytes、cpuPercent、cpuTimeMs、逐进程明细）；`list` 新增 `memoryBytes`（另有 `cpuPercent`/`resourcesScope`），ui 应用表与详情卡展示内存列。命令模式（`kind=command`）按受管目标 + PPID 后代聚合，复用平台侧一次进程树快照，进程数上限 64；一次调用完成全部 pid 采样（Windows 仍只 1 次 pwsh）。边界：非 RUNNING 不采样；采样失败只降级为 `available:false`/`resourcesNote`，不改变状态、退出码，也不引入常驻轮询或趋势存储。
-=======
 
 **v2.12（2026-10-26，status/list 周期监控，issue #114）**：`status`/`list` 新增 `--watch [--interval <ms>]`。默认 2000ms，允许 500-60000ms 的整数，越界报 usageError（`--interval` 不得脱离 `--watch` 单独使用）。`--json` 模式输出 NDJSON 帧流（每行 `{ schemaVersion, ok, command, data }`，不做 pretty-print），便于 `jq -c`、`while read` 或 agent 条件等待；人类模式在 TTY 清屏重绘，非 TTY 退化为逐帧输出并在首行注明。`--probe`/`--ready` 的探测与就绪证据随每帧重新计算并输出。Ctrl+C 或 stdout 管道断开（EPIPE）时清理定时器并退出；watch 不持有应用锁，`status` 的退出落账仍在短锁内同步完成，不残留锁文件。无 `--watch` 时命令解析与输出保持原样。
 

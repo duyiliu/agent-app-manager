@@ -12,16 +12,16 @@
 
 ### 1. 安装
 
-**官方安装（固定版本 `v0.10.0`）：**
+**官方安装（固定版本 `v0.11.0`）：**
 
 ```bash
-npx skills add duyiliu/agent-app-manager#v0.10.0 --skill agent-app-manager -g
+npx skills add duyiliu/agent-app-manager#v0.11.0 --skill agent-app-manager -g
 ```
 
 **国内网络加速安装（第三方 `skills-cn`）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/agent-app-manager#v0.10.0 --skill agent-app-manager -g -y
+npx skills-cn@latest add duyiliu/agent-app-manager#v0.11.0 --skill agent-app-manager -g -y
 ```
 
 两种方式均从本仓库安装相同的 `agent-app-manager` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
@@ -94,6 +94,10 @@ node "<skill-dir>/scripts/manager.mjs" ui
 | 日志 | 按批次查看 stdout / stderr，支持合并、跟随、正则过滤、上下文与时间过滤；统一日志源覆盖非受管线索与项目 `.tmp` |
 | 自动重启 | 可选 `restartPolicy=on-failure`，按 `maxRestarts` / `backoffMs` 有界重启，`BACKOFF` / `DEAD` 可见 |
 | 退出钩子 | 可选 `onExit`；非监督应用在查询时发现退出后执行，监督应用在结束监督时执行，人工停止不触发 |
+| 依赖编排 | desc `dependsOn` 声明前置应用，`start` 按拓扑序拉起并检测环；`stop --with-dependents` 按反向依赖序停止 |
+| 运行历史 | `status --history` / `--stats` 查看历史批次与运行时长统计 |
+| 端口预检 | `start` 前检测 `expectedPort` 是否被占，冲突以 `PORT_IN_USE` 拒绝并指认占用者 |
+| 登记备份 | `export` / `import` 导出与重建登记，用于换机或数据目录迁移 |
 | JRebel | 初始化 / 检查 standalone JRebel、许可与 `rebel.xml`，验证加载与热更新证据（仅 Java） |
 | 管理台 | 本机 Web 界面，默认只读；启停 / 移除须页面二次确认 |
 
@@ -129,10 +133,10 @@ node "<skill-dir>/scripts/manager.mjs" ui
 | --- | --- |
 | `detect --root <dir>` | 只读识别项目并输出启动候选，不登记或启动 |
 | `list [--watch [--interval <ms>]]` | 全局应用列表与实时状态；`--watch` 周期输出，JSON 模式为 NDJSON |
-| `status <ref> [--probe] [--ready] [--resources] [--watch]` | 单应用详情；`--probe` 实际监听端口，`--ready` 业务就绪，`--resources` 单次 RSS / CPU |
+| `status <ref> [--probe] [--ready] [--resources] [--history] [--stats] [--watch]` | 单应用详情；`--probe` 实际监听端口，`--ready` 业务就绪，`--resources` 单次 RSS / CPU，`--history` / `--stats` 历史批次与运行时长统计 |
 | `status --tag <t>` | 按标签批量查询 |
 | `start <ref> [--force] [--dry-run] [--wait-ready [--ready-timeout <ms>]]` | 用已保存配置启动；`--wait-ready` 就绪才返回 0，超时为退出码 6 且进程保持 RUNNING |
-| `stop <ref> [--tree] [--grace <ms>]` | 停止受管实例 |
+| `stop <ref> [--tree] [--grace <ms>] [--with-dependents]` | 停止受管实例；`--with-dependents` 先按反向依赖序停止依赖方 |
 | `restart <ref> [--force] [--tree] [--grace <ms>] [--dry-run]` | 确认退出后重启 |
 | `start --tag <t>` / `stop --tag <t>` / `restart --tag <t>` | 按标签批量操作；须检查 `results[].ok`，命令退出码不代表每条都成功 |
 | `logs <ref> [--lines N] [--stream ...] [--run <runId>] [--follow] [--src ...] [--grep <regex>] [--since ...]` | 统一日志源查看与过滤 |
@@ -140,6 +144,8 @@ node "<skill-dir>/scripts/manager.mjs" ui
 | `port <N>` | 端口占用诊断（只读，不停止外部进程） |
 | `doctor` | 环境与数据自检（只读，不修复） |
 | `remove <ref>` | 移除登记；须无存活受管实例，运行证据保留 |
+| `export --out <file> [--tag <t>]` | 导出登记清单（含校验和；`envRefs` 只记引用，敏感 env 键不落明文） |
+| `import --from <file> [--dry-run] [--force]` | 校验清单后重建登记（只登记不启动；冲突默认跳过，`--force` 覆盖） |
 | `prune [--dry-run] [--apply]` | 回收超期日志、死锁残留、孤儿临时文件；默认 dry-run |
 | `ui [--port N] [--open]` | 本机 Web 管理台，默认 `127.0.0.1:8199` |
 
