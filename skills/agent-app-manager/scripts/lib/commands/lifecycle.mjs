@@ -143,6 +143,10 @@ function dependentsStopOrder(reg, rootAppId) {
 // 依赖处于 STARTING 不等于失败：锁在途说明它正在正常启动，有界等待后重探（#174）。
 const DEP_STARTING_WAIT_MS = 10000;
 const DEP_STARTING_POLL_MS = 500;
+// 依赖的 log-writer 可能正在写退出记录而短暂持有应用锁（op=log-exit）：这属于在途操作，
+// 不是启动失败。有界退避重试，避免把瞬时锁竞争包装成 DEP_START_FAILED[LOCK_BUSY]。
+const DEP_LOCK_RETRY_MS = 5000;
+const DEP_LOCK_RETRY_STEP_MS = 250;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function depSnapshot(ctx, depId) {
@@ -185,13 +189,21 @@ async function startDeps(ctx, appId, opts, depOrder = null, reg0 = null) {
       ...(depApp.readyLogPattern || depApp.readyUrl ? ['--wait-ready'] : []),
       ...(opts.has('--force') ? ['--force'] : []),
       ...(opts.get('--ready-timeout') ? ['--ready-timeout', opts.get('--ready-timeout')] : [])];
-    try {
-      await cmdStart({ ...ctx, rest: depRest }, depApp.alias);
-      depsStarted.push(depApp.alias);
-    } catch (e) {
-      throw conflictError('DEP_START_FAILED',
-        `依赖 ${depApp.alias} 启动失败[${e.code ?? 'ERR'}]：${e.message}；已启动的依赖保留运行（${depsStarted.join(',') || '无'}），${reg0.apps[appId].alias} 未启动`,
-        { depAppId: depId, depStatus, depsStarted, cause: e.code ?? null });
+    const lockDeadline = Date.now() + DEP_LOCK_RETRY_MS;
+    for (;;) {
+      try {
+        await cmdStart({ ...ctx, rest: depRest }, depApp.alias);
+        depsStarted.push(depApp.alias);
+        break;
+      } catch (e) {
+        if (e.code === 'LOCK_BUSY' && Date.now() < lockDeadline) {
+          await sleep(DEP_LOCK_RETRY_STEP_MS);
+          continue;
+        }
+        throw conflictError('DEP_START_FAILED',
+          `依赖 ${depApp.alias} 启动失败[${e.code ?? 'ERR'}]：${e.message}；已启动的依赖保留运行（${depsStarted.join(',') || '无'}），${reg0.apps[appId].alias} 未启动`,
+          { depAppId: depId, depStatus, depsStarted, cause: e.code ?? null });
+      }
     }
   }
   return { depsStarted, depsSkipped };

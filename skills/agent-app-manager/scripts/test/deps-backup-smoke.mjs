@@ -21,12 +21,21 @@ const projRoot = fs.realpathSync.native(proj);
 const nodeImage = path.basename(process.execPath);
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const runAt = (targetHome, args) => {
+const runOnce = (targetHome, args) => {
   const r = spawnSync(process.execPath, [MANAGER, '--home', targetHome, '--json', ...args],
     { encoding: 'utf8', timeout: 120000, windowsHide: true });
   let json = null;
   try { json = JSON.parse(r.stdout); } catch { /* 非 JSON */ }
   return { code: r.status, text: `${r.stdout ?? ''}${r.stderr ?? ''}`, json };
+};
+// 上一个用例的 detached log-writer 可能仍在写退出记录并持有应用锁：调用方按约定退避重试。
+const runAt = (targetHome, args) => {
+  let r = runOnce(targetHome, args);
+  for (let i = 0; i < 6 && (r.json?.error?.code === 'LOCK_BUSY' || r.json?.error?.detail?.cause === 'LOCK_BUSY'); i++) {
+    sleep(250);
+    r = runOnce(targetHome, args);
+  }
+  return r;
 };
 const ok = (r) => {
   assert.equal(r.json?.ok, true, r.text);
