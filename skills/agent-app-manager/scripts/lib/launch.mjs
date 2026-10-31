@@ -83,6 +83,13 @@ export function persistableDiscovery(detail) {
   return { ...detail, candidates: detail.candidates.map(persistableCandidate) };
 }
 
+// DISCOVERY_FAILED 的 lastError 与错误 detail 由同一份投影构造，防止两处格式漂移。
+export function discoveryFailureEvidence(detail, spawnError = null) {
+  const projectedDetail = persistableDiscovery(detail);
+  const suffix = spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : '';
+  return { lastError: `discovery_failed: ${JSON.stringify(projectedDetail)}${suffix}`, detail: projectedDetail };
+}
+
 // command 模式：log-writer 只能看到 shell wrapper，真实目标由 discover 找到。
 // 目标与 wrapper 不同 pid 时启动 detached watcher（lib/exit-watch.mjs，与
 // log-writer 自动重启路径共用同一实现）。
@@ -265,9 +272,12 @@ export async function launchManaged(home, appId, app, opts = {}) {
   // 否则命令即死场景会从 wrapperExited 退化成 DISCOVERY_TIMEOUT。
   const discoverAnchor = Number.isInteger(rt.current.wrapperPid) && rt.current.wrapperPid > 0
     ? rt.current.wrapperPid : child.pid;
+  const discover = typeof opts.discoverProc === 'function'
+    ? opts.discoverProc
+    : (params) => psProc('discover', params);
   let d;
   try {
-    d = psProc('discover', { id: discoverAnchor, image: app.expectedImage, waitMs });
+    d = discover({ id: discoverAnchor, image: app.expectedImage, waitMs });
   } catch (e) {
     d = { result: 'error', code: 'discover_failed', message: e.message };
   }
@@ -339,8 +349,8 @@ export async function launchManaged(home, appId, app, opts = {}) {
     failUnresolved('DISCOVERY_TIMEOUT', `${waitMs}ms 内未发现匹配 ${app.expectedImage} 的后代进程；wrapper(pid=${child.pid}) 可能仍在启动中，证据保留，拒绝自动重试`, { wrapperPid: child.pid, expectedImage: app.expectedImage });
   }
 
-  const projectedDetail = persistableDiscovery(d);
+  const failure = discoveryFailureEvidence(d, spawnError);
   rt.current.phase = 'UNKNOWN';
-  rt.current.lastError = `discovery_failed: ${JSON.stringify(projectedDetail)}${spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : ''}`;
-  failUnresolved('DISCOVERY_FAILED', `后代发现失败（${d.code ?? d.result}），标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { wrapperPid: child.pid, detail: projectedDetail });
+  rt.current.lastError = failure.lastError;
+  failUnresolved('DISCOVERY_FAILED', `后代发现失败（${d.code ?? d.result}），标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { wrapperPid: child.pid, detail: failure.detail });
 }
