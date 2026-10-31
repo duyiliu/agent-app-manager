@@ -140,15 +140,43 @@ function dependentsStopOrder(reg, rootAppId) {
 
 // 依赖先行启动：已 RUNNING 跳过，DEAD/缺失在前置校验即失败；声明了就绪证据的依赖
 // 按其自身配置等待 READY；单个依赖失败即停，已启动的依赖保留运行并在错误中指认。
+// 依赖处于 STARTING 不等于失败：锁在途说明它正在正常启动，有界等待后重探（#174）。
+const DEP_STARTING_WAIT_MS = 10000;
+const DEP_STARTING_POLL_MS = 500;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function depSnapshot(ctx, depId) {
+  const rt = readRuntimeStrict(ctx.home, depId);
+  return { rt, status: rt?.current ? computeStatus(ctx.home, depId, rt).status : 'STOPPED' };
+}
+
 async function startDeps(ctx, appId, opts, depOrder = null, reg0 = null) {
   reg0 ??= readRegistry(ctx.home);
   depOrder ??= depStartOrder(reg0, appId);
   const depsStarted = [], depsSkipped = [];
   for (const depId of depOrder) {
     const depApp = readRegistry(ctx.home).apps[depId];
-    const depRt = readRuntimeStrict(ctx.home, depId);
-    const depStatus = depRt?.current ? computeStatus(ctx.home, depId, depRt).status : 'STOPPED';
+    let { rt: depRt, status: depStatus } = depSnapshot(ctx, depId);
+    if (depStatus === 'STARTING') {
+      const deadline = Date.now() + DEP_STARTING_WAIT_MS;
+      while (depStatus === 'STARTING' && Date.now() < deadline) {
+        await sleep(DEP_STARTING_POLL_MS);
+        ({ rt: depRt, status: depStatus } = depSnapshot(ctx, depId));
+      }
+      if (depStatus === 'STARTING') {
+        throw conflictError('DEP_STARTING',
+          `依赖 ${depApp.alias} 正在启动中（runId=${depRt?.current?.runId ?? '未知'}），已等待 ${DEP_STARTING_WAIT_MS}ms 仍未就绪；请稍后重试或人工核查`,
+          { depAppId: depId, runId: depRt?.current?.runId ?? null, depsStarted });
+      }
+    }
     if (depStatus === 'RUNNING') { depsSkipped.push(depApp.alias); continue; }
+    if (depStatus === 'UNKNOWN' && depRt?.current?.managed !== false) {
+      const runId = depRt?.current?.runId ?? null;
+      const recover = `manager start ${depApp.alias}${runId ? ` --ack-unresolved ${runId}` : ''}`;
+      throw conflictError('DEP_UNRESOLVED',
+        `依赖 ${depApp.alias} 存在未结记录（runId=${runId ?? '未知'}），需先核验其进程已退出并显式放弃：${recover}`,
+        { depAppId: depId, runId, recover, depsStarted });
+    }
     if (depStatus === 'DEAD') {
       throw conflictError('DEP_NOT_VIABLE', `依赖 ${depApp.alias} 处于 DEAD（重启预算已耗尽），需人工恢复后再启动 ${reg0.apps[appId].alias}`, { depAppId: depId, depsStarted });
     }
