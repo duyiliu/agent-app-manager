@@ -47,7 +47,7 @@ function stableStringify(v) {
   return JSON.stringify(v);
 }
 
-function checksumOf(apps) {
+export function checksumOf(apps) {
   return crypto.createHash('sha256').update(stableStringify(apps)).digest('hex');
 }
 
@@ -103,9 +103,11 @@ export function cmdImport(ctx) {
   const planned = [];
   const skipped = [];
   const warnings = [];
+  const danglingDependsOn = [];
   const buildPlan = () => {
     const reg = readRegistry(ctx.home);
-    planned.length = 0; skipped.length = 0;
+    // buildPlan 在锁外与锁内各跑一次：三组结果都要重置，否则 warnings 会重复累积。
+    planned.length = 0; skipped.length = 0; warnings.length = 0; danglingDependsOn.length = 0;
     const aliasOwner = new Map(Object.values(reg.apps).map((a) => [a.alias.toLowerCase(), a.appId]));
     for (const rec of payload.apps) {
       const appId = rec?.appId;
@@ -124,6 +126,18 @@ export function cmdImport(ctx) {
       if (!fs.existsSync(desc.root ?? '')) warnings.push(`${desc.alias}: root 不存在（${desc.root ?? '未提供'}），导入后 start 前需人工确认`);
       if (!Array.isArray(desc.envRefs)) desc.envRefs = desc.envRefs ?? [];
       if (rec.redactedEnvKeys?.length) warnings.push(`${desc.alias}: ${rec.redactedEnvKeys.length} 个敏感 env 键未在备份中，导入后需补录`);
+    }
+    // 依赖目标必须落在「本次导入 ∪ 注册表现存」范围内，否则导入会静默产生悬空依赖，
+    // 直到 start 才暴露 DEP_UNKNOWN（#173）。只警告不拒绝，口径与 root 不存在一致。
+    const aliasIndex = new Map(Object.entries(reg.apps).map(([id, a]) => [a.alias.toLowerCase(), id]));
+    for (const p of planned) aliasIndex.set(p.desc.alias.toLowerCase(), p.appId);
+    for (const p of planned) {
+      for (const ref of p.desc.dependsOn ?? []) {
+        const key = String(ref).trim();
+        if (reg.apps[key] || aliasIndex.has(key.toLowerCase())) continue;
+        danglingDependsOn.push({ appId: p.appId, alias: p.desc.alias, dependency: key });
+        warnings.push(`${p.desc.alias}: 依赖 ${key} 未随备份导入且未登记，start 将拒绝`);
+      }
     }
     return reg;
   };
@@ -156,6 +170,7 @@ export function cmdImport(ctx) {
       dryRun: true, from,
       wouldImport: planned.map((p) => ({ appId: p.appId, alias: p.desc.alias, ...(p.replaceAppId ? { replaces: p.replaceAppId } : {}), ...(p.evictAppId ? { evictsAliasOwner: p.evictAppId } : {}) })),
       skipped, warnings,
+      ...(danglingDependsOn.length ? { danglingDependsOn } : {}),
       note: 'dry-run 未写入任何登记；确认后去掉 --dry-run 执行',
     };
   }
@@ -166,6 +181,7 @@ export function cmdImport(ctx) {
   return {
     from, imported: planned.map((p) => ({ appId: p.appId, alias: p.desc.alias })),
     skipped, warnings,
+    ...(danglingDependsOn.length ? { danglingDependsOn } : {}),
     note: '已重建登记（未启动任何应用）；敏感 env 键与 envRefs 引用的密钥需按原渠道补齐',
   };
 }
