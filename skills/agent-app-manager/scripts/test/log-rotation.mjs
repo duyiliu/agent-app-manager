@@ -166,10 +166,11 @@ setInterval(() => {}, 1000);
 
   // 目标退出但派生进程继续持有 stdout/stderr 时，'close' 会延迟；退出证据必须在 'exit' 落账。
   const delayedStartedAt = Date.now();
+  const delayedExitAtFile = path.join(temp, 'delayed-close', 'exit-at.txt');
   let delayedExit = null;
   let delayedAt = null;
   const delayed = await runLogger('delayed-close', 1024,
-    "const{spawn}=require('child_process');spawn(process.execPath,['-e','setTimeout(()=>{},1600)'],{stdio:['ignore','inherit','inherit']});setTimeout(()=>process.exit(9),100);",
+    "const{spawn}=require('child_process');const fs=require('fs');spawn(process.execPath,['-e','setTimeout(()=>{},1600)'],{stdio:['ignore','inherit','inherit']});setTimeout(()=>{fs.writeFileSync('exit-at.txt',String(Date.now()));process.exit(9);},100);",
     undefined, undefined, (logger, { runtimeFile }) => {
       const timer = setInterval(() => {
         try {
@@ -183,12 +184,18 @@ setInterval(() => {}, 1000);
   const delayedFinishedAt = Date.now() - delayedStartedAt;
   if (!delayedExit) {
     delayedExit = JSON.parse(fs.readFileSync(delayed.runtimeFile, 'utf8')).current.exit ?? null;
-    delayedAt = Date.now() - delayedStartedAt;
+    // 轮询可能因系统负载错过窗口：用 runtime 文件 mtime 作为落账时刻，而不是读取时刻，
+    // 否则会把「读到证据的时间」当成「写入证据的时间」，在高负载下必然误判。
+    delayedAt = fs.statSync(delayed.runtimeFile).mtimeMs - delayedStartedAt;
   }
   assert.equal(delayedExit?.code, 9, 'stdio 未关闭时也应先记录目标退出码');
-  if (delayedFinishedAt >= 1200) {
-    // Linux 等平台：后代继续持有管道时 close 明显晚于 exit；必须已在 close 前落账。
-    assert(delayedAt != null && delayedAt < 1200, `退出证据不应等待 stdio close（观察到 ${delayedAt}ms，logger 结束于 ${delayedFinishedAt}ms）`);
+  // 以目标自己记录的退出时刻为基准：只有 close 确实晚于 exit 时才断言「证据早于 close」。
+  // 平台差异（Windows 管道不延迟 close）与机器启动耗时都不再影响判定。
+  const exitOffset = Number(fs.readFileSync(delayedExitAtFile, 'utf8')) - delayedStartedAt;
+  const closeGap = delayedFinishedAt - exitOffset;
+  if (closeGap >= 1000) {
+    const evidenceGap = delayedAt - exitOffset;
+    assert(evidenceGap < 1000, `退出证据不应等待 stdio close（目标退出 ${exitOffset}ms，落账 ${delayedAt}ms，logger 结束 ${delayedFinishedAt}ms）`);
   }
 
   // 并发 start 已把旧 run 归档到 prevRuns 时，迟到的退出写入必须补到旧 run，且不碰新 current。

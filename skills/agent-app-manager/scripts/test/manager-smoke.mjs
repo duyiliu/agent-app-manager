@@ -82,6 +82,18 @@ const snapshotLaunchState = () => ({
   locks: walkNames(path.join(home, 'locks')),
   logs: walkNames(path.join(home, 'logs')),
 });
+// 上一个用例的异步落账（detached log-writer 写 runtime、释放锁）可能晚于 CLI 退出：
+// 连续两次快照一致才取基线，避免把别人的瞬态 .tmp-*/锁文件当成 dry-run 的写入。
+const settleLaunchState = (tries = 40, delayMs = 50) => {
+  let prev = snapshotLaunchState();
+  for (let i = 0; i < tries; i++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    const next = snapshotLaunchState();
+    if (JSON.stringify(next) === JSON.stringify(prev)) return next;
+    prev = next;
+  }
+  return prev;
+};
 const isPsMissing = (r) => r.code === 4
   && (r.json?.error?.code === 'PWSH_MISSING' || r.stdout.includes('PWSH_MISSING') || r.stderr.includes('PWSH_MISSING'));
 
@@ -311,7 +323,7 @@ try {
 
   lifecycle('restart --dry-run 输出停止+启动计划且零写入', () => {
     delete process.env.SMOKE_MISSING_113;
-    const before = snapshotLaunchState();
+    const before = settleLaunchState();
     const r = run(['restart', 'smoke', '--dry-run']);
     process.env.SMOKE_MISSING_113 = missingValue;
     const j = expectOk(r);
@@ -324,7 +336,7 @@ try {
       { name: 'SMOKE_SECRET', present: true },
       { name: 'SMOKE_MISSING_113', present: false },
     ]);
-    assert.deepEqual(snapshotLaunchState(), before, 'restart dry-run 不得停止旧实例或写 registry/runtime');
+    assert.deepEqual(settleLaunchState(), before, 'restart dry-run 不得停止旧实例或写 registry/runtime');
   });
 
   lifecycle('重复 start → ALREADY_RUNNING（退出码 3）', () => {
@@ -352,7 +364,7 @@ try {
 
   lifecycle('start --dry-run 输出解析计划且零写入；envRefs 只报命中不回显值', () => {
     delete process.env.SMOKE_MISSING_113;
-    const before = snapshotLaunchState();
+    const before = settleLaunchState();
     const r = run(['start', 'smoke', '--dry-run']);
     process.env.SMOKE_MISSING_113 = missingValue;
     const j = expectOk(r);
@@ -371,7 +383,7 @@ try {
     assert.equal(j.data.port.conflict, false);
     assert(!r.stdout.includes(secretValue) && !r.stderr.includes(secretValue), 'dry-run 不得回显 envRefs 值');
     assert.match(j.data.note, /dry-run/);
-    assert.deepEqual(snapshotLaunchState(), before, 'dry-run 不得写 registry/runtime/locks/logs');
+    assert.deepEqual(settleLaunchState(), before, 'dry-run 不得写 registry/runtime/locks/logs');
   });
 
   let secondRunId = null;
