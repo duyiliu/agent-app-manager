@@ -528,7 +528,7 @@ try {
     if (!hasProbe) { console.log(`  skip  ${name}（缺进程探针，跳过生命周期参数检查）`); return; }
     return check(name, fn);
   };
-  const runManager = async (args) => {
+  const runManagerOnce = async (args) => {
     // stdout 才是 --json 结果；stderr 的 Node 警告不能混入 JSON 解析。
     const c = spawn(process.execPath, [MANAGER, '--home', home, '--json', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
@@ -538,6 +538,16 @@ try {
     let json = null;
     try { json = JSON.parse(out); } catch { /* 非 JSON：用 text 报错 */ }
     return { code, text: out + err, json };
+  };
+  // 上一个用例的 detached log-writer 可能仍在写退出记录并持有应用锁（op=log-exit），
+  // 此时 start-new 会得到 LOCK_BUSY。调用方按约定退避重试，测试同样处理，避免误判。
+  const runManager = async (args) => {
+    let r = await runManagerOnce(args);
+    for (let i = 0; i < 6 && r.json?.error?.code === 'LOCK_BUSY'; i++) {
+      await new Promise((res) => setTimeout(res, 250));
+      r = await runManagerOnce(args);
+    }
+    return r;
   };
   const waitLogPid = async (file, re) => {
     for (let i = 0; i < 60; i++) {
