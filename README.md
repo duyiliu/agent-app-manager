@@ -249,7 +249,7 @@ npm test          # 完整冒烟
 npm run check     # 全部 .mjs 语法检查 + 脱敏 / 健康 / 环境 / 运行时冒烟
 ```
 
-`npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 在 `ubuntu-latest` 上运行语法检查与全量冒烟，并在 `windows-latest` 上运行语法检查；macOS 未纳入支持范围。
+`npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 在 `ubuntu-latest` 与 `windows-latest` 上都运行语法检查与全量冒烟；macOS 未纳入支持范围。
 
 ## 开发边界
 

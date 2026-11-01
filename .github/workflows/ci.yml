@@ -41,8 +41,8 @@ jobs:
       - name: 全量冒烟
         run: node scripts/test-all.mjs
 
-  build-windows:
-    name: 编译校验（Windows）
+  test-windows:
+    name: 冒烟测试（Windows）
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,3 +57,6 @@ jobs:
 
       - name: 编译（语法校验）
         run: npm run build
+
+      - name: 全量冒烟
+        run: node scripts/test-all.mjs
