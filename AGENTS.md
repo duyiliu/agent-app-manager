@@ -55,7 +55,7 @@ examples/                 # 三个本地测试项目：spring-boot(18273) / pyth
 
 1. **不要在 `env` 里放机密。** `env` 的字面值明文写入 registry。机密走系统环境变量 + `envRefs`，或 `envFile`（后者只在启动时读取，不落 registry / runtime / status / UI）。有测试专门守这条（`discovery-redaction-smoke.mjs`）。
 2. **开发边界**（README「开发边界」有原文）：Skill 负责理解目标项目，确定性脚本只负责需要可靠重复执行的操作。**不要为了支持更多语言预先引入通用适配框架、Daemon、数据库或 MCP。**
-3. **支持范围是 Linux + Windows。macOS 不在支持范围**，不要为它加适配或把它写进文档承诺。CI 上 Linux 与 Windows 都跑语法 + 全量冒烟；Windows 侧行为改动仍建议本地实测一遍，CI 只覆盖无人值守路径。
+3. **支持范围是 Linux + Windows。macOS 不在支持范围**，不要为它加适配或把它写进文档承诺。CI 日常只跑语法 + Linux 全量冒烟；Windows 全量冒烟按需触发（发版 tag、手动、每周巡检、PR 打 `ci:windows` 标签）。改 `ps/`、`proc` 等 Windows 特有路径时，发版前必须让 Windows job 实际跑过一遍。
 4. **同名升级路径有状态机**：旧 `~/.project-runner/` 会自动复制到新目录并保留旧目录；旧进程还在跑时**暂缓复制**、提示停止后重试；新旧目录并存时升级逻辑不做任何操作。改 `home.mjs` / `legacy-skill.mjs` 前先读这两处的现有分支条件。
 
 ## 工作约定
