@@ -45,14 +45,35 @@ jobs:
       - name: 全量冒烟
         run: node scripts/test-all.mjs
 
+  test-windows-critical:
+    name: 冒烟测试（Windows 关键集）
+    # PR 阶段只守事故级不变量（密钥泄露、状态机错乱、并发写坏注册表、数据目录迁移、误删）：
+    # manager / env / discovery-redaction / locks / home-migration / cli，约 4.5 分钟。
+    # 最贵的 runtime-smoke（215s）不在这里，交给 push main 与发版 tag 的全量 job。
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖（存在 lockfile 时）
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+
+      - name: 关键集冒烟
+        run: node scripts/test-all.mjs manager-smoke env-smoke discovery-redaction-smoke locks-smoke home-migration cli-smoke
+
   test-windows:
-    name: 冒烟测试（Windows，按需）
-    # Windows 全量约 12 分钟（探针每次起 pwsh 约 550ms）：日常 PR 不跑，只在
-    # 打 tag 发版闸门、手动触发、每周巡检、或 PR 显式打 ci:windows 标签时执行。
+    name: 冒烟测试（Windows 全量）
+    # 全量约 12 分钟（探针每次起 pwsh 约 550ms）：只在 push main、打 tag 发版闸门、
+    # 每周巡检、手动触发，或 PR 显式打 ci:windows 标签时执行。
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'ci:windows')
     runs-on: windows-latest
     steps:
