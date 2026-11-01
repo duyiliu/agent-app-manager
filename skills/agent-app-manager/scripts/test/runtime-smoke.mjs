@@ -108,9 +108,16 @@ const freePort = () => new Promise((resolve, reject) => {
   s.once('error', reject);
   s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
 });
+const runCli = (...args) => spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args],
+  { encoding: 'utf8', windowsHide: true, timeout: 60000 });
 const cli = (...args) => {
-  const r = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args],
-    { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  let r = runCli(...args);
+  // 慢速 Windows runner 上偶发：命令以非 0 退出但 stdout/stderr 全空（连错误信封都没有），
+  // 复跑一次即恢复。真实失败一定会带 JSON 错误信封，所以只对「全空」重试，并留痕便于追溯。
+  if ((r.status ?? 0) !== 0 && !`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) {
+    console.log(`  note 空输出退出（status=${r.status ?? '-'}，signal=${r.signal ?? '-'}），重试一次：${args.join(' ')}`);
+    r = runCli(...args);
+  }
   let json = null;
   try { json = JSON.parse(r.stdout || ''); } catch { /* 保留原始输出 */ }
   return { code: r.status, json, text: `${r.stdout ?? ''}${r.stderr ?? ''}` };
