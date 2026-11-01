@@ -7,7 +7,12 @@ import { conflictError } from './errors.mjs';
 import { ENV_NAME_RE } from './desc.mjs';
 
 // 敏感名模式：只用于回显脱敏与启动前告警，不改变 env/envRefs 的持久化契约。
-export const SENSITIVE_ENV_NAME_RE = /(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|AUTH(?:ENTICATION|ORIZATION)?|APIKEY|API_KEY|PRIVATE|KEY)(?=_|\d|$)/i;
+// 每个词根都以 (^|_) 段首边界开始、以 (?=_|\d|$) 收尾，因此词根内部的子串
+// （MONKEY/KEYBOARD/AUTHOR/TOKENIZER）不会误命中；复数统一用 S?/ES? 覆盖
+// （SECRETS/TOKENS/PASSWORDS/API_KEYS/CREDENTIALS/AUTHORIZATIONS）。
+// KEY/KEYS 保留在词根里：MY_KEY/SSH_KEY/DB_KEY 这类「前缀 + 裸 _KEY」尾段仍脱敏，
+// 这是 8b435d9 收紧前就有的保护；S? 顺带覆盖 KEYS/API_KEYS。
+export const SENSITIVE_ENV_NAME_RE = /(^|_)(SECRETS?|TOKENS?|PASSWORDS?|PASSWD|PASSPHRASES?|CREDENTIALS?|AUTH(?:ENTICATIONS?|ORIZATIONS?)?|APIKEYS?|API_KEYS?|PRIVATE|KEYS?)(?=_|\d|$)/i;
 
 export function isSensitiveEnvName(name) {
   return SENSITIVE_ENV_NAME_RE.test(String(name));
