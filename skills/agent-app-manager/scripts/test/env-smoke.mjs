@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { hasProcessProbe, isWindows } from './platform.mjs';
+import { SENSITIVE_ENV_NAME_RE, isSensitiveEnvName, displayEnv, envSecretWarnings } from '../lib/env.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-env-smoke-'));
@@ -53,6 +54,41 @@ const hasPwsh = hasProcessProbe();
 if (!hasPwsh) console.log(`（未检测到进程探针 ${isWindows ? 'pwsh 7' : '/proc'}：本次仅执行不依赖核验的断言）`);
 
 try {
+  // 0) 敏感名模式单测：复数/后缀变体必须命中，普通同根词不得误伤，且 8b435d9 收紧
+  //    前就脱敏的裸 _KEY 尾段（MY_KEY/SSH_KEY/DB_KEY）不得回归成明文；纯内存断言，
+  //    不依赖进程探针。
+  check('敏感名单测：复数与后缀变体命中脱敏，普通同根词不误伤', () => {
+    const mustRedact = [
+      'SECRET', 'SECRETS', 'GITHUB_SECRETS', 'TOKEN', 'TOKENS', 'MY_TOKENS', 'TOKEN_REFRESH',
+      'PASSWORD', 'PASSWORDS', 'DB_PASSWORDS', 'PASSWD', 'PASSPHRASE', 'PASSPHRASES',
+      'CREDENTIAL', 'CREDENTIALS', 'CREDENTIALS_FILE', 'API_KEY', 'API_KEYS', 'APIKEY', 'APIKEYS',
+      'PRIVATE', 'PRIVATE_KEYS', 'KEY', 'KEYS', 'AUTH', 'AUTHORIZATION', 'AUTHORIZATIONS',
+      'SECRET_KEY', 'SSH_PRIVATE_KEY', 'AUTH_TOKEN', 'SECRET_1', 'PASSWORD2', 'API_KEYS_LIST',
+      // 裸 _KEY 尾段：词根本身在 KEY，收紧前即脱敏；这是复数修复不能退回去的部分。
+      'MY_KEY', 'SSH_KEY', 'DB_KEY', 'FOO_KEY', 'KEY_1', 'KEYS_1', 'SESSION_KEY', 'MONKEYS_AND_KEYS',
+    ];
+    // 只收词根内部子串命中（MONKEY/KEYBOARD/AUTHOR/TOKENIZER）与普通名，不再要求
+    // 「前缀 + 裸 _KEY」保持明文——那类名在 8b435d9 之前就是脱敏的。
+    const plain = ['AUTHOR', 'AUTHORS', 'MONKEY', 'MONKEYS', 'KEYBOARD', 'AUTHORIZED', 'MY_KEYBOARD_LAYOUT'];
+    for (const name of mustRedact) {
+      assert.equal(isSensitiveEnvName(name), true, `预期命中脱敏，实际未命中：${name}`);
+      assert.equal(displayEnv({ [name]: 'literal-value' })[name], '***', `${name} 未脱敏为 ***`);
+    }
+    for (const name of plain) {
+      assert.equal(isSensitiveEnvName(name), false, `预期不脱敏，实际误命中：${name}`);
+      assert.equal(displayEnv({ [name]: 'literal-value' })[name], 'literal-value', `${name} 被误脱敏`);
+    }
+    // 大小写不敏感：复数小写同样命中。
+    assert.equal(isSensitiveEnvName('db_passwords'), true, '小写复数名未命中脱敏');
+    // 启动前告警与回显同口径：复数名也要进 envSecretWarnings。
+    const warnNames = envSecretWarnings({ GITHUB_SECRETS: 'v', DB_PASSWORDS: 'v', API_KEYS: 'v', NORMAL_NAME: 'v' });
+    for (const name of ['GITHUB_SECRETS', 'DB_PASSWORDS', 'API_KEYS']) {
+      assert(warnNames.includes(name), `envSecretWarnings 漏报 ${name}：${JSON.stringify(warnNames)}`);
+    }
+    assert(!warnNames.includes('NORMAL_NAME'), `envSecretWarnings 误报普通变量：${JSON.stringify(warnNames)}`);
+    assert.match(SENSITIVE_ENV_NAME_RE.source, /S\?|S\}/, '正则应显式允许复数后缀，而不是依赖逐条列举');
+  });
+
   // 1) 缺失 envRefs：一次性列出全部名称，且在注册/日志/运行记录落盘前失败。
   const missingHome = path.join(base, 'missing-home');
   const suffix = process.pid.toString(36).toUpperCase();
