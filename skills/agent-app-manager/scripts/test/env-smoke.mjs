@@ -16,14 +16,24 @@ const proj = path.join(base, 'proj');
 fs.mkdirSync(proj, { recursive: true });
 const root = fs.realpathSync(proj);
 
+// 上一用例 detached 停下的 log-writer 可能仍在写退出记录并短暂持有应用锁（op=log-exit），
+// 慢 runner 上这个窗口会盖住紧随其后的 start。锁忙只陈述事实、重试交给调用方（见 locks.mjs），
+// 因此 CLI 调用遇到 LOCK_BUSY 时在这里退避重试，与 manager-smoke / ui-smoke 同一口径。
 const runAt = (home, args, extraEnv = {}) => {
-  const r = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args], {
-    encoding: 'utf8', timeout: 120000, windowsHide: true,
-    env: { ...process.env, ...extraEnv },
-  });
-  let parsed = null;
-  try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（崩溃或文本模式） */ }
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
+  const invoke = () => {
+    const r = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args], {
+      encoding: 'utf8', timeout: 120000, windowsHide: true,
+      env: { ...process.env, ...extraEnv },
+    });
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（崩溃或文本模式） */ }
+    return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
+  };
+  for (let attempt = 0; ; attempt++) {
+    const out = invoke();
+    if (out.json?.error?.code !== 'LOCK_BUSY' || attempt >= 5) return out;
+    sleep(250 * (attempt + 1));
+  }
 };
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const waitFile = (file, timeoutMs = 8000) => {
