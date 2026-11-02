@@ -452,6 +452,20 @@ try {
       assert.match(run('__request.url'), /\/api\/workbench\?app=his&op=open/);
     } finally { run(`fetch=__workbenchFetch; workbench=null;`); }
   });
+  // scenario-test 集成是可选的：未探测到（NOT_INSTALLED）或状态未返回时不出现任何场景测试文案。
+  await check('未探测到场景测试时不渲染任何工作台文案', () => {
+    run(`workbench = null; renderDetail({alias:'his',appId:'ahis',status:'STOPPED',managed:true,mode:'node'});`);
+    assert(!elFor('detail').textContent.includes('场景测试'), '状态未返回时不应出现场景测试文案');
+    assert(!elFor('detailOps').textContent.includes('场景测试'), '状态未返回时操作区不应出现场景测试文案');
+    run(`workbench = {state:'NOT_INSTALLED', message:null}; renderDetail({alias:'his',appId:'ahis',status:'STOPPED',managed:true,mode:'node'});`);
+    const detailText = elFor('detail').textContent;
+    assert(!detailText.includes('场景测试') && !detailText.includes('未发现场景测试'), `NOT_INSTALLED 不应出现场景测试文案：${detailText}`);
+    assert(!elFor('detailOps').textContent.includes('场景测试'), 'NOT_INSTALLED 时操作区不应出现场景测试文案');
+    // 仍有存活实例时保留入口，否则遗留进程无从停止
+    run(`workbench = {state:'NOT_INSTALLED', pid:4242, stderr:'x'}; renderDetail({alias:'his',appId:'ahis',status:'STOPPED',managed:true,mode:'node'});`);
+    assert(elFor('detail').textContent.includes('停止工作台'), '存在存活实例时应保留停止入口');
+    run(`workbench = null;`);
+  });
   // #107：UI 必须优先展示/链接实际监听端口，expectedPort 只保留为启动前冲突检查与回退展示。
   await check('端口链接优先使用实际端口（列表与详情）', () => {
     const anchorHrefs = (root) => [...root.querySelectorAll('a.port-link')].map((a) => a.href);
@@ -496,10 +510,26 @@ try {
       const banner = elFor('fatalBanner').textContent;
       assert(banner.includes('treeKilled=1'), banner);
       assert(banner.includes('killedPids=[4321]'), banner);
+      // 成功横幅必须是绿色成功态：红是危险态，沿用会让「停止成功」看起来像报错。
+      const classes = elFor('fatalBanner').className;
+      assert(classes.includes('ok'), `成功横幅缺少 ok 类：${classes}`);
+      assert(!classes.includes('warn') && !classes.includes('error'), `成功横幅不应带警告/错误类：${classes}`);
     } finally {
       run(`fetch = __origFetch;`);
       run(`lifecycleTree = false; lifecycleGrace = '';`);
     }
+  });
+
+  await check('横幅配色分级：失败红、成功绿且切换时清理旧类', () => {
+    run(`showBanner('x 失败', 'error', 'op')`);
+    assert(elFor('fatalBanner').className.includes('ok') === false, '失败横幅不应带 ok 类');
+    run(`showBanner('x 成功', 'ok', 'op')`);
+    const b = elFor('fatalBanner');
+    assert(b.className.includes('ok'), `成功横幅缺少 ok 类：${b.className}`);
+    assert(!b.className.includes('warn'), `切换后残留 warn 类：${b.className}`);
+    run(`showBanner('x 警告', 'warn', 'op')`);
+    assert(!elFor('fatalBanner').className.includes('ok'), '切到警告后应清掉 ok 类');
+    run(`hideBanner()`);
   });
 
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {

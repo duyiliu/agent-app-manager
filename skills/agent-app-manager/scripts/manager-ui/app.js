@@ -111,6 +111,12 @@ async function workbenchAction(alias, op) {
     if (selected === alias) { workbench = { state: 'FAILED', message: e.message, stderr: e.detail?.stderrTail }; }
   } finally { workbenchBusy = false; if (selected === alias) rerenderDetail(); else if (selected) loadWorkbench(); }
 }
+// scenario-test 集成是可选的：未探测到（含状态尚未返回）时不占用任何界面文案。
+// 例外是仍有存活实例（pid）时保留入口，否则遗留进程在界面上无从停止。
+function workbenchVisible() {
+  if (!workbench) return false;
+  return workbench.state !== 'NOT_INSTALLED' || !!workbench.pid;
+}
 function workbenchPanel(alias, compact = false) {
   const box = el('span', 'workbench-ops' + (compact ? ' compact' : ''));
   if (!compact) box.appendChild(el('span', 'workbench-title', '场景测试', 'flask'));
@@ -311,6 +317,9 @@ function drawResChart() {
   const css = getComputedStyle(document.documentElement);
   const gridColor = css.getPropertyValue('--line-soft').trim() || 'rgba(148,163,184,.15)';
   const dimColor = css.getPropertyValue('--text-faint').trim() || '#71829a';
+  // 曲线颜色跟随主题变量：浅色下用深一档的蓝/橙，避免深色主题的亮色在白色背景上发荧光。
+  const rssColor = css.getPropertyValue('--accent').trim() || '#4099ff';
+  const cpuColor = css.getPropertyValue('--warn').trim() || '#ff8a30';
   const padR = 44, padB = 12, padT = 6;
   const plotW = Math.max(1, w - padR), plotH = Math.max(1, h - padT - padB);
   const maxRss = Math.max(...resSeries.map(p => p.rss), 1) * 1.15;
@@ -352,15 +361,15 @@ function drawResChart() {
       ctx.beginPath(); ctx.arc(xOf(0), yOf(pick(resSeries[0])), 2, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
     }
   };
-  drawLine(p => p.cpu, yOfCpu, '#ff8a30');
-  drawLine(p => p.rss, yOfRss, '#4099ff');
+  drawLine(p => p.cpu, yOfCpu, cpuColor);
+  drawLine(p => p.rss, yOfRss, rssColor);
   if (resHoverIdx != null) {
     const hp = resSeries[resHoverIdx], hx = xOf(resHoverIdx);
     ctx.save();
     ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(148,163,184,.55)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, padT + plotH); ctx.stroke();
     ctx.restore();
-    for (const [value, yOf, color] of [[hp.cpu, yOfCpu, '#ff8a30'], [hp.rss, yOfRss, '#4099ff']]) {
+    for (const [value, yOf, color] of [[hp.cpu, yOfCpu, cpuColor], [hp.rss, yOfRss, rssColor]]) {
       if (value == null) continue;
       ctx.beginPath(); ctx.arc(hx, yOf(value), 2.6, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
     }
@@ -390,12 +399,15 @@ async function api(path, signal, method = 'GET', body = undefined) {
 }
 // 横幅两类（#165）：kind='data' 连接/数据异常——恢复即自动清；kind='op' 操作反馈——
 // 警告/失败驻留到手动关闭或被下一次同类结果覆盖，不被轮询成功冲掉。成功/信息 12s 后淡出。
+// level 决定配色：error（默认，红）| warn（橙）| ok（绿）。成功必须显式传 ok，
+// 否则会落到默认红——红是危险态，不能用来表示操作成功。
 let bannerKind = 'data';
 let bannerFadeTimer = null;
-function showBanner(text, warn = false, kind = 'data') {
+function showBanner(text, level = 'error', kind = 'data') {
   const b = $('#fatalBanner');
   b.hidden = false;
-  b.classList.toggle('warn', warn);
+  b.classList.remove('warn', 'ok');
+  if (level !== 'error') b.classList.add(level);
   bannerKind = kind;
   const close = el('button', 'banner-close', null, 'close');
   close.type = 'button';
@@ -404,7 +416,7 @@ function showBanner(text, warn = false, kind = 'data') {
   close.addEventListener('click', hideBanner);
   b.replaceChildren(el('span', null, text), close);
   if (bannerFadeTimer) { clearTimeout(bannerFadeTimer); bannerFadeTimer = null; }
-  if (!warn) bannerFadeTimer = setTimeout(hideBanner, 12000);
+  if (level === 'ok') bannerFadeTimer = setTimeout(hideBanner, 12000);
 }
 function hideBanner() {
   $('#fatalBanner').hidden = true;
@@ -466,7 +478,7 @@ function handlePollError(e) {
     showBanner('访问被拒绝（403）：管理台仅接受 127.0.0.1 本机请求，请确认经本机直接访问。');
   } else if (String(e.code ?? '').startsWith('DATA_')) {
     degrading = true;
-    showBanner(`数据异常[${e.code}] ${e.message} —— 按设计不静默跳过：请人工处置，不要删除运行数据重建。`, true);
+    showBanner(`数据异常[${e.code}] ${e.message} —— 按设计不静默跳过：请人工处置，不要删除运行数据重建。`, 'warn');
   }
 }
 
@@ -608,43 +620,32 @@ function renderApps() {
     }
     card.appendChild(head);
     const meta = el('div', 'app-meta');
-    meta.append(el('span', null, a.mode ?? '?'));
-    if (a.tags?.length) meta.appendChild(el('span', null, a.tags.map(t => '#' + t).join(' ')));
-    if (a.pid != null) meta.appendChild(el('span', null, 'pid ' + a.pid));
+    meta.appendChild(el('span', 'm-mode', a.mode ?? '?'));
     const actualPorts = actualPortsOf(a);
     const shownPorts = actualPorts.length ? actualPorts : (a.expectedPort != null ? [a.expectedPort] : []);
     if (shownPorts.length) {
+      // 端口固定占 meta 第二列：不同卡片端口号对齐，且不被 mode/tags/pid 挤掉。
+      const ports = el('span', 'm-ports');
       if (a.status === 'RUNNING') {
         for (const port of shownPorts) {
           const title = actualPorts.length && a.expectedPort != null && a.expectedPort !== port
             ? `实际监听端口 ${port}（配置 expectedPort=${a.expectedPort}）`
             : '新标签页打开该应用端口';
           const portInfo = el('span', 'app-port');
-          portInfo.appendChild(el('span', null, ':' + port));
+          // 端口文字本身即链接：去掉右侧小图标，省下列表横向空间。
           const link = portAnchor(port, title, portScheme(port, health));
-          link.classList.add('port-icon');
-          link.textContent = '';
-          const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-          icon.setAttribute('viewBox', '0 0 16 16');
-          icon.setAttribute('aria-hidden', 'true');
-          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-          path.setAttribute('d', 'M7 3H3.5v9.5H13V9M9 3h4v4M13 3 7 9');
-          icon.appendChild(path);
-          link.appendChild(icon);
           link.setAttribute('aria-label', `在新标签页打开端口 ${port}`);
           portInfo.appendChild(link);
-          meta.appendChild(portInfo);
+          ports.appendChild(portInfo);
         }
-      } else meta.appendChild(el('span', null, ':' + (a.expectedPort ?? shownPorts[0])));
+      } else ports.appendChild(el('span', 'app-port', ':' + (a.expectedPort ?? shownPorts[0])));
+      meta.appendChild(ports);
     }
-    if (a.exit) meta.appendChild(el('span', 'v ' + exitClass(a.exit), exitLabel(a.exit)));
-    // 内存列：list 的单点采样（命令模式已聚合后代）；采样不可用时不显示，避免伪造 0。
-    if (a.memoryBytes != null) {
-      const mem = el('span', 'app-mem', '内存 ' + fmtSize(a.memoryBytes));
-      mem.title = a.resourcesScope === 'tree' ? 'RSS 单点采样（含受管目标后代聚合）' : 'RSS 单点采样';
-      meta.appendChild(mem);
-    }
-    if (a.error) meta.appendChild(el('span', 'v bad', a.error));
+    if (a.pid != null) meta.appendChild(el('span', 'm-pid', 'pid ' + a.pid));
+    if (a.exit) meta.appendChild(el('span', 'm-exit v ' + exitClass(a.exit), exitLabel(a.exit)));
+    // 内存不再进列表（窄侧栏里只能显示成“内存 143.”）；详情卡仍展示 RSS。
+    if (a.tags?.length) meta.appendChild(el('span', 'm-tags', a.tags.map(t => '#' + t).join(' ')));
+    if (a.error) meta.appendChild(el('span', 'm-err v bad', a.error));
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
     card.title = a.error ? `${a.alias}：${a.error}` : [a.alias, a.displayName !== a.alias ? a.displayName : null, a.appId, health ? health.state : null].filter(Boolean).join(' · ');
@@ -1002,6 +1003,19 @@ function renderDetail(d) {
       };
       const cur = d.run;
       const unresolved = !d.preview && cur && cur.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(cur.phase);
+      // 运行中且有端口时，标题栏直接给端口号超链：点端口即打开，不必再找按钮。
+      const openPort = actualPortsOf(d)[0] ?? d.expectedPort ?? null;
+      if (st === 'RUNNING' && openPort != null) {
+        const healthRow = healthByAlias.get(d.appId);
+        const open = el('a', 'op-btn port-open', ':' + openPort, 'external');
+        open.href = `${portScheme(openPort, healthRow)}://127.0.0.1:${openPort}/`;
+        open.target = '_blank';
+        open.rel = 'noopener';
+        open.title = `新标签页打开服务端口 ${openPort}`;
+        open.setAttribute('aria-label', `新标签页打开服务端口 ${openPort}`);
+        open.addEventListener('click', (e) => e.stopPropagation());
+        ops.appendChild(open);
+      }
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
       mk('重启', 'restart', ['RUNNING', 'BACKOFF', 'DEAD'].includes(st), '确认旧实例退出后启动新实例（同 CLI restart）');
       mk('停止', 'stop', st === 'RUNNING' || st === 'BACKOFF', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）；BACKOFF 时取消排程的重启（同 CLI stop）');
@@ -1031,12 +1045,13 @@ function renderDetail(d) {
     opsSlot.appendChild(mkUnmanagedRemove());
     opsSlot.hidden = false;
   }
-  opsSlot.appendChild(workbenchPanel(d.alias, true));
+  const showWorkbench = workbenchVisible();
+  if (showWorkbench) opsSlot.appendChild(workbenchPanel(d.alias, true));
   const workbenchRow = el('div', 'workbench-row');
-  workbenchRow.appendChild(workbenchPanel(d.alias));
-  if (d.managed !== false) workbenchRow.appendChild(lifecycleOptions());
-  card.appendChild(workbenchRow);
-  if (workbench?.message || workbench?.stderr) {
+  if (showWorkbench) workbenchRow.appendChild(workbenchPanel(d.alias));
+  if (showWorkbench && d.managed !== false) workbenchRow.appendChild(lifecycleOptions());
+  if (workbenchRow.children.length) card.appendChild(workbenchRow);
+  if (showWorkbench && (workbench?.message || workbench?.stderr)) {
     const details = document.createElement('details');
     details.className = 'lifecycle-opts';
     details.appendChild(el('summary', null, '场景测试详情'));
@@ -1062,7 +1077,12 @@ function renderDetail(d) {
   const overview = el('div', 'detail-overview');
   const runtimeSummary = el('div', 'runtime-summary');
   overview.appendChild(runtimeSummary);
-  if (health) runtimeSummary.appendChild(healthBlock(health));
+  if (health || (!showWorkbench && d.managed !== false)) {
+    const heading = el('div', 'runtime-heading');
+    if (health) heading.appendChild(healthBlock(health));
+    if (!showWorkbench && d.managed !== false) heading.appendChild(lifecycleOptions());
+    runtimeSummary.appendChild(heading);
+  }
   card.appendChild(overview);
   if (!health && d.readinessUntested) {
     card.appendChild(el('div', 'hint-line', '进程存活 ≠ 业务就绪：等待健康总览返回；就绪与 JRebel/热加载验证仍需按 Skill 规程用真实证据判定。'));
@@ -1086,7 +1106,7 @@ function renderDetail(d) {
   const actualLinked = st === 'RUNNING' && actualPorts.length > 0;
   if (d.expectedPort != null) {
     grid.appendChild(el('div', 'k', '预期端口'));
-    const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));
+    const pv = el('div', 'v port-value' + (st === 'RUNNING' ? '' : ' dim'));
     if (st === 'RUNNING' && !actualLinked) pv.appendChild(portAnchor(d.expectedPort, undefined, portScheme(d.expectedPort, health)));
     else pv.textContent = String(d.expectedPort);
     const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '端口诊断', 'diagnose');
@@ -1331,11 +1351,11 @@ async function doLifecycle(alias, op, extra = '', owner = null) {
     const treeNote = Array.isArray(stopResult?.treeKilled)
       ? `；treeKilled=${stopResult.treeKilled.length} killedPids=${JSON.stringify(stopResult.killedPids ?? [])}`
       : '';
-    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${treeNote}${envWarning ? ` · 警告：${envWarning}` : ''}`, Boolean(envWarning), 'op');
+    showBanner(`${op} 成功：${alias}${pid ? `（pid=${pid}）` : ''}${treeNote}${envWarning ? ` · 警告：${envWarning}` : ''}`, envWarning ? 'warn' : 'ok', 'op');
   } catch (e) {
     lastLifecycleError = { alias, op, code: e.code, message: e.message, detail: e.detail };
     // 失败横幅属操作反馈：驻留到手动关闭（#165），不被下一次轮询成功冲掉。
-    showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, true, 'op');
+    showBanner(`${op} ${alias} 失败：${e.message}${e.detail !== undefined ? '（详情见详情卡）' : ''}`, 'error', 'op');
     const owners = [...new Map((e.detail?.occupants ?? []).map(o => [o.pid, o])).values()];
     const occupant = owners.length === 1 ? owners[0] : null;
     const canForce = op === 'start' && e.code === 'PORT_IN_USE' && occupant?.identity?.result === 'ok';
