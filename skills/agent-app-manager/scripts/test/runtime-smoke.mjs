@@ -107,6 +107,8 @@ fs.writeFileSync(path.join(projCmdRestart, 'cmd-crash.js'),
 
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// 同步睡眠：cli() 是同步函数，退避不能改成 await，与 env-smoke 的 sleep 同一实现。
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer();
   s.once('error', reject);
@@ -114,6 +116,7 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 const runCli = (...args) => spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args],
   { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+const parseJson = (stdout) => { try { return JSON.parse(stdout || ''); } catch { return null; } };
 const cli = (...args) => {
   let r = runCli(...args);
   // 慢速 Windows runner 上偶发：命令以非 0 退出但 stdout/stderr 全空（连错误信封都没有），
@@ -122,8 +125,16 @@ const cli = (...args) => {
     console.log(`  note 空输出退出（status=${r.status ?? '-'}，signal=${r.signal ?? '-'}），重试一次：${args.join(' ')}`);
     r = runCli(...args);
   }
-  let json = null;
-  try { json = JSON.parse(r.stdout || ''); } catch { /* 保留原始输出 */ }
+  // 上一个用例 detached 停下的 log-writer 可能仍在写退出记录并短暂持有应用锁（op=log-exit），
+  // 慢 runner 上这个窗口会盖住紧随其后的 restart/start。锁忙只陈述事实、重试交给调用方
+  // （见 locks.mjs），因此这里退避重试，与 env-smoke 的 runAt 同一口径；其他错误码不重试、不掩盖。
+  let json = parseJson(r.stdout);
+  for (let attempt = 0; json?.error?.code === 'LOCK_BUSY' && attempt < 5; attempt++) {
+    console.log(`  note LOCK_BUSY（${json?.error?.detail ?? '锁忙'}），退避 ${250 * (attempt + 1)}ms 后重试：${args.join(' ')}`);
+    sleep(250 * (attempt + 1));
+    r = runCli(...args);
+    json = parseJson(r.stdout);
+  }
   return { code: r.status, json, text: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 };
 const descFile = (d) => {
