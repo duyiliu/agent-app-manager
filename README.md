@@ -8,6 +8,20 @@
 
 支持 Java / Spring Boot（含 standalone JRebel）、Python、Node / Vue / React / Vite，以及任意可核验身份的真实可执行进程。
 
+## 核心定位与差异化
+
+**Agent-native Application Lifecycle Manager：让任意 Coding Agent 自然地启动、观察和管理真实开发应用。**
+
+Agent 负责理解项目，Agent App Manager 负责可信地执行和持续管理应用。它不是 Agent 会话管理器，也不是替代 PM2、Docker 或 IDE 的通用进程控制台；关注的是**由 Agent 启动并登记的开发应用**在不同项目、不同 Agent 和不同会话之间的生命周期。
+
+- **跨 Agent、跨会话的统一入口**：Claude Code、Codex、OpenCode 等只要能加载本 Skill，就能复用同一份应用登记与运行状态；原会话结束后仍可查看、启停和排查应用。
+- **理解与执行分离**：由 Agent 基于仓库证据识别技术栈、启动命令与就绪条件；由确定性脚本执行启动、身份核验、日志采集和生命周期操作，不把进程控制交给模型猜测。
+- **面向真实开发应用，而非 Agent 任务**：统一管理 Java / Spring Boot（含 JRebel）、Python、Node / Vue / React / Vite 等项目的进程、端口、就绪状态、日志和依赖；不负责 Agent 任务分配、会话编排或代码审查。
+- **轻量、按需、无常驻后台依赖**：不要求先部署 Daemon、数据库或 MCP Server；CLI 与本机 Web 管理台按需使用，应用管理记录独立于单次 Agent 会话。
+- **安全边界优先**：只对本 Skill 启动并登记、身份可核验的进程承诺受管启停；IDE、手工命令行和 Docker 启动的外部进程不擅自接管。对身份不明确、状态未结的进程保留证据并要求人工核验，而不是盲目重启或清理。
+
+一句话：**Agent 理解项目，管理器可靠运行应用；Agent 会话可以结束，应用的管理状态不应丢失。**
+
 ## 快速开始
 
 ### 1. 安装
