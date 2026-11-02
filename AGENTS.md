@@ -39,7 +39,7 @@ skills/agent-app-manager/
     ├── lib/              # 领域模块，每个文件一件事（detect / launch / locks / logs / probe …）
     ├── manager-ui/       # 管理台页面与本地服务前端
     ├── ps/ + linux/      # 平台适配：Windows PowerShell / Linux pidfd
-    └── test/             # 18 个 .mjs：16 个进自动套件，locks-stress 手动压测，platform.mjs 是辅助库
+    └── test/             # 20 个 .mjs：17 个进自动套件，locks-stress 手动压测，platform.mjs / lib.mjs 是辅助库
 docs/
 ├── design.md             # 跨项目管理设计与**验收基线**，改能力先读
 ├── ops/                  # 运维记录
@@ -67,6 +67,7 @@ examples/                 # 三个本地测试项目：spring-boot(18273) / pyth
 - **两个远端**：`origin` = GitHub(`duyiliu/agent-app-manager`)，`gitlab` = 内网 `192.168.1.239`。推之前确认目标远端，别默认全推。
 - **改前先看 issue 列表**：`gh issue list`。当前未关 issue 集中在 UI 细节（#161–#168）、manager 健壮性（#170、#173、#174）和文档漂移（#169）。#169 是**已知的文档与实现不一致**（CI 描述、Node 版本、降频口径、design.md 合并残留）—— 引用 README 里这几项时不要当作权威。
 - 加新冒烟就放 `skills/agent-app-manager/scripts/test/`，`test-all.mjs` 会自动发现，不用登记。
+- 真实进程冒烟的 CLI 调用统一走 `test/lib.mjs` 的 `runManager*`：它先等 `home/locks` 空闲（后台 log-writer / exit-watcher 收尾），再对 `LOCK_BUSY` 做有界退避。不要在单个冒烟里另拍重试次数；人为造锁的用例用 `runManager` 绕过屏障。
 
 ## 本地验证
 

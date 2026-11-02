@@ -13,8 +13,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TEST_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'agent-app-manager', 'scripts', 'test');
-// platform.mjs 是测试辅助库（无可执行断言）；locks-stress 是手动压测，不进自动套件。
-const SKIP = new Set(['platform.mjs', 'locks-stress.mjs']);
+// platform.mjs / lib.mjs 是测试辅助库（无可执行断言）；locks-stress 是手动压测，不进自动套件。
+const SKIP = new Set(['platform.mjs', 'lib.mjs', 'locks-stress.mjs']);
 
 const all = fs.readdirSync(TEST_DIR)
   .filter((n) => n.endsWith('.mjs') && !SKIP.has(n))
