@@ -51,6 +51,33 @@ function actionDialog(title, message, onConfirm = null, confirmLabel = '确认�
   cancel.focus?.();
 }
 
+// 启动/重启/停止用页面内确认弹窗，不用 window.confirm（预览/嵌套 iframe 中常被拦截，
+// 表现为“点了没反应”）。停止/重启选项一并回显，避免勾了却没生效的误解。
+function lifecycleConfirm(alias, op, extra, d) {
+  const run = d?.run ?? {};
+  const pid = run.pid ?? d?.pid;
+  const port = d?.expectedPort ?? actualPortsOf(d)[0] ?? null;
+  const ackRunId = new URLSearchParams(String(extra).replace(/^&/, '')).get('ack');
+  const title = { start: '启动', restart: '重启', stop: '停止' }[op] ?? op;
+  const lines = [];
+  if (op === 'start') {
+    lines.push(`将复用已保存配置启动 ${alias}${port ? `（端口 ${port}）` : ''}。`);
+    if (ackRunId) lines.push(`将放弃未结记录 ${ackRunId} 并重新启动。`);
+  } else if (op === 'restart') {
+    lines.push(`将先终止 ${alias} 的当前实例${pid ? `（pid=${pid}）` : ''}，再启动新实例。`);
+  } else {
+    lines.push(`将终止 ${alias} 的当前实例${pid ? `（pid=${pid}）` : ''}。`);
+    if (run.phase === 'BACKOFF') lines.push('当前处于重启等待（BACKOFF）：停止会取消已排程的重启。');
+  }
+  if (op !== 'start') {
+    lines.push(lifecycleTree ? '已勾选「同时终止子进程」：一并终止该实例的全部后代进程。' : '未勾选「同时终止子进程」：只终止主进程。');
+    const grace = String(lifecycleGrace ?? '').trim();
+    if (grace !== '') lines.push(`优雅退出等待 ${grace} ms，超时后强制终止。`);
+    if (op === 'stop' && lifecycleDeps) lines.push('已勾选「连带停止依赖方」：先按反向依赖序停止依赖本应用的应用。');
+  }
+  actionDialog(`确认${title} ${alias}`, lines.join('\n'), () => doLifecycle(alias, op, extra), `确认${title}`);
+}
+
 function confirmPortOwnerStart(alias, port, owner) {
   actionDialog('确认结束占用进程', `将强制结束端口 ${port} 的进程 PID ${owner.pid}\n${owner.executablePath || owner.processName || ''}\n启动时间：${owner.startedAt || '未知'}\n这会中断该进程。确认继续？`, () => {
     doLifecycle(alias, 'start', '', { pid: owner.pid, creationFileTime: owner.identity.creationFileTime, image: owner.identity.image });
@@ -956,16 +983,19 @@ function renderDetail(d) {
     const makeOps = () => {
       const ops = el('span', 'op-group');
       const mk = (label, op, enabled, title, extra = '') => {
-        const needsConfirm = true; // 所有生命周期操作（含普通启动）都需二次点击确认
-        const armed = armedOp === `${d.alias}:${op}:${extra}`;
+        // 启动/重启/停止走弹窗确认；移除仍用二次点击（不弹窗）。
+        const useDialog = op === 'start' || op === 'restart' || op === 'stop';
+        const needsConfirm = true;
+        const armed = !useDialog && armedOp === `${d.alias}:${op}:${extra}`;
         const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
         const b = el('button', 'op-btn' + (op === 'start' ? ' primary' : op === 'stop' || op === 'remove' ? ' danger' : '') + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
         b.dataset.icon = { start: 'play', stop: 'stop', restart: 'refresh', remove: 'remove', ack: 'check' }[op] || 'check';
         b.disabled = !enabled || lifecycleBusy;
-        b.title = running ? `${label}执行中，可能需要数秒，请稍候` : armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
+        b.title = running ? `${label}执行中，可能需要数秒，请稍候` : armed ? '再次点击确认执行' : title + (needsConfirm ? (useDialog ? '（会先弹出确认框）' : '（需再点一次确认）') : '');
         b.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (needsConfirm && !armed) armOp(d.alias, op, extra);
+          if (useDialog) lifecycleConfirm(d.alias, op, extra, d);
+          else if (needsConfirm && !armed) armOp(d.alias, op, extra);
           else { disarmOp(); doLifecycle(d.alias, op, extra); }
         });
         ops.appendChild(b);
@@ -1019,10 +1049,10 @@ function renderDetail(d) {
   const needsAttention = !d.preview && run && run.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(run.phase);
   if (needsAttention) {
     const cmd = `start ${d.alias} --ack-unresolved ${run.runId}`;
-    const alert = alertDiv(`未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（需再次点击确认），或用 manager CLI 执行 ${cmd} 显式恢复。不要删除运行数据绕过。`);
+    const alert = alertDiv(`未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（会先弹出确认框），或用 manager CLI 执行 ${cmd} 显式恢复。不要删除运行数据绕过。`);
     // 文案进 <code>/<span> 分段便于复制按钮并排展示，alertDiv 的纯文本版本供朗读
     alert.replaceChildren(
-      el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（需再次点击确认），或用 manager CLI 执行 `),
+      el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（会先弹出确认框），或用 manager CLI 执行 `),
       el('code', null, cmd), copyButton(cmd),
       el('span', null, ' 显式恢复。不要删除运行数据绕过。'),
     );
@@ -1221,8 +1251,8 @@ function renderDetail(d) {
   }
 }
 let lifecycleBusy = false, lifecycleOpKey = null;
-// 二次确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
-// 第一次点击把按钮变成“确认X”，10 秒内再点一次才执行。
+// 移除按钮的确认不用 window.confirm（预览/嵌套 iframe 中常被拦截、表现为“点了没反应”）：
+// 第一次点击把按钮变成“确认移除”，10 秒内再点一次才执行。启动/重启/停止已改用页面内弹窗。
 // 不能太短：armOp 会触发 loadStatus() 重绘（Windows 上单次采集 3s 左右），
 // 若窗口只有 4s，确认态实际只可见约 1s，用户来不及点第二次。
 const ARM_WINDOW_MS = 10000;
@@ -1874,9 +1904,13 @@ function applyThemePref(pref = themePref()) {
   const light = pref === 'light' || (pref === 'auto' && !!themeMedia?.matches);
   if (light) document.documentElement.dataset.theme = 'light'; else delete document.documentElement.dataset.theme;
   const label = pref === 'auto' ? '跟随系统' : pref === 'light' ? '浅色' : '深色';
-  $('#themeBtn').dataset.icon = { auto: 'monitor', light: 'sun', dark: 'moon' }[pref];
-  $('#themeBtn').setAttribute('aria-label', `切换主题，当前${label}`);
-  $('#themeBtn').title = `主题：${label}（点击在 跟随系统/浅色/深色 间循环）`;
+  // 按钮直接显示当前模式：auto→light 在系统本身就是浅色时颜色不变，
+  // 只换图标会让用户以为“点了没反应”。
+  const btn = $('#themeBtn');
+  btn.textContent = label;
+  btn.dataset.icon = { auto: 'monitor', light: 'sun', dark: 'moon' }[pref];
+  btn.setAttribute('aria-label', `切换主题，当前${label}`);
+  btn.title = `主题：${label}（点击在 跟随系统/浅色/深色 间循环）`;
 }
 applyThemePref();
 themeMedia?.addEventListener?.('change', () => { if (themePref() === 'auto') applyThemePref(); });

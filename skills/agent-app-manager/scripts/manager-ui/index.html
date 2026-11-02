@@ -39,6 +39,7 @@
   --radius-sm:6px;
   --ui-font:ui-sans-serif,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
   --mono-font:ui-monospace,"Cascadia Code","JetBrains Mono",Consolas,"Microsoft YaHei UI",monospace;
+  color-scheme:dark;
 }
 :root[data-theme="light"] {
   --bg:#f8f8f8;
@@ -68,6 +69,7 @@
   --ok-text:#166b32;
   --ok-soft:rgba(30,138,62,.10);
   --shadow:0 12px 32px rgba(0,0,0,.14);
+  color-scheme:light;
 }
 :root[data-theme="light"] .line.jr { color:#0a7f7f; background:rgba(10,167,167,.05); border-left-color:rgba(10,167,167,.4) }
 :root[data-theme="light"] .line.err { background:rgba(224,49,49,.05) }
@@ -732,7 +734,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .brand { margin-right:12px }
 .brand-text strong { font-size:15px }
 .kicker { letter-spacing:0; text-transform:none; font-size:10px }
-#themeBtn { width:32px; padding:0; margin-left:8px }
+#themeBtn { margin-left:8px; min-width:96px }
 #filesBtn { margin-left:8px }
 .panel-title { height:52px; gap:10px; border-bottom:0 }
 .panel-heading { flex-direction:row; align-items:center; gap:8px }
@@ -775,12 +777,12 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <button id="docBtn" data-icon="diagnose" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
   <button id="backupBtn" data-icon="archive" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
   <button id="filesBtn" data-icon="folder" type="button" disabled>文件</button>
-  <button id="themeBtn" data-icon="monitor" class="icon-btn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题"></button>
+  <button id="themeBtn" data-icon="monitor" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题，当前跟随系统">跟随系统</button>
   <span class="badge ro" id="verBadge">本地</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner info" id="roBanner" title="仅 127.0.0.1，无令牌；受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记。">仅本机访问 · 启停操作需再次点击确认，停止和重启参数可在应用详情中设置。</div>
+<div class="banner info" id="roBanner" title="仅 127.0.0.1，无令牌；受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记。">仅本机访问 · 启停操作会先弹出确认框，停止和重启参数可在应用详情中设置。</div>
 <div class="banner" id="fatalBanner" hidden role="alert"></div>
 <div class="banner warn" id="exitBanner" hidden role="alert"></div>
 <main class="layout">
