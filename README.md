@@ -1,6 +1,6 @@
 # Agent App Manager
 
-一个入口，管理所有 Agent 驱动的应用。
+统一管理由 Coding Agent 启动的开发应用，支持跨 Agent、跨项目、跨会话的生命周期管理、状态监控与日志查看。
 
 ## 快速安装
 
