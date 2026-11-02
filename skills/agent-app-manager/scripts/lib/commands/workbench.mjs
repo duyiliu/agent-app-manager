@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
+import os from 'node:os';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readRegistry, readRuntimeStrict, registryPath, atomicWriteJson } from '../store.mjs';
 import { resolveAppId, resolveUnresolvedRun } from '../runtime.mjs';
 import { computeAppId, upsertApp } from '../desc.mjs';
@@ -147,6 +149,89 @@ async function status(home, info) {
 function freePort() {
   return new Promise((resolve, reject) => { const s = net.createServer(); s.once('error', reject); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close((e) => e ? reject(e) : resolve(port)); }); });
 }
+// scenario-test 的用户级项目登记（~/.scenario-test/projects.json）：
+// 新版项目内 CLI 支持 `projects ensure`，由它统一分配/固定端口；
+// 旧版 CLI 不识别该命令时，退化为只读登记文件，避免管理台每次换端口。
+function scenarioRegistryPath() {
+  const explicit = process.env.SCENARIO_TEST_HOME;
+  return path.join(explicit ? path.resolve(explicit) : path.join(os.homedir(), '.scenario-test'), 'projects.json');
+}
+function canonicalConfig(config) {
+  let resolved = path.resolve(config);
+  try { resolved = fs.realpathSync.native(resolved); } catch { /* 配置缺失时保持 resolve 结果 */ }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+function readScenarioProjectPort(config) {
+  try {
+    const registry = JSON.parse(fs.readFileSync(scenarioRegistryPath(), 'utf8'));
+    const key = canonicalConfig(config);
+    for (const [entryKey, entry] of Object.entries(registry.projects || {})) {
+      const normalized = process.platform === 'win32' ? entryKey.toLowerCase() : entryKey;
+      if (normalized === key && Number.isInteger(entry.port)) return entry.port;
+    }
+  } catch { /* 未登记或文件损坏时回退随机端口 */ }
+  return null;
+}
+function ensureScenarioProject(info) {
+  try {
+    const stdout = execFileSync(process.execPath, [info.cli, 'projects', 'ensure', '--config', info.config, '--json', '--reassign'], {
+      cwd: info.workRoot,
+      encoding: 'utf8',
+      timeout: 8000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true
+    });
+    const parsed = JSON.parse(stdout);
+    if (!Number.isInteger(parsed.port) || parsed.port < 1 || parsed.port > 65535) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+function scenarioSlug(name, id) {
+  const slug = String(name).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-._]+|[-._]+$/g, '');
+  return slug || `scenario-${id}`;
+}
+// 旧版项目内 CLI 不支持 `projects ensure` 时，由管理台按 scenario-test 的登记格式补写端口，
+// 保证首次打开后端口同样固定。锁与格式和 scenario-test 保持一致；写失败不影响启动。
+function rememberScenarioProjectPort(info, port) {
+  try {
+    const file = scenarioRegistryPath();
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = path.join(dir, 'projects.lock');
+    let handle;
+    try { handle = fs.openSync(lock, 'wx'); } catch { return; }
+    try {
+      let registry = { schemaVersion: 1, defaultPort: 4300, projects: {} };
+      try { registry = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 首次登记 */ }
+      if (!registry.projects || typeof registry.projects !== 'object') registry.projects = {};
+      if (!Number.isInteger(registry.defaultPort)) registry.defaultPort = 4300;
+      const key = canonicalConfig(info.config);
+      const now = new Date().toISOString();
+      const existing = registry.projects[key];
+      const root = path.dirname(info.workRoot);
+      const name = path.basename(root) || `scenario-${info.id}`;
+      registry.projects[key] = {
+        ...(existing && typeof existing === 'object' ? existing : {}),
+        name: existing?.name || name,
+        slug: existing?.slug || scenarioSlug(name, info.id),
+        root,
+        dir: info.workRoot,
+        config: info.config,
+        port,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      };
+      const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      fs.writeFileSync(temp, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
+      fs.renameSync(temp, file);
+    } finally {
+      try { fs.closeSync(handle); } catch { /* 已关闭 */ }
+      fs.rmSync(lock, { force: true });
+    }
+  } catch { /* 登记写入失败不影响工作台启动 */ }
+}
 export async function cmdWorkbench(ctx, op, ref) {
   if (!ref || !['status', 'open', 'stop'].includes(op) || ctx.rest.length !== 2) throw usageError('workbench 需要 status|open|stop 和应用标识');
   const info = discover(ctx.home, ref);
@@ -168,9 +253,35 @@ export async function cmdWorkbench(ctx, op, ref) {
     const rt = readRuntimeStrict(ctx.home, info.id);
     if (rt?.current?.phase === 'RUNNING' && verifyRun(rt.current).alive) return status(ctx.home, fresh);
     resolveUnresolvedRun(ctx.home, info.id, rt, null);
-    const port = await freePort();
-    portConflict(port, false);
-    const desc = { alias: `scenario-${info.id}`, displayName: '场景测试工作台', root: info.workRoot, entry: info.entry, cwd: info.workRoot, mode: 'node', exe: process.execPath, args: [info.cli, 'serve', '--config', info.config, '--port', String(port)], envRefs: [], env: {}, expectedPort: port };
+    // 端口优先复用 scenario-test 的项目登记（新版 CLI 负责分配/顺延并回写），
+    // 旧版 CLI 或登记缺失时才退回随机端口。serve 启动时仍显式传 --port，
+    // 保证管理台的 expectedPort 与工作台实际端口一致，并同步回登记。
+    const ensured = ensureScenarioProject(info);
+    let port = ensured?.port ?? readScenarioProjectPort(info.config);
+    if (!Number.isInteger(port)) {
+      port = await freePort();
+      rememberScenarioProjectPort(info, port);
+    }
+    try {
+      portConflict(port, false);
+    } catch {
+      port = await freePort();
+      portConflict(port, false);
+      rememberScenarioProjectPort(info, port);
+    }
+    const desc = {
+      alias: `scenario-${info.id}`,
+      displayName: ensured?.name ? `场景测试工作台 - ${ensured.name}` : '场景测试工作台',
+      root: info.workRoot,
+      entry: info.entry,
+      cwd: info.workRoot,
+      mode: 'node',
+      exe: process.execPath,
+      args: [info.cli, 'serve', '--config', info.config, '--port', String(port)],
+      envRefs: [],
+      env: {},
+      expectedPort: port
+    };
     const app = withRegistryLock(ctx.home, 'workbench-register', () => {
       const reg = readRegistry(ctx.home);
       const previous = reg.apps[info.id];
