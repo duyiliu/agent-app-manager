@@ -1,0 +1,56 @@
+/* Agent App Manager — reusable design tokens
+   No framework or network dependency. Import this file globally.
+   Default is dark; use data-theme="light" on html for light mode. */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --aam-bg: #080D1A;
+  --aam-sidebar: #0D1424;
+  --aam-surface: #101A2D;
+  --aam-elevated: #152239;
+  --aam-surface-hover: #1A2943;
+  --aam-border: #26354B;
+  --aam-border-soft: #1C2A40;
+  --aam-text: #F0F5FF;
+  --aam-muted: #91A0BB;
+  --aam-subtle: #667795;
+  --aam-primary: #4C8CFF;
+  --aam-primary-hover: #68A0FF;
+  --aam-primary-contrast: #071120;
+  --aam-accent: #945CFB;
+  --aam-cyan: #24D6EC;
+  --aam-success: #35D6A0;
+  --aam-warning: #F5BD63;
+  --aam-danger: #F37489;
+  --aam-grid: rgba(120,160,220,.045);
+  --aam-shadow: 0 12px 50px rgba(0,0,0,.18);
+  --aam-radius-sm: 8px;
+  --aam-radius: 12px;
+  --aam-radius-lg: 18px;
+  --aam-radius-xl: 24px;
+  --aam-gradient: linear-gradient(135deg,#00DDF6 0%,#047DEB 28%,#1837BF 62%,#952AF1 100%);
+  --aam-gradient-action: linear-gradient(100deg,#347CFF,#7058ED);
+  --aam-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --aam-bg: #F5F7FC;
+  --aam-sidebar: #FFFFFF;
+  --aam-surface: #FFFFFF;
+  --aam-elevated: #F0F4FB;
+  --aam-surface-hover: #E9F0FA;
+  --aam-border: #DCE4F0;
+  --aam-border-soft: #E8ECF4;
+  --aam-text: #152039;
+  --aam-muted: #687891;
+  --aam-subtle: #8792A6;
+  --aam-primary: #276DEA;
+  --aam-primary-hover: #125ADB;
+  --aam-primary-contrast: #FFFFFF;
+  --aam-accent: #7D49E8;
+  --aam-cyan: #00AFC3;
+  --aam-success: #159F75;
+  --aam-warning: #B47417;
+  --aam-danger: #D04D68;
+  --aam-grid: rgba(45,65,100,.035);
+  --aam-shadow: 0 12px 36px rgba(28,53,101,.08);
+}

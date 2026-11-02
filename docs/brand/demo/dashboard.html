@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#080D1A">
+  <title>Agent App Manager — Approved Logo UI Starter</title>
+  <link rel="icon" href="../assets/svg/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../styles/tokens.css">
+  <link rel="stylesheet" href="../styles/dashboard.css">
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18M8 5v4"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 9h6v6H9zM9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M10 2h4l.7 2.6 2 1.2 2.6-.7 2 3.4-1.9 2v2.4l1.9 2-2 3.4-2.6-.7-2 1.2L14 22h-4l-.7-2.6-2-1.2-2.6.7-2-3.4 1.9-2v-2.4l-1.9-2 2-3.4 2.6.7 2-1.2z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15.7A8.5 8.5 0 0 1 8.3 4 8.5 8.5 0 1 0 20 15.7z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="m6 9 3 3-3 3m6 0h5"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 12 7-12 7z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-9 9"/><path d="M20 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4"/></symbol>
+  </svg>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><img src="../assets/png/app-icon-128.png" alt="Agent App Manager logo"><div class="brand-name">Agent App<span>Manager</span></div></div>
+      <div class="workspace"><div class="workspace-icon">W</div><span class="workspace-name">My Workspace<small>Personal plan</small></span><svg class="ic tiny"><use href="#i-chevron"/></svg></div>
+      <div class="side-section-label">WORKSPACE</div>
+      <nav class="nav" aria-label="Main navigation">
+        <button class="nav-link active" data-page="overview"><svg class="ic"><use href="#i-grid"/></svg> Overview</button>
+        <button class="nav-link" data-page="applications"><svg class="ic"><use href="#i-box"/></svg> Applications <span id="navAppCount" class="nav-count">06</span></button>
+        <button class="nav-link" data-page="runtimes"><svg class="ic"><use href="#i-cpu"/></svg> Runtimes</button>
+        <button class="nav-link" data-page="activity"><svg class="ic"><use href="#i-activity"/></svg> Activity</button>
+      </nav>
+      <div class="side-section-label manage-label">PREFERENCES</div>
+      <nav class="nav"><button class="nav-link" data-page="settings"><svg class="ic"><use href="#i-settings"/></svg> Settings</button></nav>
+      <div class="sidebar-bottom"><div class="mini-brand"><span class="mini-orb"></span> All systems operational</div><div class="avatar-line"><div class="avatar">AM</div><span>Workspace admin <small>Local demo · v1.0</small></span><svg class="ic tiny"><use href="#i-dots"/></svg></div></div>
+    </aside>
+    <div class="main-area">
+      <header class="topbar"><div class="crumb"><button id="mobileMenu" class="icon-button mobile-menu" aria-label="Toggle menu">☰</button><span class="crumb-muted">Workspace</span><span class="slash">/</span><strong id="breadcrumb">Overview</strong></div><div class="top-actions"><span class="preview-label">UI KIT PREVIEW</span><button id="themeToggle" class="icon-button" title="Toggle color theme"><svg class="ic" id="themeIcon"><use href="#i-sun"/></svg></button><span class="top-avatar">AM</span></div></header>
+      <main class="content">
+        <section class="page active" id="page-overview">
+          <div class="page-intro"><div><div class="eyebrow"><span class="eyebrow-dot"></span> ONE WORKSPACE, EVERY AGENT APP</div><h1>Everything in <span>one place.</span></h1><p>Launch, monitor, and manage all your agent-powered applications.</p></div><button class="btn btn-primary newAppBtn"><svg class="ic"><use href="#i-plus"/></svg> New application</button></div>
+          <div class="metrics" id="overviewMetrics"></div>
+          <div class="mid-grid"><section class="panel app-panel"><div class="panel-heading"><div><h2>Applications</h2><p>A live view of your managed agent apps</p></div><button class="plain-link" data-go="applications">View all <svg class="ic tiny"><use href="#i-arrow"/></svg></button></div><div id="featuredApps" class="featured-apps"></div></section>
+          <section class="panel chart-panel"><div class="panel-heading"><div><h2>Runtime activity</h2><p>Executions in the last 7 days</p></div><span class="muted-period">Last 7 days <svg class="ic tiny"><use href="#i-chevron"/></svg></span></div><div class="chart-total"><strong>1,284</strong><span class="positive">↗ 18.6%</span></div><div class="chart-caption">Total executions <span>vs. previous week</span></div><div class="bar-chart" aria-label="Illustrative seven day activity"><div style="--h:49%" data-day="Mon"></div><div style="--h:71%" data-day="Tue"></div><div style="--h:61%" data-day="Wed"></div><div style="--h:89%" data-day="Thu"></div><div style="--h:76%" data-day="Fri"></div><div style="--h:99%" data-day="Sat"></div><div style="--h:85%" data-day="Sun"></div></div></section></div>
+          <div class="bottom-grid"><section class="panel recent-panel"><div class="panel-heading"><div><h2>Recent activity</h2><p>Latest events across your workspace</p></div><button class="plain-link" data-go="activity">View history <svg class="ic tiny"><use href="#i-arrow"/></svg></button></div><div id="recentEvents"></div></section><section class="panel runtimes-mini"><div class="panel-heading"><div><h2>Connected runtimes</h2><p>Agents available to launch projects</p></div><button class="plain-link" data-go="runtimes">Explore <svg class="ic tiny"><use href="#i-arrow"/></svg></button></div><div id="runtimeSummary"></div></section></div>
+          <footer class="footer">Agent App Manager · UI design starter <span>Demo content only — connect your own API</span></footer>
+        </section>
+        <section class="page" id="page-applications"><div class="page-intro"><div><div class="eyebrow">APPLICATION MANAGEMENT</div><h1>Applications<span>.</span></h1><p>Every agent-powered project, visible and manageable in one workspace.</p></div><button class="btn btn-primary newAppBtn"><svg class="ic"><use href="#i-plus"/></svg> New application</button></div><section class="panel panel-with-table"><div class="table-toolbar"><div class="searchbox"><svg class="ic"><use href="#i-search"/></svg><input id="appSearch" type="search" placeholder="Search applications..." aria-label="Search applications"></div><select id="statusFilter" aria-label="Filter by status"><option value="all">All statuses</option><option value="running">Running</option><option value="stopped">Stopped</option></select><span id="appListCount" class="table-count"></span></div><div id="applicationRows" class="application-rows"></div></section><footer class="footer">Actions here use local demo data and do not manage a real runtime.</footer></section>
+        <section class="page" id="page-runtimes"><div class="page-intro"><div><div class="eyebrow">AGENT CONNECTORS</div><h1>Runtimes<span>.</span></h1><p>Bring your preferred coding agents into a single control plane.</p></div></div><div class="runtime-grid" id="runtimeCards"></div><section class="hint-panel"><svg class="ic"><use href="#i-terminal"/></svg><div><b>Integrate with your orchestration layer</b><p>Replace these sample connectors with your runtime discovery, health checks, and command endpoints.</p></div></section></section>
+        <section class="page" id="page-activity"><div class="page-intro"><div><div class="eyebrow">EVENT HISTORY</div><h1>Activity<span>.</span></h1><p>One place to see what your agent apps have been doing.</p></div></div><section class="panel"><div class="panel-heading"><div><h2>Timeline</h2><p>Example events for the visual system</p></div></div><div id="activityTimeline" class="activity-timeline"></div></section></section>
+        <section class="page" id="page-settings"><div class="page-intro"><div><div class="eyebrow">YOUR WORKSPACE</div><h1>Settings<span>.</span></h1><p>Adjust workspace appearance and integration preferences.</p></div></div><section class="panel settings-panel"><h2>Appearance</h2><p>Preview the kit in your preferred color scheme.</p><div class="setting-row"><div><b>Theme</b><small>Choose dark or light appearance</small></div><div class="segmented"><button data-theme-select="dark" class="selected">Dark</button><button data-theme-select="light">Light</button></div></div></section><section class="panel settings-panel"><h2>Brand assets</h2><p>Use these vector resources directly in your project.</p><div class="asset-links"><a href="../assets/svg/app-icon.svg" download>App icon · SVG <svg class="ic tiny"><use href="#i-external"/></svg></a><a href="../assets/svg/mark-on-light.svg" download>Brand mark · SVG <svg class="ic tiny"><use href="#i-external"/></svg></a><a href="../styles/tokens.css" download>CSS tokens <svg class="ic tiny"><use href="#i-external"/></svg></a></div></section></section>
+      </main>
+    </div>
+  </div>
+  <dialog id="newAppModal" class="dialog"><form id="newAppForm" method="dialog"><div class="dialog-top"><div><div class="eyebrow">NEW APPLICATION</div><h2>Create app</h2></div><button type="button" class="icon-button" id="closeModal" aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button></div><p>Sample UI only. Apps you create here exist in browser memory until refresh.</p><label>Application name <input id="newAppName" required maxlength="40" placeholder="e.g. My Agent Service"></label><label>Runtime <select id="newAppRuntime"><option>Codex</option><option>Claude Code</option><option>OpenCode</option><option>Custom Runtime</option></select></label><div class="dialog-actions"><button type="button" class="btn btn-secondary" id="cancelModal">Cancel</button><button type="submit" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg> Create application</button></div></form></dialog>
+  <div id="toast" role="status" aria-live="polite" class="toast"></div>
+  <script src="./dashboard.js"></script>
+</body>
+</html>

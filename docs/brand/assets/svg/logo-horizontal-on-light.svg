@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="950" height="188" viewBox="0 0 950 188" role="img" aria-label="Agent App Manager logo">
+<defs>
+ <linearGradient id="plateBase" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+   <stop offset="0" stop-color="#00C9F4"/><stop offset=".24" stop-color="#007BEA"/>
+   <stop offset=".57" stop-color="#0739BE"/><stop offset=".79" stop-color="#2420B8"/><stop offset="1" stop-color="#8B27EF"/>
+ </linearGradient>
+ <radialGradient id="glowTopLeft" cx=".07" cy=".04" r=".7"><stop stop-color="#00F4FE" stop-opacity=".50"/><stop offset="1" stop-color="#0E8FFF" stop-opacity="0"/></radialGradient>
+ <radialGradient id="glowLowerRight" cx=".99" cy="1" r=".76"><stop stop-color="#A229FF" stop-opacity=".78"/><stop offset=".64" stop-color="#7020EF" stop-opacity=".15"/><stop offset="1" stop-color="#7020EF" stop-opacity="0"/></radialGradient>
+ <radialGradient id="glowBottomLeft" cx=".14" cy=".99" r=".65"><stop stop-color="#123AE9" stop-opacity=".78"/><stop offset="1" stop-color="#123AE9" stop-opacity="0"/></radialGradient>
+ <linearGradient id="ribbonRight" x1="640" y1="455" x2="912" y2="851" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#068AFA"/><stop offset=".38" stop-color="#4F9AFE"/><stop offset=".78" stop-color="#A67AF8"/><stop offset="1" stop-color="#BE68F6"/>
+ </linearGradient>
+ <linearGradient id="ribbonWhite" x1="540" y1="350" x2="392" y2="862" gradientUnits="userSpaceOnUse">
+   <stop offset="0" stop-color="#FFFFFF"/><stop offset=".58" stop-color="#F9FBFF"/><stop offset="1" stop-color="#D8E6FF"/>
+ </linearGradient>
+ <linearGradient id="tiles" x1="543" y1="665" x2="701" y2="823" gradientUnits="userSpaceOnUse">
+   <stop offset="0" stop-color="#FFFFFF"/><stop offset=".56" stop-color="#E4EAFF"/><stop offset="1" stop-color="#B7A0FF"/>
+ </linearGradient>
+ <linearGradient id="monoColor" x1="500" y1="350" x2="860" y2="840" gradientUnits="userSpaceOnUse"><stop stop-color="#2A86F5"/><stop offset="1" stop-color="#8A5BEF"/></linearGradient>
+</defs>
+<svg x="0" y="4" width="180" height="180" viewBox="199 192 840 840"><g><rect x="199" y="192" width="840" height="836" rx="197" fill="url(#plateBase)"/>
+<rect x="199" y="192" width="840" height="836" rx="197" fill="url(#glowTopLeft)"/>
+<rect x="199" y="192" width="840" height="836" rx="197" fill="url(#glowBottomLeft)"/>
+<rect x="199" y="192" width="840" height="836" rx="197" fill="url(#glowLowerRight)"/></g><path d="M 604 522 C 624 515 639 521 652 541 L 806 824
+C 819 847 832 857 854 857 L 896 857
+C 930 857 950 830 936 806 L 749 458
+C 732 430 718 417 698 417 C 673 417 655 440 638 470 L 607 521 Z" fill="url(#ribbonRight)"/><path d="M 300 796 L 538 381 C 552 354 573 339 612 339 L 639 339
+C 678 339 704 352 718 381 L 767 476
+C 748 445 730 423 704 418 C 678 412 655 433 640 461
+L 435 822 C 420 847 405 856 382 856 L 340 856
+C 311 856 287 830 300 796 Z" fill="url(#ribbonWhite)"/><g fill="url(#tiles)"><rect x="542" y="668" width="67" height="66" rx="14"/><rect x="628" y="668" width="67" height="66" rx="14"/>
+<rect x="542" y="754" width="67" height="67" rx="14"/><rect x="628" y="754" width="67" height="67" rx="14"/></g></svg>
+ <text x="197" y="112" fill="#102040" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="53" font-weight="750" letter-spacing="-1.5">Agent App</text>
+ <text x="488" y="112" fill="url(#monoColor)" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="53" font-weight="750" letter-spacing="-1.5">Manager</text>
+</svg>
