@@ -66,15 +66,38 @@ jobs:
       - name: 关键集冒烟
         run: node scripts/test-all.mjs manager-smoke env-smoke discovery-redaction-smoke locks-smoke home-migration cli-smoke
 
-  test-windows:
-    name: 冒烟测试（Windows 全量）
-    # 全量约 12 分钟（探针每次起 pwsh 约 550ms）：只在 push main、打 tag 发版闸门、
-    # 每周巡检、手动触发，或 PR 显式打 ci:windows 标签时执行。
+  # 全量串行约 12 分钟（探针每次起 pwsh 约 550ms）：只在 push main、打 tag 发版闸门、
+  # 每周巡检、手动触发，或 PR 显式打 ci:windows 标签时执行。
+  # 拆成「名单 → 每文件一个 job」的矩阵后墙钟约 3-5 分钟；单个文件失败直接定位，
+  # 不再串行跑完全部才暴露。
+  test-windows-list:
+    name: Windows 全量名单
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'ci:windows')
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.list.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: list
+        run: echo "tests=$(node scripts/test-all.mjs --list-json)" >> "$GITHUB_OUTPUT"
+
+  test-windows:
+    name: 冒烟测试（Windows 全量 / ${{ matrix.test }}）
+    needs: test-windows-list
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:windows')
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.test-windows-list.outputs.tests) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,8 +110,5 @@ jobs:
         if: hashFiles('package-lock.json') != ''
         run: npm ci
 
-      - name: 编译（语法校验）
-        run: npm run build
-
       - name: 全量冒烟
-        run: node scripts/test-all.mjs
+        run: node scripts/test-all.mjs ${{ matrix.test }}

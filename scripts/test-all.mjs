@@ -5,6 +5,7 @@
  * 用法：node scripts/test-all.mjs [测试名...]
  *   无参数：运行目录下所有测试（排除 SKIP 中的辅助文件/手动压测）。
  *   带参数：只运行指定测试，可写 cli-smoke 或 cli-smoke.mjs。
+ *   --list-json：只打印测试名单 JSON（CI 矩阵用），不执行。
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -19,6 +20,10 @@ const all = fs.readdirSync(TEST_DIR)
   .filter((n) => n.endsWith('.mjs') && !SKIP.has(n))
   .sort();
 const wanted = process.argv.slice(2);
+if (wanted[0] === '--list-json') {
+  console.log(JSON.stringify(all));
+  process.exit(0);
+}
 const tests = wanted.length
   ? wanted.map((w) => (w.endsWith('.mjs') ? w : `${w}.mjs`))
   : all;
