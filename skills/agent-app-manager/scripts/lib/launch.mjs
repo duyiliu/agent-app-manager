@@ -39,14 +39,21 @@ function shellArgs(command) {
 
 // log-writer 在目标 spawn 成功后写 pidFile（spawn 失败写 '0'）；等待窗口与直连/命令模式
 // 共用。上限 5s：冷启动/杀毒扫描时 1s 不够；文件出现即返回，正常路径无额外等待。
+// 文件已创建但内容为空 = writeFileSync 的「先创建后写入」窗口还没关（慢磁盘/杀毒扫描会
+// 把它拉长到几十毫秒）。空内容不是 pidFile=0 的语义（那只表示目标从未拉起），必须继续
+// 等这个窗口关闭，否则会把正在启动的 wrapper 误报成 SPAWN_FAILED。
 function readPidFile(file) {
-  for (let i = 0; i < 500 && !fs.existsSync(file); i++) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  const wait = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  for (let i = 0; i < 500; i++) {
+    let raw = null;
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { /* 尚未创建：继续等 */ }
+    if (raw != null && raw.trim() !== '') {
+      const n = Number(raw.trim());
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    }
+    wait();
   }
-  try {
-    const n = Number(fs.readFileSync(file, 'utf8'));
-    return Number.isInteger(n) && n >= 0 ? n : null;
-  } catch { return null; }
+  return null;
 }
 
 // 目标进程终止后尽力清理仍存活的 cmd wrapper（多数会随子进程退出自然消亡）。
