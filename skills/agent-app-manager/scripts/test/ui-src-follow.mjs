@@ -230,6 +230,24 @@ try {
   await poll('logSrc', (v) => v !== null);
 
   await check('初始选中=当前批次 stdout', () => assert.equal(run('logSrc'), 'run:rtest1.stdout'));
+  await check('主题按钮显示当前模式并循环切换实际主题', () => {
+    run(`localStorage.setItem('pr-ui-theme', 'auto'); applyThemePref()`);
+    const btn = elFor('themeBtn');
+    assert.equal(btn.textContent, '跟随系统');
+    assert.equal(btn.dataset.icon, 'monitor');
+    assert.equal(documentStub.documentElement.dataset.theme, undefined);
+    btn.dispatch('click', {});
+    assert.equal(btn.textContent, '浅色', '点击后按钮应显示浅色');
+    assert.equal(btn.dataset.icon, 'sun');
+    assert.equal(documentStub.documentElement.dataset.theme, 'light');
+    btn.dispatch('click', {});
+    assert.equal(btn.textContent, '深色');
+    assert.equal(btn.dataset.icon, 'moon');
+    assert.equal(documentStub.documentElement.dataset.theme, undefined);
+    btn.dispatch('click', {});
+    assert.equal(btn.textContent, '跟随系统');
+    assert.equal(documentStub.documentElement.dataset.theme, undefined);
+  });
   await check('内部浮层取消不执行，确认才执行操作', () => {
     run(`globalThis.__confirmed = 0; actionDialog('测试', '进程信息', () => __confirmed++)`);
     assert.equal(elFor('actionOverlay').hidden, false);
@@ -298,33 +316,57 @@ try {
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
 
-  await check('所有生命周期操作首次点击只进入确认态，二次点击才提交', async () => {
+  await check('启动/重启/停止弹出页面内确认框：取消不执行，确认才提交', async () => {
     run(`globalThis.__lifecycleCalls = []; globalThis.__origDoLifecycle = doLifecycle; doLifecycle = (alias, op, extra = '') => { __lifecycleCalls.push({ alias, op, extra }); }; globalThis.__savedSelected = selected; selected = null;`);
     const clickBtn = (btn) => btn.dispatch('click', { target: btn, stopPropagation() {} });
     const cases = [
-      { name: '普通启动', label: '启动', op: 'start', extra: '', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
-      { name: '停止', label: '停止', op: 'stop', extra: '', d: { status: 'RUNNING', managed: true, run: { runId: 'rtest8', phase: 'RUNNING', managed: true } } },
-      { name: '重启', label: '重启', op: 'restart', extra: '', d: { status: 'RUNNING', managed: true, run: { runId: 'rtest8', phase: 'RUNNING', managed: true } } },
-      { name: 'ack 并启动', label: 'ack 并启动', op: 'start', extra: '&ack=ru1', d: { status: 'UNKNOWN', managed: true, run: { runId: 'ru1', phase: 'UNKNOWN', managed: true } } },
-      { name: '受管移除', label: '移除', op: 'remove', extra: '', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
-      { name: '非受管移除', label: '移除', op: 'remove', extra: '', d: { status: 'STOPPED', managed: false, run: { runId: 'rtest8', phase: 'STOPPED', managed: false } } },
+      { name: '普通启动', label: '启动', op: 'start', extra: '', title: '确认启动 his', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
+      { name: '停止', label: '停止', op: 'stop', extra: '', title: '确认停止 his', d: { status: 'RUNNING', managed: true, run: { runId: 'rtest8', phase: 'RUNNING', managed: true } } },
+      { name: '重启', label: '重启', op: 'restart', extra: '', title: '确认重启 his', d: { status: 'RUNNING', managed: true, run: { runId: 'rtest8', phase: 'RUNNING', managed: true } } },
+      { name: 'ack 并启动', label: 'ack 并启动', op: 'start', extra: '&ack=ru1', title: '确认启动 his', d: { status: 'UNKNOWN', managed: true, run: { runId: 'ru1', phase: 'UNKNOWN', managed: true } } },
     ];
     for (const c of cases) {
       const detail = { alias: 'his', appId: 'ahis', mode: 'java', expectedPort: null, ...c.d };
       run(`disarmOp(); __lifecycleCalls.length = 0; renderDetail(${JSON.stringify(detail)})`);
-      const findBtn = () => [...elFor('detailOps').querySelectorAll('.op-btn')].find((b) => b.textContent === c.label || b.textContent === `确认${c.label}`);
+      const findBtn = () => [...elFor('detailOps').querySelectorAll('.op-btn')].find((b) => b.textContent === c.label);
       assert.equal(findBtn()?.textContent, c.label, `${c.name} 初始应为未确认态`);
       clickBtn(findBtn());
       assert.equal(run('__lifecycleCalls.length'), 0, `${c.name} 首次点击不应提交生命周期请求`);
-      assert.equal(run('armedOp'), `his:${c.op}:${c.extra}`, `${c.name} 首次点击应进入确认态`);
-      // 实际界面由轮询后的 renderDetail 重绘为确认态；这里显式重绘，避免依赖网络时序。
-      run(`renderDetail(${JSON.stringify(detail)})`);
-      assert.equal(findBtn()?.textContent, `确认${c.label}`, `${c.name} 重绘后应显示确认态`);
+      assert.equal(run('armedOp'), null, `${c.name} 不应进入按钮确认态`);
+      assert.equal(elFor('actionOverlay').hidden, false, `${c.name} 应弹出确认框`);
+      assert.equal(elFor('actionTitle').textContent, c.title, `${c.name} 弹窗标题`);
+      elFor('actionCancel').onclick();
+      assert.equal(run('__lifecycleCalls.length'), 0, `${c.name} 取消不应提交`);
+      assert.equal(elFor('actionOverlay').hidden, true);
       clickBtn(findBtn());
-      assert.equal(run('__lifecycleCalls.length'), 1, `${c.name} 二次点击应提交一次生命周期请求`);
+      elFor('actionConfirm').onclick();
+      assert.equal(run('__lifecycleCalls.length'), 1, `${c.name} 确认后应提交一次生命周期请求`);
       assert.equal(run('__lifecycleCalls[0].alias'), 'his');
       assert.equal(run('__lifecycleCalls[0].op'), c.op);
       assert.equal(run('__lifecycleCalls[0].extra'), c.extra);
+      assert.equal(elFor('actionOverlay').hidden, true);
+    }
+    run('selected = __savedSelected; doLifecycle = __origDoLifecycle;');
+  });
+  await check('移除仍用二次点击确认，点击不弹窗', async () => {
+    run(`globalThis.__lifecycleCalls = []; globalThis.__origDoLifecycle = doLifecycle; doLifecycle = (alias, op, extra = '') => { __lifecycleCalls.push({ alias, op, extra }); }; globalThis.__savedSelected = selected; selected = null;`);
+    const clickBtn = (btn) => btn.dispatch('click', { target: btn, stopPropagation() {} });
+    const cases = [
+      { name: '受管移除', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
+      { name: '非受管移除', d: { status: 'STOPPED', managed: false, run: { runId: 'rtest8', phase: 'STOPPED', managed: false } } },
+    ];
+    for (const c of cases) {
+      const detail = { alias: 'his', appId: 'ahis', mode: 'java', expectedPort: null, ...c.d };
+      run(`disarmOp(); __lifecycleCalls.length = 0; renderDetail(${JSON.stringify(detail)})`);
+      const findBtn = () => [...elFor('detailOps').querySelectorAll('.op-btn')].find((b) => b.textContent === '移除' || b.textContent === '确认移除');
+      clickBtn(findBtn());
+      assert.equal(run('__lifecycleCalls.length'), 0, `${c.name} 首次点击不应提交`);
+      assert.equal(elFor('actionOverlay').hidden, true, `${c.name} 不应弹窗`);
+      run(`renderDetail(${JSON.stringify(detail)})`);
+      assert.equal(findBtn()?.textContent, '确认移除', `${c.name} 重绘后应显示确认态`);
+      clickBtn(findBtn());
+      assert.equal(run('__lifecycleCalls.length'), 1, `${c.name} 二次点击应提交一次`);
+      assert.equal(run('__lifecycleCalls[0].op'), 'remove');
       run('disarmOp()');
     }
     run('selected = __savedSelected; doLifecycle = __origDoLifecycle;');
