@@ -1,12 +1,22 @@
 # Agent App Manager
 
-[![CI](https://github.com/duyiliu/agent-app-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/duyiliu/agent-app-manager/actions/workflows/ci.yml)
+**让 Coding Agent 启动的开发应用跨项目、跨会话持续受管，统一启停、查看状态与日志，无需常驻 Daemon。**
 
-**Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应用，提供跨 Agent、跨会话的生命周期管理、状态监控、日志和 Web 控制台。**
+## 快速安装
 
-在业务仓库中让 Agent 识别并启动项目、查看日志和验证热加载。受管应用会统一登记，之后可在其他目录或 Agent 会话中查看状态、启停和查日志；无法安全托管的启动会标记为非受管。附带本机 Web 管理台。
+**官方安装：**
 
-支持 Java / Spring Boot（含 standalone JRebel）、Python、Node / Vue / React / Vite，以及任意可核验身份的真实可执行进程。
+```bash
+npx skills add duyiliu/agent-app-manager --skill agent-app-manager -g
+```
+
+**国内加速安装（第三方 skills-cn）：**
+
+```bash
+npx skills-cn@latest add duyiliu/agent-app-manager --skill agent-app-manager -g -y
+```
+
+`-g` 表示全局安装，`-y` 表示跳过交互确认；`skills-cn` 为第三方 CLI。安装后根据 Agent 实际加载的 Skill 目录定位脚本，已安装版本可通过 `manager.mjs version` 查看。
 
 ## 核心定位与差异化
 
@@ -22,27 +32,9 @@ Agent 负责理解项目，Agent App Manager 负责可信地执行和持续管�
 
 一句话：**Agent 理解项目，管理器可靠运行应用；Agent 会话可以结束，应用的管理状态不应丢失。**
 
-## 快速开始
+## 快速使用
 
-### 1. 安装
-
-**官方安装（固定版本 `v0.12.0`）：**
-
-```bash
-npx skills add duyiliu/agent-app-manager#v0.12.0 --skill agent-app-manager -g
-```
-
-**国内网络加速安装（第三方 `skills-cn`）：**
-
-```bash
-npx skills-cn@latest add duyiliu/agent-app-manager#v0.12.0 --skill agent-app-manager -g -y
-```
-
-两种方式均从本仓库安装相同的 `agent-app-manager` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
-
-安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对。
-
-### 2. 让 Agent 启动项目
+### 1. 让 Agent 启动项目
 
 在目标仓库中直接说：
 
@@ -54,7 +46,7 @@ Agent 会读取项目说明、已有启动脚本和构建配置，识别启动�
 
 Java 项目默认 `mode: java`；只有项目已有 JRebel 配置（启动脚本引用 agent、仓库有 `rebel.xml`、构建文件含插件）或你明确要求时，才走 `mode: jrebel` 并检查 standalone JRebel 环境。
 
-### 3. 查看与管理
+### 2. 查看与管理
 
 将下面的路径和 `my-app` 替换为实际 Skill 安装目录和应用别名：
 
@@ -233,6 +225,8 @@ examples/spring-boot-demo/         # 本地测试项目
 三个示例仅监听本机，不依赖数据库；启动和接口检查步骤见各自的 README。
 
 ## 开发与测试
+
+[![CI](https://github.com/duyiliu/agent-app-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/duyiliu/agent-app-manager/actions/workflows/ci.yml)
 
 改动 `manager.mjs` / `manager-ui` / `lib` 后运行：
 
