@@ -1,5 +1,6 @@
 const $ = s => document.querySelector(s);
-const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+// 图标由 CSS 伪元素绘制，文字更新不会移除图标，也不影响按钮的可访问名称。
+const el = (tag, cls, text, icon = null) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; if (icon) e.dataset.icon = icon; return e; };
 const fmtSize = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
 // 服务器返回的时间是 UTC ISO（结尾 Z）。原实现只去掉 Z 直接显示 = 显示成 UTC，
 // 本地读数偏差 8h（#162）。统一经 Date 转本地时区；无法解析时原样回显，不伪造本地时间。
@@ -85,7 +86,7 @@ async function workbenchAction(alias, op) {
 }
 function workbenchPanel(alias, compact = false) {
   const box = el('span', 'workbench-ops' + (compact ? ' compact' : ''));
-  if (!compact) box.appendChild(el('span', 'workbench-title', '场景测试'));
+  if (!compact) box.appendChild(el('span', 'workbench-title', '场景测试', 'flask'));
   const w = workbench;
   const labels = { NOT_INSTALLED: '未发现场景测试', INCOMPLETE: '场景测试文件缺失', STOPPED: '未启动', RUNNING: '已运行', FAILED: '启动失败', UNKNOWN: '状态待核验' };
   const statusClass = w?.state === 'RUNNING' ? ' st-RUNNING' : ['FAILED', 'UNKNOWN', 'INCOMPLETE'].includes(w?.state) ? ' st-UNKNOWN' : '';
@@ -94,19 +95,19 @@ function workbenchPanel(alias, compact = false) {
   box.appendChild(status);
   if (w && !['NOT_INSTALLED', 'INCOMPLETE'].includes(w.state)) {
     if (w.state === 'RUNNING' && w.url) {
-      const a = el('a', 'workbench-link', compact ? '打开' : '打开工作台'); a.href = w.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = w.url; box.appendChild(a);
+      const a = el('a', 'workbench-link', compact ? '打开' : '打开工作台', 'external'); a.href = w.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = w.url; box.appendChild(a);
     } else {
-      const open = el('button', 'op-btn', '打开场景测试');
+      const open = el('button', 'op-btn', '打开场景测试', 'flask');
       open.disabled = workbenchBusy || w.state === 'UNKNOWN';
       open.onclick = () => workbenchAction(alias, 'open');
       box.appendChild(open);
     }
     if (w.state === 'RUNNING' || (w.state === 'FAILED' && w.pid)) {
-      const stop = el('button', 'op-btn', '停止工作台'); stop.disabled = workbenchBusy; stop.onclick = () => workbenchAction(alias, 'stop'); box.appendChild(stop);
+      const stop = el('button', 'op-btn', '停止工作台', 'stop'); stop.disabled = workbenchBusy; stop.onclick = () => workbenchAction(alias, 'stop'); box.appendChild(stop);
     }
   }
   if (w?.pid && ['NOT_INSTALLED', 'INCOMPLETE'].includes(w.state)) {
-    const stop = el('button', 'op-btn', '停止工作台'); stop.disabled = workbenchBusy; stop.onclick = () => workbenchAction(alias, 'stop'); box.appendChild(stop);
+    const stop = el('button', 'op-btn', '停止工作台', 'stop'); stop.disabled = workbenchBusy; stop.onclick = () => workbenchAction(alias, 'stop'); box.appendChild(stop);
   }
   return box;
 }
@@ -650,7 +651,7 @@ async function copyText(text) {
   } catch { return false; }
 }
 function copyButton(text) {
-  const btn = el('button', 'copy-btn', '复制');
+  const btn = el('button', 'copy-btn', '复制', 'copy');
   btn.type = 'button';
   btn.title = '复制命令';
   btn.addEventListener('click', async () => {
@@ -766,7 +767,7 @@ function appendPortDiagnosis(card, d) {
   const head = el('div', 'diag-head');
   head.append(el('strong', null, `端口 ${st.port} 诊断`));
   if (st.auto) head.appendChild(el('span', 'diag-code', '自动'));
-  const refresh = el('button', 'diag-btn', st.loading ? '诊断中…' : '重新诊断');
+  const refresh = el('button', 'diag-btn', st.loading ? '诊断中…' : '重新诊断', 'refresh');
   refresh.type = 'button';
   refresh.disabled = st.loading;
   refresh.addEventListener('click', () => diagnosePort(st.alias, st.port));
@@ -791,7 +792,7 @@ function appendPortDiagnosis(card, d) {
       const unique = [...new Map(occupants.map(o => [o.pid, o])).values()];
       if (st.auto && lastLifecycleError?.alias === d.alias && lastLifecycleError?.code === 'PORT_IN_USE' && lastLifecycleError?.op === 'start' && unique.length === 1 && unique[0].identity?.result === 'ok') {
         const owner = unique[0];
-        const force = el('button', 'diag-btn', '结束占用进程并启动');
+        const force = el('button', 'diag-btn', '结束占用进程并启动', 'play');
         force.type = 'button';
         force.disabled = lifecycleBusy;
         force.addEventListener('click', () => {
@@ -957,6 +958,7 @@ function renderDetail(d) {
         const armed = armedOp === `${d.alias}:${op}:${extra}`;
         const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
         const b = el('button', 'op-btn' + (op === 'start' ? ' primary' : op === 'stop' || op === 'remove' ? ' danger' : '') + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
+        b.dataset.icon = { start: 'play', stop: 'stop', restart: 'refresh', remove: 'clear', ack: 'check' }[op] || 'check';
         b.disabled = !enabled || lifecycleBusy;
         b.title = running ? `${label}执行中，可能需要数秒，请稍候` : armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
         b.addEventListener('click', (e) => {
@@ -983,7 +985,7 @@ function renderDetail(d) {
       const ops = el('span', 'op-group');
       const armed = armedOp === `${d.alias}:remove:`;
       const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:remove:`;
-      const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? '移除中…' : armed ? '确认移除' : '移除');
+      const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? '移除中…' : armed ? '确认移除' : '移除', 'clear');
       b.disabled = st !== 'STOPPED' || lifecycleBusy;
       b.title = running ? '移除执行中，请稍候' : armed ? '再次点击确认执行' : '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）（需再点一次确认）';
       b.addEventListener('click', (e) => {
@@ -1055,7 +1057,7 @@ function renderDetail(d) {
     const pv = el('div', 'v' + (st === 'RUNNING' ? '' : ' dim'));
     if (st === 'RUNNING' && !actualLinked) pv.appendChild(portAnchor(d.expectedPort, undefined, portScheme(d.expectedPort, health)));
     else pv.textContent = String(d.expectedPort);
-    const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '端口诊断');
+    const diag = el('button', 'diag-btn', portDiag?.alias === d.alias && portDiag?.loading ? '诊断中…' : '端口诊断', 'diagnose');
     diag.type = 'button';
     diag.title = '只读诊断该端口占用（同 CLI port），不接管、不停止外部进程';
     diag.disabled = !!portDiag?.loading && portDiag?.alias === d.alias;
@@ -1775,6 +1777,7 @@ $('#appSearch').addEventListener('input', renderApps);
 $('#pauseBtn').addEventListener('click', () => {
   paused = !paused;
   $('#pauseBtn').textContent = paused ? '恢复刷新' : '暂停';
+  $('#pauseBtn').dataset.icon = paused ? 'play' : 'pause';
   $('#pauseBtn').setAttribute('aria-pressed', String(paused));
   $('#pauseBtn').classList.toggle('on', paused);
   if (!paused) manualReload();
@@ -1869,6 +1872,8 @@ function applyThemePref(pref = themePref()) {
   const light = pref === 'light' || (pref === 'auto' && !!themeMedia?.matches);
   if (light) document.documentElement.dataset.theme = 'light'; else delete document.documentElement.dataset.theme;
   const label = pref === 'auto' ? '跟随系统' : pref === 'light' ? '浅色' : '深色';
+  $('#themeBtn').dataset.icon = { auto: 'monitor', light: 'sun', dark: 'moon' }[pref];
+  $('#themeBtn').setAttribute('aria-label', `切换主题，当前${label}`);
   $('#themeBtn').title = `主题：${label}（点击在 跟随系统/浅色/深色 间循环）`;
 }
 applyThemePref();
@@ -1930,7 +1935,7 @@ async function loadTree(rel, target, version) {
     target.replaceChildren();
     if (!d.entries.length) { fdHint(target, '空目录'); return; }
     for (const item of d.entries) {
-      const row = el('button', 'fd-item', (item.directory ? '▸ ' : '· ') + item.name);
+      const row = el('button', 'fd-item', (item.directory ? '▸ ' : '') + item.name, item.directory ? 'folder' : 'file');
       row.type = 'button';
       row.title = item.path;
       target.appendChild(row);

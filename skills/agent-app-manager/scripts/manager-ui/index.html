@@ -142,7 +142,7 @@ select option { background:var(--panel-2); color:var(--text) }
 .op-btn.armed { color:var(--warn-text); border-color:rgba(255,138,48,.5); background:var(--warn-soft) }
 .op-btn.busy { opacity:1; cursor:progress; color:var(--accent); border-color:var(--accent); animation:opbusy 1.2s ease-in-out infinite }
 @keyframes opbusy { 50% { opacity:.45 } }
-#refreshBtn::before { content:"↻"; font-size:14px; line-height:1 }
+
 
 .topbar {
   display:flex;
@@ -595,9 +595,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 #logFilter::placeholder { color:var(--text-faint) }
 #logFilter:focus { border-color:var(--line-strong) }
 #logFilter.invalid { border-color:var(--danger); background:var(--danger-soft) }
-#followBtn::before { content:"●"; font-size:7px; color:var(--text-faint) }
 #followBtn[aria-pressed="true"]::before { color:var(--accent) }
-#clearBtn::before { content:"⌫"; font-size:11px; opacity:.8 }
 #logMeta {
   flex:1;
   min-width:100px;
@@ -693,6 +691,75 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   .detail-ops { flex-wrap:wrap; padding:6px 12px; min-width:0; max-width:100% }
   .detail-ops .op-group { margin-left:0 }
 }
+/* 本地线性图标：使用 currentColor，随主题和按钮状态变色，无外部请求。 */
+[data-icon]::before {
+  content:""; display:inline-block; flex:none; width:15px; height:15px;
+  background-color:currentColor;
+  -webkit-mask:var(--icon) center / contain no-repeat;
+  mask:var(--icon) center / contain no-repeat;
+}
+[data-icon="diagnose"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M3%2012h4l3-8%204%2016%203-8h4%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="archive"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%223%22%20y%3D%224%22%20width%3D%2218%22%20height%3D%224%22%20rx%3D%221%22%2F%3E%3Cpath%20d%3D%22M5%208v12h14V8M10%2012h4%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="folder"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M3%207V5a1%201%200%200%201%201-1h5l2%203h9a1%201%200%200%201%201%201v11H3Z%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="file"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M14%203H5v18h14V8ZM14%203v5h5M8%2012h8M8%2016h6%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="refresh"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M20%207v5h-5M4%2017v-5h5M6%206a8%208%200%200%201%2014%206M4%2012a8%208%200%200%200%2014%206%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="search"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%2210.5%22%20cy%3D%2210.5%22%20r%3D%226.5%22%2F%3E%3Cpath%20d%3D%22m16%2016%205%205%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="warning"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m12%203%2010%2018H2ZM12%209v4M12%2017h.01%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="pause"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M8%205v14M16%205v14%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="play"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m7%204%2014%208-14%208Z%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="stop"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%225%22%20y%3D%225%22%20width%3D%2214%22%20height%3D%2214%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="follow"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%203v13m-5-5%205%205%205-5M5%2020h14%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="clear"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m16%203%205%205-12%2012H4l-3-3ZM9%209l5%205M9%2020h12%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="download"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%203v12m-5-5%205%205%205-5M4%2016v5h16v-5%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="upload"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%2016V3m-5%205%205-5%205%205M4%2016v5h16v-5%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="copy"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%228%22%20y%3D%228%22%20width%3D%2213%22%20height%3D%2213%22%20rx%3D%222%22%2F%3E%3Cpath%20d%3D%22M16%208V3H3v13h5%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="close"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%206%2012%2012M6%2018%2018%206%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="monitor"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%223%22%20y%3D%223%22%20width%3D%2218%22%20height%3D%2213%22%20rx%3D%222%22%2F%3E%3Cpath%20d%3D%22M12%2016v5M8%2021h8%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="sun"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%224%22%2F%3E%3Cpath%20d%3D%22M12%202v2M12%2020v2M2%2012h2M20%2012h2M5%205l1%201M18%2018l1%201M5%2019l1-1M18%206l1-1%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="moon"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M20%2014A8%208%200%200%201%2010%204a8%208%200%201%200%2010%2010Z%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="apps"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%223%22%20y%3D%223%22%20width%3D%227%22%20height%3D%227%22%20rx%3D%221%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%223%22%20width%3D%227%22%20height%3D%227%22%20rx%3D%221%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%2214%22%20width%3D%227%22%20height%3D%227%22%20rx%3D%221%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%2214%22%20width%3D%227%22%20height%3D%227%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="flask"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M9%203h6M10%203v6L4%2019a1%201%200%200%200%201%202h14a1%201%200%200%200%201-2L14%209V3M7%2014h10%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="external"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M14%203h7v7M21%203%2010%2014M10%203H3v18h18v-7%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="check"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m5%2012%204%204L19%206%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="prev"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m14%206-6%206%206%206%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="next"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m10%206%206%206-6%206%22%2F%3E%3C%2Fsvg%3E") }
+
+.brand-mark { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); position:relative }
+.brand-mark::before { width:18px; height:18px }
+.brand-mark .live-dot { position:absolute; right:-3px; bottom:-2px; border:2px solid var(--panel); width:10px; height:10px }
+.topbar { gap:8px; padding:12px 16px; flex-wrap:wrap }
+.brand { margin-right:12px }
+.brand-text strong { font-size:15px }
+.kicker { letter-spacing:0; text-transform:none; font-size:10px }
+#themeBtn { width:32px; padding:0; margin-left:4px }
+.panel-title { height:52px; gap:10px; border-bottom:0 }
+.panel-heading { flex-direction:row; align-items:center; gap:8px }
+.panel-heading::before { color:var(--text-faint) }
+.app-search { position:relative; padding:0 12px 10px }
+.app-search::before { position:absolute; top:9px; left:22px; color:var(--text-faint); pointer-events:none }
+.app-search input { height:34px; padding:6px 9px 6px 32px; font:12px var(--ui-font) }
+.app-search input:focus-visible { outline:2px solid var(--accent); outline-offset:1px }
+#appList { padding:4px 8px 8px }
+.app-card { margin-bottom:4px; padding:11px 10px; border-left:2px solid transparent }
+.app-card.selected { border-left-color:var(--accent) }
+.log-toolbar { gap:7px; padding:10px 12px }
+.log-toolbar button { height:32px }
+#logMeta { margin-left:auto }
+.fd-item[data-icon]::before { vertical-align:-3px; margin-right:7px }
+.workbench-title[data-icon], a[data-icon] { display:inline-flex; align-items:center; gap:6px }
+@media(max-width:600px) {
+  .topbar { gap:6px; padding:10px 12px }
+  .brand { flex:1 0 100%; margin-right:0 }
+  .brand-text strong { font-size:13px }
+  .brand .kicker { font-size:9px }
+  .conn { margin-left:auto }
+  .layout { grid-template-rows:minmax(140px,30%) minmax(0,1fr) }
+  #detail { flex:0 1 auto; max-height:45% }
+  .log-panel { flex:1; min-height:0 }
+  .log-toolbar { gap:6px; padding:8px }
+  .log-toolbar button { padding:0 8px }
+}
+
 @media(prefers-reduced-motion:reduce) {
   *,*::before,*::after { animation:none!important; transition:none!important }
 }
@@ -700,11 +767,11 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="live-dot" role="img" aria-label="管理台运行中" title="管理台运行中"></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
-  <button id="docBtn" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
-  <button id="backupBtn" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
-  <button id="themeBtn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题">◐</button>
-  <button id="filesBtn" type="button" disabled>文件</button>
+  <div class="brand"><span class="brand-mark" data-icon="apps" aria-hidden="true"><span class="live-dot"></span></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
+  <button id="docBtn" data-icon="diagnose" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
+  <button id="backupBtn" data-icon="archive" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
+  <button id="themeBtn" data-icon="monitor" class="icon-btn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题"></button>
+  <button id="filesBtn" data-icon="folder" type="button" disabled>文件</button>
   <span class="badge ro" id="verBadge">本地</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
@@ -716,11 +783,11 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <aside aria-label="应用列表">
     <div id="sidebarResize" class="sidebar-resize" role="separator" tabindex="0" aria-label="调整应用列表宽度" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="600" aria-valuenow="292"></div>
     <div class="panel-title">
-      <div class="panel-heading"><span class="panel-kicker">Applications</span><strong>应用</strong></div>
+      <div class="panel-heading" data-icon="apps"><strong>应用</strong></div>
       <span class="badge" id="appCount">0</span>
-      <button id="refreshBtn" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
+      <button id="refreshBtn" data-icon="refresh" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
     </div>
-    <div class="app-search"><input id="appSearch" type="search" placeholder="过滤应用（别名/显示名/ID/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
+    <div class="app-search" data-icon="search"><input id="appSearch" type="search" placeholder="过滤应用（别名/显示名/ID/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
     <div id="appList"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
@@ -737,11 +804,11 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
       <div class="log-toolbar">
         <select id="runSel" aria-label="日志源" disabled></select>
         <input id="logFilter" type="search" placeholder="正则过滤…" spellcheck="false" aria-label="日志正则过滤" disabled>
-        <button id="errorsBtn" type="button" aria-pressed="false" title="只看错误（内置错误规则：ERROR/Exception/Caused by 等）" disabled>只看错误</button>
-        <button id="pauseBtn" type="button" aria-pressed="false">暂停</button>
-        <button id="followBtn" type="button" aria-pressed="true" disabled>跟随中</button>
-        <button id="clearBtn" type="button" disabled>清屏</button>
-        <button id="dlBtn" type="button" disabled title="下载当前日志源完整文件">下载</button>
+        <button id="errorsBtn" data-icon="warning" type="button" aria-pressed="false" title="只看错误（内置错误规则：ERROR/Exception/Caused by 等）" disabled>只看错误</button>
+        <button id="pauseBtn" data-icon="pause" type="button" aria-pressed="false">暂停</button>
+        <button id="followBtn" data-icon="follow" type="button" aria-pressed="true" disabled>跟随中</button>
+        <button id="clearBtn" data-icon="clear" type="button" disabled>清屏</button>
+        <button id="dlBtn" data-icon="download" type="button" disabled title="下载当前日志源完整文件">下载</button>
         <span id="logMeta"></span>
       </div>
       <div id="log" tabindex="0" aria-label="日志内容" title="点击行复制该行"><div class="empty">选择左侧应用后查看日志。</div></div>
@@ -753,28 +820,28 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <div class="fd-head">
     <strong>项目文件</strong>
     <span class="badge" id="fdRoot"></span>
-    <button id="fdRefresh" class="icon-btn" type="button" title="刷新文件树" aria-label="刷新文件树">↻</button>
-    <button id="fdClose" class="icon-btn" type="button" title="关闭" aria-label="关闭文件面板">✕</button>
+    <button id="fdRefresh" data-icon="refresh" class="icon-btn" type="button" title="刷新文件树" aria-label="刷新文件树"></button>
+    <button id="fdClose" data-icon="close" class="icon-btn" type="button" title="关闭" aria-label="关闭文件面板"></button>
   </div>
   <div class="fd-body">
     <div class="fd-filter"><input id="fdFilter" type="search" placeholder="过滤当前层级…" aria-label="过滤当前层级"><button id="fdFilterClear" type="button" title="清空过滤">清空</button></div>
     <div id="fdTree" class="fd-tree"></div>
     <div class="fd-preview">
       <div id="fdPath" class="fd-path">选择文件查看内容（只读，UTF-8）</div>
-      <div style="display:flex;gap:6px;padding:5px 10px"><button id="fdTail" type="button" disabled>尾部</button><button id="fdPrev" type="button" disabled>上一页</button><button id="fdNext" type="button" disabled>下一页</button></div>
+      <div style="display:flex;gap:6px;padding:5px 10px"><button id="fdTail" data-icon="follow" type="button" disabled>尾部</button><button id="fdPrev" data-icon="prev" type="button" disabled>上一页</button><button id="fdNext" data-icon="next" type="button" disabled>下一页</button></div>
       <div id="fdBody" class="fd-content"></div>
     </div>
   </div>
 </aside>
 <div id="docOverlay" class="doc-overlay" hidden>
   <div class="doc-card" role="dialog" aria-label="只读诊断">
-    <div class="doc-head"><strong>只读诊断</strong><span class="dim">同 manager doctor：列出问题不自动修复</span><button id="docClose" class="icon-btn" type="button" title="关闭" aria-label="关闭诊断">✕</button></div>
+    <div class="doc-head"><strong>只读诊断</strong><span class="dim">同 manager doctor：列出问题不自动修复</span><button id="docClose" data-icon="close" class="icon-btn" type="button" title="关闭" aria-label="关闭诊断"></button></div>
     <pre id="docBody"></pre>
   </div>
 </div>
 <div id="backupOverlay" class="doc-overlay" hidden>
   <div class="doc-card" role="dialog" aria-label="登记备份">
-    <div class="doc-head"><strong>登记备份</strong><span class="dim">同 manager export/import；导入只登记不启动</span><button id="backupClose" class="icon-btn" type="button" title="关闭" aria-label="关闭备份">✕</button></div>
+    <div class="doc-head"><strong>登记备份</strong><span class="dim">同 manager export/import；导入只登记不启动</span><button id="backupClose" data-icon="close" class="icon-btn" type="button" title="关闭" aria-label="关闭备份"></button></div>
     <div style="padding:12px 14px">
       <p style="margin:0 0 8px"><a id="backupExport" href="/api/export" download="registry-backup.json">导出全部登记（JSON，敏感 env 键不落明文）</a></p>
       <p class="dim" style="margin:0 0 6px">导入：粘贴备份 JSON — 冲突默认跳过，勾选 --force 等价覆盖</p>
@@ -782,7 +849,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
         <label><input type="checkbox" id="backupImportDry" checked> 预览（dry-run）</label>
         <label><input type="checkbox" id="backupImportForce"> --force 覆盖冲突</label>
-        <button id="backupImportBtn" type="button">导入</button>
+        <button id="backupImportBtn" data-icon="upload" type="button">导入</button>
       </div>
       <pre id="backupResult" style="margin:10px 0 0;font:11.5px/1.5 var(--mono-font);white-space:pre-wrap"></pre>
     </div>
@@ -790,7 +857,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 </div>
 <div id="actionOverlay" class="doc-overlay" hidden>
   <div class="doc-card action-dialog" role="dialog" aria-modal="true" aria-labelledby="actionTitle" aria-describedby="actionMessage">
-    <div class="doc-head"><strong id="actionTitle"></strong><button id="actionClose" class="icon-btn" type="button" aria-label="关闭">✕</button></div>
+    <div class="doc-head"><strong id="actionTitle"></strong><button id="actionClose" data-icon="close" class="icon-btn" type="button" aria-label="关闭"></button></div>
     <div id="actionMessage" class="action-message"></div>
     <div class="action-footer"><button id="actionCancel" type="button">关闭</button><button id="actionConfirm" type="button" hidden>确认</button></div>
   </div>
