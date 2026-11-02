@@ -1,12 +1,6 @@
 # Agent App Manager
 
-
-<img src="docs/brand/assets/png/app-icon-128.png" alt="Agent App Manager Logo" width="92" height="92">
-
-**品牌与 UI 资源：** [Logo / SVG / PNG / ICO](docs/brand/README.md) · [静态资源预览](docs/brand/index.html) · [交互管理台原型](docs/brand/demo/dashboard.html)（模拟数据，未接入真实 API）。
-
-
-**让 Coding Agent 启动的开发应用跨项目、跨会话持续受管，统一启停、查看状态与日志，无需常驻 Daemon。**
+一个入口，管理所有 Agent 驱动的应用。
 
 ## 快速安装
 
