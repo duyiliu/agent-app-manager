@@ -1,6 +1,6 @@
 # 跨项目运行管理参考
 
-工作台：`manager.mjs workbench status|open|stop <alias|appId>` 使用登记项目内的 scenario-test 接入目录和项目内 CLI；默认取项目根 `scenario-test`，缺失/不完整时会在项目根内扫描自定义接入目录（深度 ≤3，跳过 node_modules/.git 等；候选需含 `scenario.config.js` 或 `.scenario-test/scenario-test-cli.cjs`，取标记文件最完整的目录）。`open` 按需启动或复用已有受管工作台并返回 URL，`stop` 仅停止该工作台。管理台应用详情也提供同样入口；工作台和管理台各自绑定独立的 127.0.0.1 端口，打开页面不会执行测试。缺文件时不会安装或升级。端口优先复用 scenario-test 的用户级项目登记：`open` 先调用项目内 CLI 的 `projects ensure --config <配置> --json --reassign`，由 scenario-test 统一分配/固定端口并回写 `~/.scenario-test/projects.json`；旧版 CLI 不支持该命令时只读登记文件兜底，登记缺失才退回随机端口。启动仍显式传 `--port`，保证管理台 `expectedPort` 与工作台实际端口一致；`SCENARIO_TEST_HOME` 可覆盖 scenario-test 登记目录（测试隔离用）。
+工作台：`manager.mjs workbench status|open|stop <alias|appId>` 使用登记项目内的 scenario-test 接入目录和项目内 CLI；默认取项目根 `scenario-test`，缺失/不完整时会在项目根内扫描自定义接入目录（深度 ≤3，跳过 node_modules/.git 等；候选需含 `scenario.config.js` 或 `.scenario-test/scenario-test-cli.cjs`，取标记文件最完整的目录）。`open` 按需启动或复用已有受管工作台并返回 URL，`stop` 仅停止该工作台。管理台应用详情也提供同样入口；**该集成是可选的**：未探测到 scenario-test 时管理台不显示任何场景测试文案（存在遗留存活实例时保留停止入口）。工作台和管理台各自绑定独立的 127.0.0.1 端口，打开页面不会执行测试。缺文件时不会安装或升级。端口优先复用 scenario-test 的用户级项目登记：`open` 先调用项目内 CLI 的 `projects ensure --config <配置> --json --reassign`，由 scenario-test 统一分配/固定端口并回写 `~/.scenario-test/projects.json`；旧版 CLI 不支持该命令时只读登记文件兜底，登记缺失才退回随机端口。启动仍显式传 `--port`，保证管理台 `expectedPort` 与工作台实际端口一致；`SCENARIO_TEST_HOME` 可覆盖 scenario-test 登记目录（测试隔离用）。
 
 ## 8. 跨项目管理（manager.mjs，多项目/跨会话）
 

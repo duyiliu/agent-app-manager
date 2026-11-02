@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <title>Agent App Manager · 运行管理台</title>
 <style>
 /* ZCode (zai) 风格：纯灰阶扁平界面，无渐变/发光；单色品牌（暗色=白、亮色=黑），
@@ -56,9 +56,11 @@
   --text:#262626;
   --text-dim:#595959;
   --text-faint:#8a8a8a;
-  --accent:#0b7fff;
-  --accent-text:#0867ce;
-  --accent-soft:rgba(11,127,255,.10);
+  /* 浅色主题不用蓝色作强调色：亮色在纯白上发荧光显廉价，改为近黑的深灰，
+     与文字同系但保留层级；链接靠下划线/图标表达可点。 */
+  --accent:#404040;
+  --accent-text:#262626;
+  --accent-soft:rgba(13,13,13,.05);
   --danger:#e03131;
   --danger-text:#b42020;
   --danger-soft:rgba(224,49,49,.08);
@@ -71,13 +73,16 @@
   --shadow:0 12px 32px rgba(0,0,0,.14);
   color-scheme:light;
 }
+/* 浅色去蓝后，正文中的纯文本链接改用下划线表达可点；按钮/图标类不加。 */
+:root[data-theme="light"] .kv .port-link { text-decoration:underline }
+:root[data-theme="light"] .workbench-link { text-decoration:underline }
 :root[data-theme="light"] .line.jr { color:#0a7f7f; background:rgba(10,167,167,.05); border-left-color:rgba(10,167,167,.4) }
 :root[data-theme="light"] .line.err { background:rgba(224,49,49,.05) }
 :root[data-theme="light"] .line.warn { background:rgba(224,123,0,.04); border-left-color:rgba(224,123,0,.45) }
 :root[data-theme="light"] .diag-json { background:var(--surface) }
 :root[data-theme="light"] * { scrollbar-color:#c4c4c4 transparent }
 :root[data-theme="light"] ::-webkit-scrollbar-thumb { background:#c4c4c4; background-clip:padding-box }
-:root[data-theme="light"] ::selection { background:rgba(11,127,255,.18); color:#0d0d0d }
+:root[data-theme="light"] ::selection { background:rgba(13,13,13,.14); color:#0d0d0d }
 * { box-sizing:border-box }
 [hidden] { display:none!important }
 html,body { height:100% }
@@ -140,6 +145,8 @@ select option { background:var(--panel-2); color:var(--text) }
 .icon-btn { width:30px; padding:0; font-size:13px }
 .op-group { display:inline-flex; gap:6px; margin-left:10px }
 .op-btn { font-size:12px; padding:3px 10px }
+a.op-btn { display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 11px; color:var(--accent); border:1px solid var(--line); border-radius:var(--radius-sm); text-decoration:none; white-space:nowrap; font-weight:500 }
+a.op-btn:hover { color:var(--accent-text); border-color:var(--line-strong); background:var(--surface-hover) }
 .op-btn:disabled { opacity:.4; cursor:default }
 .op-btn.armed { color:var(--warn-text); border-color:rgba(255,138,48,.5); background:var(--warn-soft) }
 .op-btn.busy { opacity:1; cursor:progress; color:var(--accent); border-color:var(--accent); animation:opbusy 1.2s ease-in-out infinite }
@@ -198,6 +205,8 @@ select option { background:var(--panel-2); color:var(--text) }
   overflow-wrap:anywhere}
 .banner > span:first-child { flex:1; min-width:0 }
 .banner.warn { color:var(--warn-text); background:var(--warn-soft); border-bottom-color:rgba(255,138,48,.30) }
+/* 操作成功用绿色：默认红是危险态，成功不能沿用（否则 stop 成功也显示红）。 */
+.banner.ok { color:var(--ok-text); background:var(--ok-soft); border-bottom-color:rgba(70,191,114,.30) }
 .banner.info { padding:5px 14px; color:var(--text-faint); background:var(--bg); border-bottom-color:var(--line-soft); font-size:11px }
 .banner-actions { flex:none; display:inline-flex; align-items:center; gap:6px }
 .banner-btn { height:22px; padding:0 8px; font-size:11px }
@@ -234,11 +243,11 @@ aside {
 .app-search input:focus { border-color:var(--line-strong) }
 .port-link { color:var(--accent); text-decoration:none }
 .port-link:hover { text-decoration:underline }
-.app-port { display:inline-flex; align-items:center; gap:3px }
-.port-icon { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; color:var(--text-dim) }
-.port-icon svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; stroke-linejoin:round }
-.port-icon:hover { color:var(--text); text-decoration:none }
-.port-icon:focus-visible { color:var(--text); outline:1px solid var(--text-dim); outline-offset:1px }
+/* 列表里的端口是主信息：保持灰色，悬停变亮即可点，不额外占图标位。 */
+.app-meta .port-link { color:inherit }
+.app-meta .port-link:hover { color:var(--text); text-decoration:underline }
+.app-port { display:inline-flex; align-items:center; gap:3px; flex:0 0 auto }
+.app-port > span { flex:0 0 auto }
 .app-card {
   display:block;
   width:100%;
@@ -267,14 +276,24 @@ aside {
   font-weight:600;
   color:var(--text)}
 .app-meta {
-  display:flex;
+  display:grid;
+  grid-template-columns:44px max-content max-content max-content max-content minmax(0,1fr);
+  align-items:center;
   gap:8px;
   margin-top:5px;
+  min-height:16px;
   font:10.5px/1.5 var(--mono-font);
   color:var(--text-faint);
   overflow:hidden;
   white-space:nowrap}
-.app-meta span { overflow:hidden; text-overflow:ellipsis }
+/* 端口固定第二列：不同卡片的端口号对齐，且不被 mode/pid 挤掉；标签放最后，宽度不足时省略。 */
+.app-meta > * { min-width:0; overflow:hidden; text-overflow:ellipsis }
+.m-mode { grid-column:1 }
+.m-ports { grid-column:2; display:flex; align-items:center; gap:4px; overflow:visible }
+.m-pid { grid-column:3 }
+.m-exit { grid-column:4 }
+.m-tags { grid-column:5 }
+.m-err { grid-column:6 }
 .app-root {
   margin-top:4px;
   font:10px/1.4 var(--mono-font);
@@ -330,7 +349,12 @@ aside {
 .detail-overview { display:grid; grid-template-columns:minmax(0, 1fr); gap:18px; padding:12px 14px 10px; container-type:inline-size }
 .detail-overview:has(.res-chart-wrap) { grid-template-columns:minmax(280px, .9fr) minmax(0, 1.1fr) }
 .runtime-summary { min-width:0 }
-.runtime-summary > .kv { grid-template-columns:66px minmax(0,1fr); gap:3px 12px; margin-top:8px }
+.runtime-heading { display:flex; align-items:flex-start; flex-wrap:wrap; gap:4px 12px }
+.runtime-heading > .health { flex:1 1 180px }
+.runtime-heading > .lifecycle-details { margin:0 0 0 auto }
+.runtime-heading > .lifecycle-details[open] { flex-basis:100% }
+.runtime-heading .lifecycle-summary { padding:0; text-align:right }
+.runtime-summary > .kv { grid-template-columns:66px minmax(0,1fr); align-items:center; gap:3px 12px; margin-top:8px }
 .runtime-summary > .kv .k { text-align:left }
 .detail-overview .health, .detail-overview .res-chart-wrap { margin:0; min-width:0 }
 .res-chart-wrap { position:relative; padding:0 0 0 18px; border-left:1px solid var(--line); align-self:stretch }
@@ -496,6 +520,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   color:var(--text-faint);
   line-height:1.6}
 .diag-btn { margin-left:8px; height:22px; padding:0 8px; font-size:10.5px; vertical-align:1px }
+.port-value { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px }
+.port-value .diag-btn { margin-left:0 }
 .diag-panel {
   margin:0 13px 11px;
   padding:9px 12px;
@@ -727,8 +753,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 [data-icon="prev"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m14%206-6%206%206%206%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="next"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m10%206%206%206-6%206%22%2F%3E%3C%2Fsvg%3E") }
 
-.brand-mark { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); position:relative }
-.brand-mark::before { width:18px; height:18px }
+.brand-mark { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); position:relative; color:var(--text) }
+.brand-mark svg { width:22px; height:22px; display:block }
 .brand-mark .live-dot { position:absolute; right:-3px; bottom:-2px; border:2px solid var(--panel); width:10px; height:10px }
 .topbar { gap:8px; padding:12px 16px; flex-wrap:wrap }
 .brand { margin-right:12px }
@@ -745,7 +771,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .app-search input:focus-visible { outline:2px solid var(--accent); outline-offset:1px }
 #appList { padding:4px 8px 8px }
 .app-card { margin-bottom:4px; padding:11px 10px; border-left:2px solid transparent }
-.app-card.selected { border-left-color:var(--accent) }
+.app-card.selected { border-left-color:var(--text) }
 .log-toolbar { gap:7px; padding:10px 12px }
 .log-toolbar button { height:32px }
 #pauseBtn, #clearBtn { margin-left:8px }
@@ -773,7 +799,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="brand-mark" data-icon="apps" aria-hidden="true"><span class="live-dot"></span></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
+  <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="199 192 840 840" focusable="false" aria-hidden="true"><path d="M 604 522 C 624 515 639 521 652 541 L 806 824 C 819 847 832 857 854 857 L 896 857 C 930 857 950 830 936 806 L 749 458 C 732 430 718 417 698 417 C 673 417 655 440 638 470 L 607 521 Z" fill="currentColor"/><path d="M 300 796 L 538 381 C 552 354 573 339 612 339 L 639 339 C 678 339 704 352 718 381 L 767 476 C 748 445 730 423 704 418 C 678 412 655 433 640 461 L 435 822 C 420 847 405 856 382 856 L 340 856 C 311 856 287 830 300 796 Z" fill="currentColor"/><g fill="currentColor"><rect x="542" y="668" width="67" height="66" rx="14"/><rect x="628" y="668" width="67" height="66" rx="14"/><rect x="542" y="754" width="67" height="67" rx="14"/><rect x="628" y="754" width="67" height="67" rx="14"/></g></svg><span class="live-dot"></span></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
   <button id="docBtn" data-icon="diagnose" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
   <button id="backupBtn" data-icon="archive" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
   <button id="filesBtn" data-icon="folder" type="button" disabled>文件</button>
