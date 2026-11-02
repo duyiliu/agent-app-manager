@@ -40,29 +40,7 @@ npx skills-cn@latest add duyiliu/agent-app-manager#v0.12.0 --skill agent-app-man
 
 两种方式均从本仓库安装相同的 `agent-app-manager` Skill；`skills-cn` 为第三方 CLI，加速下载不代表其 CLI 版本与官方完全同步。`-g` 表示全局安装，`-y` 表示跳过交互确认。安装命令按 Tag 固定版本，可在 `/releases` 查看最新版本后再替换 `#vX.Y.Z`。
 
-安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对；升级后重跑安装命令即可。
-
-原 `project-runner` Skill 已更名为 `agent-app-manager`。安装不会自动清理旧副本；新版 `migrate`、`doctor` 和首次升级提示会列出仍存在的旧 Skill 路径，但不会自动删除。确认新 Skill 可用后再自行卸载旧版本，避免触发冲突。
-
-### 从旧版本升级
-
-`v0.5.0` 是旧版本，仍使用 `~/.project-runner/`，不包含下述自动复制功能。安装支持数据复制的新版本后，按以下顺序升级：
-
-1. 停止旧版管理台及其受管应用，确保旧日志进程退出。
-2. 使用 `npx skills add` 安装支持迁移的新版本。安装本身不会迁移数据；首次运行新版普通管理命令（例如 `list`）时自动检查并尝试复制。
-3. 仅存在旧数据目录时，新版会复制数据到 `~/.agent-app-manager/`；新旧目录都存在时不会自动复制或合并。检查应用登记、配置和历史日志是否正常。
-4. **卸载旧 Skill**：新版 `migrate`、`doctor` 和首次升级提示会列出 `~/.agents/skills`、`~/.codex/skills`、`~/.claude/skills` 下仍存在的 `project-runner`，并给出可直接执行的删除命令；manager 不自动删除。确认新版可用后自行执行，避免同时加载。旧数据目录可暂留作备份。
-
-复制后的两个数据目录相互独立，后续更改不会同步；不要同时使用新旧版本管理应用。退出通知脚本使用的 `PROJECT_RUNNER_*` 环境变量继续兼容。旧版仍可继续使用旧目录，但不会自动升级到新版本。
-
-支持复制的新版本也可手动检查和重试（将 `<skill-dir>` 替换为新版 Skill 实际安装目录）：
-
-```bash
-node "<skill-dir>/scripts/manager.mjs" migrate --dry-run
-node "<skill-dir>/scripts/manager.mjs" migrate
-```
-
-预览列出旧目录、新目录和发现的活动进程或锁，不写入；正式命令有阻塞时返回错误，处理后可重试。新目录已存在时不会覆盖或合并；该命令只处理默认目录，不接受 `--home`。复制完成后旧目录保留。输出中的 `legacySkills` 为探测到的旧 Skill 安装位置，仅报告，不卸载。
+安装后以 Agent 实际加载的 Skill 目录为准解析脚本，不同运行器的目录可能不同。已安装版本可通过 `manager.mjs version` 或管理台顶栏徽标核对。
 
 ### 2. 让 Agent 启动项目
 
@@ -72,7 +50,7 @@ node "<skill-dir>/scripts/manager.mjs" migrate
 
 Agent 会读取项目说明、已有启动脚本和构建配置，识别启动方式。目标明确且可安全托管时，启动并自动登记；存在多个候选或无法托管时，会先说明情况。运行数据保存在 `~/.agent-app-manager/`。
 
-默认数据目录为 `~/.agent-app-manager/`。仅存在旧 `~/.project-runner/` 时，首次普通命令会复制到新目录，完整保留旧目录；新旧目录同时存在时，升级逻辑不做任何操作，正常使用新目录。复制期间仅调整副本中运行记录的数据目录路径，不改旧记录。检测到旧应用、日志进程或锁仍活跃时，暂缓复制并提示，本次继续使用旧目录，停止后下次命令重试。显式 `--home` 和 `start/restart --dry-run` 不触发复制。Skill 名称为 `agent-app-manager`。
+默认数据目录为 `~/.agent-app-manager/`，可使用 `--home <绝对路径>` 指定隔离数据目录。Skill 名称为 `agent-app-manager`。
 
 Java 项目默认 `mode: java`；只有项目已有 JRebel 配置（启动脚本引用 agent、仓库有 `rebel.xml`、构建文件含插件）或你明确要求时，才走 `mode: jrebel` 并检查 standalone JRebel 环境。
 
@@ -218,7 +196,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 └── locks/                         # 应用锁
 ```
 
-升级不清理数据目录。`env` 中的字面值会明文保存到注册表，不能用于机密；机密请通过系统环境变量 + `envRefs`，或 `envFile` 传入（后者仅在启动时读取，值不写入 registry / runtime / status / UI）。
+`env` 中的字面值会明文保存到注册表，不能用于机密；机密请通过系统环境变量 + `envRefs`，或 `envFile` 传入（后者仅在启动时读取，值不写入 registry / runtime / status / UI）。
 
 ## 仓库结构
 
@@ -263,7 +241,7 @@ npm test          # 完整冒烟
 npm run check     # 全部 .mjs 语法检查 + 脱敏 / 健康 / 环境 / 运行时冒烟
 ```
 
-`npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 分三档：PR 上 `ubuntu-latest` 跑全量冒烟（约 3 分钟）、`windows-latest` 跑关键集冒烟（约 4.5 分钟，覆盖生命周期、env 脱敏、发现证据、锁、目录迁移、remove/prune）；`windows-latest` 全量冒烟拆为矩阵并行约 4-5 分钟，只在发版 tag、每周巡检、手动触发时运行（main push 与 PR 均不跑）；macOS 未纳入支持范围。
+`npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 分三档：PR 上 `ubuntu-latest` 跑全量冒烟（约 3 分钟）、`windows-latest` 跑关键集冒烟（约 4.5 分钟，覆盖生命周期、env 脱敏、发现证据、锁、remove/prune）；`windows-latest` 全量冒烟拆为矩阵并行约 4-5 分钟，只在发版 tag、每周巡检、手动触发时运行（main push 与 PR 均不跑）；macOS 未纳入支持范围。
 
 ## 开发边界
 
