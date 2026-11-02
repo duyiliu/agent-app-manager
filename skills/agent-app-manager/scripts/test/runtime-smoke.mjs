@@ -88,8 +88,12 @@ fs.writeFileSync(path.join(projNpm, 'fallback.js'),
   + 'primaryServer.listen(primary, "127.0.0.1", () => console.log("primary-ready PORT=" + primary));\n', 'utf8');
 
 // restartPolicy 回归：直连/命令模式各自定时异常退出；stable 由人为 stop 终止；clean 正常退出。
+// 崩溃延迟 5s（不是 1.2s）：直连模式的自动重启由 log-writer 在目标 spawn 后用 pwsh 采集新目标
+// 身份，慢 runner 上这一步（含探针重试）能耗数秒。目标在身份采集完成前就退出时，重启会被记成
+// restart-failed、运行记录里的 pid 停在旧值，断言只能看到「pid 未变化」——与 cmd-crash.js 用 15s
+// 同理，这是夹具时机过紧而非产品缺陷。
 const crashBody = (tag) => `console.log("${tag}-start pid=" + process.pid);\n`
-  + `setTimeout(() => { console.log("${tag}-exit pid=" + process.pid); process.exit(7); }, 1200);\n`;
+  + `setTimeout(() => { console.log("${tag}-exit pid=" + process.pid); process.exit(7); }, 5000);\n`;
 fs.writeFileSync(path.join(projRestart, 'crash.js'), crashBody('crash'), 'utf8');
 fs.writeFileSync(path.join(projRestart, 'stable.js'),
   'console.log("stable-start pid=" + process.pid);\nsetInterval(() => {}, 1000);\n', 'utf8');
@@ -571,7 +575,11 @@ try {
     const firstPid = r.json.data.pid;
     const mid = await waitStatus('restartapp', (d) => (d.run?.restartCount ?? 0) >= 1 && d.run?.pid !== firstPid);
     assert(mid, '未观察到自动重启后的新 pid');
-    assert.notEqual(mid.run.pid, firstPid, '自动重启后 pid 未变化');
+    // 等到的可能是「重启已排程、新 pid 还没落账」的中间态（慢 runner 上身份采集要数秒）。
+    // 这时 restartEvents 里已有一条 restarted(pid=新 pid)，按它复核，避免把进行中的重启判成失败。
+    const restartedPid = (mid.run?.restartEvents ?? []).filter((e) => e.type === 'restarted').pop()?.pid;
+    assert(mid.run.pid !== firstPid || (Number.isInteger(restartedPid) && restartedPid !== firstPid),
+      `自动重启后 pid 未变化（run.pid=${mid.run.pid}，restartEvents=${JSON.stringify(mid.run?.restartEvents ?? [])}）`);
     assert.equal(mid.run.restartPolicy, 'on-failure');
     assert.equal(mid.run.maxRestarts, 2);
     const dead = await waitStatus('restartapp', (d) => d.status === 'DEAD');
