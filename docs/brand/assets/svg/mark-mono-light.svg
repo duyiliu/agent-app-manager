@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="199 192 840 840" role="img" aria-label="Agent App Manager logo">
+
+<path d="M 604 522 C 624 515 639 521 652 541 L 806 824
+C 819 847 832 857 854 857 L 896 857
+C 930 857 950 830 936 806 L 749 458
+C 732 430 718 417 698 417 C 673 417 655 440 638 470 L 607 521 Z" fill="#FFFFFF"/><path d="M 300 796 L 538 381 C 552 354 573 339 612 339 L 639 339
+C 678 339 704 352 718 381 L 767 476
+C 748 445 730 423 704 418 C 678 412 655 433 640 461
+L 435 822 C 420 847 405 856 382 856 L 340 856
+C 311 856 287 830 300 796 Z" fill="#FFFFFF"/><g fill="#FFFFFF"><rect x="542" y="668" width="67" height="66" rx="14"/><rect x="628" y="668" width="67" height="66" rx="14"/>
+<rect x="542" y="754" width="67" height="67" rx="14"/><rect x="628" y="754" width="67" height="67" rx="14"/></g>
+</svg>
