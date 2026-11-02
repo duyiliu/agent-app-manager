@@ -2,6 +2,8 @@
 
 统一管理由 Coding Agent 启动的开发应用，支持跨 Agent、跨项目、跨会话的生命周期管理、状态监控与日志查看。
 
+支持 Windows 和 Linux，覆盖 Java / Spring Boot、Python、Node.js 等项目。应用按需启动，管理台无需常驻后台服务。
+
 ## 快速安装
 
 **官方安装：**
@@ -40,7 +42,7 @@ Agent 负责理解项目，Agent App Manager 负责可信地执行和持续管�
 
 > 启动这个项目
 
-Agent 会读取项目说明、已有启动脚本和构建配置，识别启动方式。目标明确且可安全托管时，启动并自动登记；存在多个候选或无法托管时，会先说明情况。运行数据保存在 `~/.agent-app-manager/`。
+Agent 会读取项目说明、已有启动脚本和构建配置，识别启动方式。目标明确且可安全托管时，启动并自动登记；存在多个候选或无法托管时，会先说明情况。
 
 默认数据目录为 `~/.agent-app-manager/`，可使用 `--home <绝对路径>` 指定隔离数据目录。Skill 名称为 `agent-app-manager`。
 
@@ -153,9 +155,15 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 `manager ui` 按需启动，前台常驻，Ctrl+C 即退出；不注册开机自启、不拉起守护进程。默认固定 `127.0.0.1:8199`（`--port 0` 为随机端口），仅本机可访问、无令牌。界面只展示已登记应用（含非受管记录）；IDEA / 手工启动且未登记的进程不会出现。
 
-![运行管理台总览](docs/images/manager-overview.png)
+以下截图使用隔离演示数据，展示开发中的管理台界面；左侧包含 Node.js、Python 和 Java 应用。
 
-*总览：左侧为已登记应用，右侧为选中应用的详情与按批次日志。*
+![浅色管理台总览](docs/images/manager-overview.png)
+
+*浅色主题：应用列表与运行日志。*
+
+![深色管理台总览](docs/images/manager-overview-dark.png)
+
+*深色主题：应用列表与运行日志。*
 
 ### 使用细节
 
@@ -163,15 +171,13 @@ node "<skill-dir>/scripts/manager.mjs" ui
 2. **选择与筛选应用**：点击卡片切换应用。卡片展示进程状态、受管 / 非受管、就绪状态、模式、标签、pid、端口和内存快照；搜索框支持别名、显示名、ID、模式、端口、路径与标签。`STARTING` / `UNKNOWN` 等未结记录会在卡片和详情中标出，不能直接重复启动。
 3. **详情与资源曲线**：点右上角「详情」展开。健康区给出端口监听、业务就绪证据（`readyLogPattern` / `readyUrl`）与诊断信息；`prevRuns` 与未结记录证据也在这里核对。详情展开后每 5 秒采样一次 CPU / RSS，绘制最近 5 分钟的曲线，收起详情即停止采样。
 
-   ![详情与资源曲线](docs/images/manager-detail.png)
+   ![浅色详情与资源曲线](docs/images/manager-detail.png)
+
+   ![深色详情与资源曲线](docs/images/manager-detail-dark.png)
 
 4. **查看日志**：日志源下拉可选当前 / 历史受管批次、非受管线索和项目 `.tmp` 兼容日志。工具栏支持合并 stdout / stderr、正则过滤、只看错误、暂停 / 恢复跟随、清屏和下载；过滤激活时只下载命中行。首次加载时顶部可能出现「从文件起始读取」提示，跟随滚动后移出视口。
 
-   ![日志过滤](docs/images/manager-logs.png)
-
 5. **只读文件浏览**：点顶部「文件」打开当前应用根目录，可逐层展开、过滤和分页预览文本文件。`.git`、`node_modules`、`.env*`、常见私钥与许可文件不会显示，路径穿越与符号链接会被拒绝。
-
-   ![只读文件浏览](docs/images/manager-files.png)
 
 6. **启动 / 停止 / 重启 / 移除**：详情卡按钮与 CLI 同一实现和安全边界，所有生命周期操作都要在 10 秒内再次点击「确认…」才执行；`--tree` 与优雅退出毫秒数在详情卡内设置，只作用于 stop / restart。非受管应用仅允许移除 STOPPED 登记；`STARTING` / `UNKNOWN` 未结记录需人工核验进程已退出后，点「ack 并启动」并再次确认。
 7. **端口诊断与自检**：预期端口旁的「诊断」只读查询占用信息（同 `manager port`），不接管外部进程；顶部「诊断」执行 `manager doctor` 并原样展示结果，不自动修复。
