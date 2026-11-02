@@ -233,8 +233,8 @@ aside {
 .port-link { color:var(--accent); text-decoration:none }
 .port-link:hover { text-decoration:underline }
 .app-port { display:inline-flex; align-items:center; gap:3px }
-.port-icon { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; color:var(--text-faint) }
-.port-icon svg { width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; stroke-linejoin:round }
+.port-icon { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; color:var(--text-dim) }
+.port-icon svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; stroke-linejoin:round }
 .port-icon:hover { color:var(--text); text-decoration:none }
 .port-icon:focus-visible { color:var(--text); outline:1px solid var(--text-dim); outline-offset:1px }
 .app-card {
@@ -708,7 +708,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 [data-icon="pause"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M8%205v14M16%205v14%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="play"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m7%204%2014%208-14%208Z%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="stop"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%225%22%20y%3D%225%22%20width%3D%2214%22%20height%3D%2214%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E") }
-[data-icon="follow"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%203v13m-5-5%205%205%205-5M5%2020h14%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="follow"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M4%205h10M4%209h10M4%2013h7M17%2010v10m-4-4%204%204%204-4%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="remove"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M4%207h16M10%203h4l1%204H9ZM6%207l1%2014h10l1-14M10%2011v6M14%2011v6%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="clear"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m16%203%205%205-12%2012H4l-3-3ZM9%209l5%205M9%2020h12%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="download"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%203v12m-5-5%205%205%205-5M4%2016v5h16v-5%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="upload"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%2016V3m-5%205%205-5%205%205M4%2016v5h16v-5%22%2F%3E%3C%2Fsvg%3E") }
@@ -731,7 +732,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .brand { margin-right:12px }
 .brand-text strong { font-size:15px }
 .kicker { letter-spacing:0; text-transform:none; font-size:10px }
-#themeBtn { width:32px; padding:0; margin-left:4px }
+#themeBtn { width:32px; padding:0; margin-left:8px }
+#filesBtn { margin-left:8px }
 .panel-title { height:52px; gap:10px; border-bottom:0 }
 .panel-heading { flex-direction:row; align-items:center; gap:8px }
 .panel-heading::before { color:var(--text-faint) }
@@ -744,6 +746,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .app-card.selected { border-left-color:var(--accent) }
 .log-toolbar { gap:7px; padding:10px 12px }
 .log-toolbar button { height:32px }
+#pauseBtn, #clearBtn { margin-left:8px }
 #logMeta { margin-left:auto }
 .fd-item[data-icon]::before { vertical-align:-3px; margin-right:7px }
 .workbench-title[data-icon], a[data-icon] { display:inline-flex; align-items:center; gap:6px }
@@ -758,6 +761,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   .log-panel { flex:1; min-height:0 }
   .log-toolbar { gap:6px; padding:8px }
   .log-toolbar button { padding:0 8px }
+  #pauseBtn, #clearBtn { margin-left:3px }
 }
 
 @media(prefers-reduced-motion:reduce) {
@@ -770,8 +774,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <div class="brand"><span class="brand-mark" data-icon="apps" aria-hidden="true"><span class="live-dot"></span></span><div class="brand-text"><span class="kicker">Agent App Manager</span><strong>运行管理台</strong></div></div>
   <button id="docBtn" data-icon="diagnose" type="button" title="运行只读诊断（同 manager doctor）">诊断</button>
   <button id="backupBtn" data-icon="archive" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
-  <button id="themeBtn" data-icon="monitor" class="icon-btn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题"></button>
   <button id="filesBtn" data-icon="folder" type="button" disabled>文件</button>
+  <button id="themeBtn" data-icon="monitor" class="icon-btn" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题"></button>
   <span class="badge ro" id="verBadge">本地</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>

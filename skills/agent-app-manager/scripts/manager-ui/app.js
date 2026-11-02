@@ -370,7 +370,7 @@ function showBanner(text, warn = false, kind = 'data') {
   b.hidden = false;
   b.classList.toggle('warn', warn);
   bannerKind = kind;
-  const close = el('button', 'banner-close', '✕');
+  const close = el('button', 'banner-close', null, 'close');
   close.type = 'button';
   close.title = '关闭提示';
   close.setAttribute('aria-label', '关闭提示');
@@ -416,7 +416,7 @@ function notifyExit(runId, status, note) {
     ask.addEventListener('click', async () => { try { await Notification.requestPermission(); } catch {} ask.remove(); });
     btns.appendChild(ask);
   }
-  const close = el('button', 'banner-close', '✕');
+  const close = el('button', 'banner-close', null, 'close');
   close.type = 'button';
   close.title = '关闭';
   close.setAttribute('aria-label', '关闭退出提醒');
@@ -747,9 +747,10 @@ function appendLifecycleError(card, d) {
   const panel = el('div', 'diag-panel diag-error');
   const head = el('div', 'diag-head');
   head.append(el('strong', null, `最近一次 ${err.op} 失败`), el('span', 'diag-code', err.code ?? 'ERROR'));
-  const close = el('button', 'diag-close', '✕');
+  const close = el('button', 'diag-close', null, 'close');
   close.type = 'button';
   close.title = '关闭失败详情';
+  close.setAttribute('aria-label', close.title);
   close.addEventListener('click', () => { lastLifecycleError = null; rerenderDetail(); });
   head.appendChild(close);
   panel.appendChild(head);
@@ -771,9 +772,10 @@ function appendPortDiagnosis(card, d) {
   refresh.type = 'button';
   refresh.disabled = st.loading;
   refresh.addEventListener('click', () => diagnosePort(st.alias, st.port));
-  const close = el('button', 'diag-close', '✕');
+  const close = el('button', 'diag-close', null, 'close');
   close.type = 'button';
   close.title = '关闭端口诊断';
+  close.setAttribute('aria-label', close.title);
   close.addEventListener('click', () => { portDiag = null; rerenderDetail(); });
   head.append(refresh, close);
   panel.appendChild(head);
@@ -958,7 +960,7 @@ function renderDetail(d) {
         const armed = armedOp === `${d.alias}:${op}:${extra}`;
         const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
         const b = el('button', 'op-btn' + (op === 'start' ? ' primary' : op === 'stop' || op === 'remove' ? ' danger' : '') + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
-        b.dataset.icon = { start: 'play', stop: 'stop', restart: 'refresh', remove: 'clear', ack: 'check' }[op] || 'check';
+        b.dataset.icon = { start: 'play', stop: 'stop', restart: 'refresh', remove: 'remove', ack: 'check' }[op] || 'check';
         b.disabled = !enabled || lifecycleBusy;
         b.title = running ? `${label}执行中，可能需要数秒，请稍候` : armed ? '再次点击确认执行' : title + (needsConfirm ? '（需再点一次确认）' : '');
         b.addEventListener('click', (e) => {
@@ -985,7 +987,7 @@ function renderDetail(d) {
       const ops = el('span', 'op-group');
       const armed = armedOp === `${d.alias}:remove:`;
       const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:remove:`;
-      const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? '移除中…' : armed ? '确认移除' : '移除', 'clear');
+      const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? '移除中…' : armed ? '确认移除' : '移除', 'remove');
       b.disabled = st !== 'STOPPED' || lifecycleBusy;
       b.title = running ? '移除执行中，请稍候' : armed ? '再次点击确认执行' : '从注册表移除登记（须无存活实例，证据保留；同 CLI remove）（需再点一次确认）';
       b.addEventListener('click', (e) => {
