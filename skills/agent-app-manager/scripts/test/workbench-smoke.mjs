@@ -10,6 +10,9 @@ import { cmdWorkbench } from '../lib/commands/workbench.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-workbench-'));
 const home = path.join(base, 'home');
+// 工作台会调用 scenario-test 的项目登记（projects ensure）；测试必须隔离用户目录，
+// 否则真实 ~/.scenario-test/projects.json 会被测试项目污染。
+process.env.SCENARIO_TEST_HOME = path.join(base, 'scenario-test-home');
 const manager = fileURLToPath(new URL('../manager.mjs', import.meta.url));
 const cli = (...args) => {
   const p = spawnSync(process.execPath, [manager, '--json', '--home', home, ...args], { encoding: 'utf8', timeout: 120000 });
@@ -67,6 +70,14 @@ try {
   }
   const same = cli('workbench', 'open', 'one-other'); assert.equal(same.pid, a.pid); assert.equal(same.url, a.url);
   started.push('two'); const b = cli('workbench', 'open', 'two'); assert.equal(b.state, 'RUNNING', JSON.stringify(b)); assert.notEqual(b.url, a.url);
+  // 真实 scenario-test 模式由项目内 CLI 的 projects ensure 登记；
+  // fixture 模式的假 CLI 不支持该命令，由管理台按同一格式补写。两条路径都必须固定端口。
+  {
+    const registry = JSON.parse(fs.readFileSync(path.join(process.env.SCENARIO_TEST_HOME, 'projects.json'), 'utf8'));
+    const registered = Object.values(registry.projects).map((entry) => entry.port);
+    assert(registered.includes(Number(new URL(a.url).port)), `工作台端口未写入 scenario-test 登记: ${a.url}`);
+    assert(registered.includes(Number(new URL(b.url).port)), `第二个工作台端口未写入 scenario-test 登记: ${b.url}`);
+  }
   assert.equal(cli('list').apps.length, 3);
   cli('workbench', 'stop', 'one'); started.splice(started.indexOf('one'), 1);
   assert.equal(cli('workbench', 'status', 'two').state, 'RUNNING');
