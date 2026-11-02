@@ -10,6 +10,12 @@ on:
     - cron: '0 18 * * 0'
   workflow_dispatch:
 
+# 同一分支（PR 按 head_ref）有新 run 时取消在跑的旧轮：
+# 连续 push / 打标签重触 / 重复 dispatch 不再同时烧 runner。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: 编译校验
