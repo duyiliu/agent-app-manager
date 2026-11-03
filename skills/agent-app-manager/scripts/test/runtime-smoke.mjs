@@ -127,6 +127,13 @@ const cli = (...args) => {
   return { code: r.status, json, text: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 };
 const descFile = (d) => {
+  if (isWindows && d.command) {
+    // 让夹具显式携带本次目录，兜底清理可以证明归属，避免按裸 PID 清理。
+    // 不能加引号：manager 走 cmd /d /s /c <arg> 经 libuv 传参，内层引号会被
+    // 反斜杠转义而 cmd 不认（报"文件名、目录名或卷标语法不正确"）。测试临时
+    // 目录用 8.3 短名无空格，裸绝对路径安全。
+    d = { ...d, command: `cd /d ${d.root} && ` + d.command.replace(/\b([\w-]+\.js)\b/g, name => path.join(d.root, name)) };
+  }
   const f = path.join(base, `desc-${d.alias}.json`);
   fs.writeFileSync(f, JSON.stringify(d), 'utf8');
   return f;
@@ -876,7 +883,7 @@ try {
   }
   const cleanupFailures = [];
   for (const p of [...strayWrapperPids, ...strayPids].filter(Boolean)) {
-    if (!killTree(p)) cleanupFailures.push(p); // 多数情况是 wrapper 先死；最终由下方残留断言判定
+    if (!killTree(p, base)) cleanupFailures.push(p); // 多数情况是 wrapper 先死；最终由下方残留断言判定
   }
   if (cleanupFailures.length) console.log(`  note 清理未命中（进程可能已退出）：${cleanupFailures.join(', ')}`);
   // 进程退出后句柄释放需要一点时间：轮询删除，仍失败则显式报告（不静默）

@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { spawnPwsh } from '../lib/probe.mjs';
+import { spawnPwsh, psProc, listDescendants as probeDescendants } from '../lib/probe.mjs';
 
 export const isWindows = process.platform === 'win32';
 export const isLinux = process.platform === 'linux';
@@ -49,11 +49,7 @@ export function findExecutable(name) {
 // 枚举某 pid 的当前直接子进程：Windows 用 CIM，Linux 用 /proc 的 ppid 字段。
 export function childrenOf(pid) {
   if (isWindows) {
-    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-      `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${pid} } | ForEach-Object { $_.ProcessId }`],
-      { encoding: 'utf8', timeout: 20000 });
-    if (r.status !== 0 || !r.stdout) return [];
-    return r.stdout.trim().split(/\r?\n/).map((s) => Number(s.trim())).filter(Number.isInteger);
+    return probeDescendants(pid).map(row => row.pid);
   }
   let names;
   try { names = fs.readdirSync('/proc'); } catch { return []; }
@@ -109,11 +105,39 @@ export function findProcesses(pattern) {
 
 // 测试兜底清理：Windows 结束整棵树，Linux 先尝试进程组再退化为单进程。
 // 返回是否成功：清理失败必须由调用方显式报告（不得静默，#46）。
-export function killTree(pid) {
+export function killTree(pid, testRoot) {
   if (!pid) return false;
   if (isWindows) {
-    const r = spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, timeout: 15000 });
-    return r.status === 0;
+    if (!testRoot || !Number.isInteger(pid) || pid <= 0) return false;
+    const identity = psProc('capture', { id: pid });
+    if (identity.result !== 'ok') return false;
+    const rows = [{ pid, ...identity }, ...probeDescendants(pid)];
+    // 候选证据不代表归属：根或其后代的命令行/映像绝对路径任一明确落在本次临时目录内，
+    // 才允许兜底清理。cmd 包装进程命令行是相对路径（.\app.exe）且映像属系统目录，
+    // 只能靠后代归属反推；相对命令行的 exe 映像绝对路径仍可自证。
+    // TEMP 可能是 8.3 短名（ZHANGQ~1）而进程映像/命令行用长名，Get-Item.FullName 展开长名；
+    // realpath 可能返回 \\?\ 扩展前缀，比对前先剥掉。
+    const stripPrefix = (v) => String(v).replace(/^\\\\\?\\(UNC\\)?/i, (m, unc) => unc ? '\\\\' : '');
+    const refs = new Set([stripPrefix(testRoot).toLowerCase()]);
+    const expand = spawnPwsh(['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-Item -LiteralPath '${String(testRoot).replace(/'/g, "''")}').FullName`],
+      { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    if (expand.status === 0 && expand.stdout.trim()) refs.add(stripPrefix(expand.stdout.trim()).toLowerCase());
+    const ownedByRef = (text, prefixOnly) => [...refs].some(ref =>
+      prefixOnly ? String(text).toLowerCase().startsWith(ref) : String(text).toLowerCase().includes(ref));
+    const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -Property CommandLine).CommandLine`],
+      { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    const owned = (r.status === 0 && ownedByRef(r.stdout))
+      || rows.some(row => ownedByRef(row.image, true));
+    if (!owned) return false;
+    let ok = true;
+    for (const row of rows.reverse()) {
+      if (!row.creationFileTime || !row.image) { ok = false; continue; }
+      const result = psProc('terminate', { id: row.pid, creationFileTime: row.creationFileTime, image: row.image });
+      if (!['terminated', 'notfound', 'exited'].includes(result.result)) ok = false;
+    }
+    return ok;
   }
   try { process.kill(-pid, 'SIGKILL'); return true; } catch { /* 不在同一进程组 */ }
   try { process.kill(pid, 'SIGKILL'); return true; } catch { /* 已退出 */ }

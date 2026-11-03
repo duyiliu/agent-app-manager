@@ -70,7 +70,7 @@ function collectCleanupPids(appIds, extraPids = []) {
 }
 async function cleanupApps(appIds, extraPids = []) {
   const ids = collectCleanupPids(appIds, extraPids);
-  for (const pid of ids) killTree(pid);
+  for (const pid of ids) killTree(pid, base);
   for (let i = 0; i < 20 && ids.some(isAlive); i++) await wait(250);
   const left = ids.filter(isAlive);
   if (left.length) throw new Error(`测试临时进程未清理（${appIds.join(', ')}）：${left.join(', ')}`);

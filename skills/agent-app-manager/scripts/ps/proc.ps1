@@ -711,7 +711,14 @@ if ($Action -eq 'listening-batch') {
 # 供命令模式受管启动使用——manager 拉起 cmd wrapper 后在此等待真实目标出现。
 # 首次匹配后不立即返回，再观察 settleMs 取最终清单：脚本常先后拉起多个进程，
 # 第一次轮询只捕到部分会造成"假唯一"，把歧义场景误判成可托管。
+. "$PSScriptRoot/process-tree.ps1"
+
 if ($Action -eq 'discover') {
+  $rootIdentity = Get-SnapshotIdentity (Get-CimInstance Win32_Process -Filter "ProcessId = $Id" -Property ProcessId, CreationDate)
+  if (-not $rootIdentity) {
+    [pscustomobject]@{ result = 'wrapperExited'; candidates = @() } | ConvertTo-Json -Compress
+    exit 0
+  }
   $deadline = (Get-Date).AddMilliseconds($WaitMs)
   $settleMs = 1500
   $foundAt = $null
@@ -734,13 +741,26 @@ if ($Action -eq 'discover') {
       if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
       [void]$byParent[$pp].Add($p)
     }
+    $rootCheck = Parse-Result ([ProcUtil]::Verify($Id, [long]$rootIdentity.creationFileTime, $rootIdentity.image))
+    if ($rootCheck.result -ne 'ok') {
+      [pscustomobject]@{ result = 'wrapperExited'; candidates = @() } | ConvertTo-Json -Compress
+      exit 0
+    }
+    $treeRows = @(Get-ProcessTreeRows $rows $Id)
+    $byParent = @{}
+    foreach ($p in $treeRows) {
+      $pp = [long]$p.ParentProcessId
+      if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = @() }
+      $byParent[$pp] += $p
+    }
     $queue = [System.Collections.ArrayList]@([int64]$Id)
     $seen = @{}
     $found = @()
     # 锚点自身也参与映像匹配：Linux /bin/sh 可能 exec 成真实目标（pid 不变），
     # 此时目标不是自己的后代，仅按后代枚举会错过。
     if ($rootRow -and $rootRow.ExecutablePath -and ([IO.Path]::GetFileName([string]$rootRow.ExecutablePath) -ieq $Image)) {
-      $found += [pscustomobject]@{ pid = [int64]$rootRow.ProcessId; image = [string]$rootRow.ExecutablePath; creationFileTime = [string]$rootRow.CreationDate.ToFileTime(); cmd = '' }
+      $identity = Get-SnapshotIdentity $rootRow
+      if ($identity) { $identity | Add-Member -NotePropertyName cmd -NotePropertyValue ''; $found += $identity }
     }
     while ($queue.Count -gt 0) {
       $cur = $queue[0]; $queue.RemoveAt(0)
@@ -753,7 +773,8 @@ if ($Action -eq 'discover') {
         [void]$queue.Add($cpid)
         $img = [string]$c.ExecutablePath
         if ($img -and ([IO.Path]::GetFileName($img) -ieq $Image)) {
-          $found += [pscustomobject]@{ pid = $cpid; image = $img; creationFileTime = [string]$c.CreationDate.ToFileTime(); cmd = '' }
+          $identity = Get-SnapshotIdentity $c
+          if ($identity) { $identity | Add-Member -NotePropertyName cmd -NotePropertyValue ''; $found += $identity }
         }
       }
     }
@@ -829,68 +850,25 @@ if ($Action -eq 'wait-exit') {
   exit 0
 }
 
-# terminate-tree 的后代枚举：Win32_Process 按 ParentProcessId BFS。
-# 只取拓扑（pid/ppid）：WMI 的 CreationDate 精度远低于内核 FILETIME，不能当
-# 核验身份用；后代身份在杀的时候由 ProcUtil.Capture 现采（与 Terminate 同源）。
+# 根与后代均保持快照身份；父 PID 复用或快照期间实例变化时跳过。
 function Get-Descendants([int64]$rootPid) {
-  $rows = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId
-  $byParent = @{}
-  foreach ($p in $rows) {
-    $pp = [int64]$p.ParentProcessId
-    if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
-    [void]$byParent[$pp].Add([int64]$p.ProcessId)
+  $rows = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate, ExecutablePath)
+  $root = $rows | Where-Object { [long]$_.ProcessId -eq $rootPid } | Select-Object -First 1
+  $identity = Get-SnapshotIdentity $root
+  if (-not $identity) { return }
+  if ($CreationFileTime -and ($identity.creationFileTime -ne $CreationFileTime -or $identity.image -ine $Image)) { return }
+  $out = @()
+  foreach ($row in @(Get-ProcessTreeRows $rows $rootPid)) {
+    $child = Get-SnapshotIdentity $row
+    if ($child) { $out += $child }
   }
-  $found = @()
-  $queue = [System.Collections.ArrayList]@([int64]$rootPid)
-  $seen = @{}
-  while ($queue.Count -gt 0) {
-    $cur = $queue[0]; $queue.RemoveAt(0)
-    $kids = $byParent[$cur]
-    if (-not $kids) { continue }
-    foreach ($c in $kids) {
-      if ($seen.ContainsKey($c)) { continue }
-      $seen[$c] = $true
-      $found += $c
-      [void]$queue.Add($c)
-    }
-  }
-  return $found
+  $check = Parse-Result ([ProcUtil]::Verify([int]$rootPid, [long]$identity.creationFileTime, $identity.image))
+  if ($check.result -eq 'ok') { $out }
 }
 
-# descendants：枚举目标 pid 当时仍在的后代（PPID 树，含多级），供 stop --tree 在终止
-# 目标前留证（#39）。只向下遍历，不向上爬、不认领外部进程。
 if ($Action -eq 'descendants') {
-  $rows = @()
-  try {
-    $rows = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath -ErrorAction SilentlyContinue)
-  } catch {
-    '[]'
-    exit 0
-  }
-  $byParent = @{}
-  $imageById = @{}
-  foreach ($p in $rows) {
-    $procId = [int64]$p.ProcessId
-    $pp = [int64]$p.ParentProcessId
-    if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
-    [void]$byParent[$pp].Add($procId)
-    $imageById[$procId] = [string]$p.ExecutablePath
-  }
-  $out = @()
-  $queue = [System.Collections.ArrayList]@([int64]$Id)
-  $seen = @{}
-  while ($queue.Count -gt 0) {
-    $cur = $queue[0]; $queue.RemoveAt(0)
-    $kids = $byParent[$cur]
-    if (-not $kids) { continue }
-    foreach ($c in $kids) {
-      if ($seen.ContainsKey($c)) { continue }
-      $seen[$c] = $true
-      [void]$queue.Add($c)
-      $out += [pscustomobject]@{ pid = [int]$c; image = [string]$imageById[$c] }
-    }
-  }
-  if (@($out).Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress }
+  $out = @(Get-Descendants $Id)
+  if ($out.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $out -Compress }
   exit 0
 }
 
@@ -903,13 +881,12 @@ if ($Action -eq 'terminate-tree') {
   $killed = @()
   try {
     foreach ($k in (Get-Descendants $Id)) {
-      $cpid = [int64]$k
-      $raw = [ProcUtil]::Capture([int]$cpid)
-      $parts = $raw -split "`t", 3
-      if ($parts[0] -ne 'OK') { continue } # 已退出/身份不可采：不触碰
+      $cpid = [int64]$k.pid
+      $rootCheck = Parse-Result ([ProcUtil]::Verify($Id, [long]$CreationFileTime, $Image))
+      if ($rootCheck.result -ne 'ok') { break }
       # 后代给 500ms 短等窗：waitMs=0 时 TerminateProcess 发出即返回，一律被计为
       # terminateTimeout，无法区分"终止失败"与"发出即算"，killedPids 语义含糊。
-      $r = Parse-Result ([ProcUtil]::Terminate([int]$cpid, [long]$parts[1], [string]$parts[2], 500))
+      $r = Parse-Result ([ProcUtil]::Terminate([int]$cpid, [long]$k.creationFileTime, [string]$k.image, 500))
       if ($r.result -in 'terminated', 'terminateTimeout') { $killed += $cpid }
     }
   } catch { }
