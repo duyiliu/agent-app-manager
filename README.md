@@ -12,13 +12,19 @@
 npx skills add duyiliu/agent-app-manager --skill agent-app-manager -g
 ```
 
+**安装指定版本（例如 `v0.13.0`）：**
+
+```bash
+npx skills add duyiliu/agent-app-manager#v0.13.0 --skill agent-app-manager -g
+```
+
 **国内加速安装（第三方 skills-cn）：**
 
 ```bash
 npx skills-cn@latest add duyiliu/agent-app-manager --skill agent-app-manager -g -y
 ```
 
-`-g` 表示全局安装，`-y` 表示跳过交互确认；`skills-cn` 为第三方 CLI。安装后根据 Agent 实际加载的 Skill 目录定位脚本，已安装版本可通过 `manager.mjs version` 查看。
+在仓库名后添加 `#vX.Y.Z` 可指定版本，版本列表见 [GitHub Releases](https://github.com/duyiliu/agent-app-manager/releases)；国内加速命令同样支持指定版本。`-g` 表示全局安装，`-y` 表示跳过交互确认；`skills-cn` 为第三方 CLI。安装后根据 Agent 实际加载的 Skill 目录定位脚本，已安装版本可通过 `manager.mjs version` 查看。
 
 ## 核心定位与差异化
 
