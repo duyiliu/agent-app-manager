@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // 锁回归：只覆盖「创建即互斥」这条主路径。
 // 死锁残留不再自动回收（那正是双持有者的来源），由 LOCK_BUSY 提示人工删除。
+// 取锁默认排队等待（flock -w 语义），本文件把预算压小让 busy 用例保持快速。
+process.env.AAM_LOCK_WAIT_MS = '500';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -68,8 +70,8 @@ check('释放时不删别人的锁', () => {
   fs.unlinkSync(file);
 });
 
-// 内部证据写也不特殊对待：锁只陈述"有人占着"，等待由调用方决定。
-check('持有者是 log-* 内部写入 → 同样立即 LOCK_BUSY', () => {
+// 内部证据写也不特殊对待：排队超时后同样报 LOCK_BUSY，不擅自删除。
+check('持有者是 log-* 内部写入 → 排队超时同样报 LOCK_BUSY', () => {
   const file = lockOf('internal');
   fs.writeFileSync(file, JSON.stringify({ pid: 999999, op: 'log-exit' }) + '\n');
   let err;
@@ -82,24 +84,44 @@ check('持有者是 log-* 内部写入 → 同样立即 LOCK_BUSY', () => {
   fs.unlinkSync(file);
 });
 
-// 忙就报错，不在锁内部退避：等待/重试是调用方（人或 Agent）的决定。
-check('抢锁失败不在锁内重试：一次 open 失败即返回 LOCK_BUSY', () => {
-  const file = lockOf('no-retry');
+// 新契约（flock -w 语义）：忙时锁内排队重试，窗口内放锁即拿到，不必返回 LOCK_BUSY。
+check('排队等待：窗口内放锁即拿到（open 重试 >1 次）', () => {
+  const file = lockOf('queued');
   fs.writeFileSync(file, JSON.stringify({ pid: process.pid, op: 'other' }) + '\n');
   const realOpen = fs.openSync;
   let opens = 0;
   fs.openSync = function (p, flags, ...rest) {
-    if (String(flags) === 'wx' && path.resolve(String(p)) === path.resolve(file)) opens++;
+    if (String(flags) === 'wx' && path.resolve(String(p)) === path.resolve(file)) {
+      opens++;
+      if (opens < 3) { const e = new Error('busy'); e.code = 'EEXIST'; throw e; }
+      fs.unlinkSync(file); // 模拟持有者在窗口内放锁
+    }
     return realOpen.call(fs, p, flags, ...rest);
   };
   try {
-    assert.throws(() => withLock(home, 'no-retry', 'probe', () => {}),
-      (e) => e.code === 'LOCK_BUSY', '期望 LOCK_BUSY');
-    assert.equal(opens, 1, `锁内不应重试：open 实际调用 ${opens} 次`);
+    const out = withLock(home, 'queued', 'probe', () => 'got');
+    assert.equal(out, 'got', '窗口内放锁应排队拿到而不是报忙');
+    assert(opens >= 3, `锁内应重试 open：实际 ${opens} 次`);
+    assert(!fs.existsSync(file), '拿到锁跑完 fn 后应已释放');
   } finally {
     fs.openSync = realOpen;
-    fs.unlinkSync(file);
+    try { fs.unlinkSync(file); } catch { /* 已释放 */ }
   }
+});
+
+// 排队预算耗尽仍报错：错误面与旧契约一致（LOCK_BUSY + 持有者详情）。
+check('排队超时仍报 LOCK_BUSY', () => {
+  const file = lockOf('queued-timeout');
+  fs.writeFileSync(file, JSON.stringify({ pid: 999999, op: 'log-exit', at: new Date().toISOString() }) + '\n');
+  const t0 = Date.now();
+  let err;
+  assert.throws(() => withLock(home, 'queued-timeout', 'stop', () => {}), (e) => {
+    err = e;
+    return e.code === 'LOCK_BUSY';
+  });
+  assert(Date.now() - t0 >= 400, `超时应等到预算耗尽：实际 ${Date.now() - t0}ms`);
+  assert.equal(err.detail?.op, 'log-exit', 'detail 仍应带持有者 op');
+  fs.unlinkSync(file);
 });
 
 check('lockState：文件不存在 → 未持有', () => {
