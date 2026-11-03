@@ -3,8 +3,8 @@
 //
 // 死锁清理刻意不做自动化：「判断持有者是否已死」在 Windows 上要起 PowerShell（数百毫秒），
 // 判断与动手之间锁可能已被释放并重建，自动回收会把活锁抢走、制造两个持有者。
-// 因此残留锁只报 LOCK_BUSY 并给出确切文件路径，由人（或 Agent）确认后删除。
-// 忙时同样不重试：锁只负责陈述事实，等待或重试由调用方决定。
+// 因此残留锁只在排队超时后报 LOCK_BUSY 并给出确切文件路径，由人（或 Agent）确认后删除。
+// 持锁者多为收尾短写，取锁默认排队等待（flock -w 语义），超时仍报 LOCK_BUSY。
 import fs from 'node:fs';
 import { lockPath } from './store.mjs';
 import { psProc } from './probe.mjs';
@@ -35,32 +35,45 @@ function releaseLock(file) {
   try { fs.unlinkSync(file); } catch { /* 已不存在 */ }
 }
 
+// 有界等待（flock -w 语义）：拿不到锁时排队轮询，默认等 AAM_LOCK_WAIT_MS 毫秒，
+// 超时仍报 LOCK_BUSY——既不 fail-fast 撞运气，也不无限死等。置 0 恢复立即失败。
+// env 在取锁时读（而非模块加载），测试/调用方可在运行中调整预算。
+const LOCK_WAIT_DEFAULT_MS = 10000;
+const LOCK_WAIT_STEP_MS = 150;
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
 function acquireLock(home, name, op) {
   const file = lockPath(home, name);
-  let fd;
-  try {
-    fd = fs.openSync(file, 'wx');
-  } catch (e) {
-    if (e.code !== 'EEXIST') {
-      // Windows：文件处于删除挂起（持有者刚 unlink）时创建会报 EPERM/EACCES/EBUSY，
-      // 这是瞬时竞争，按 LOCK_BUSY 交给调用方重试，而不是报环境错误。
-      const transient = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code);
-      if (!transient) throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
-      throw conflictError('LOCK_BUSY', `锁文件正在重建（${e.code}）；稍后重试`, { code: e.code, file });
+  const waitMs = Math.max(0, Number(process.env.AAM_LOCK_WAIT_MS ?? LOCK_WAIT_DEFAULT_MS) || 0);
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(file, 'wx');
+    } catch (e) {
+      if (e.code !== 'EEXIST') {
+        // Windows：文件处于删除挂起（持有者刚 unlink）时创建会报 EPERM/EACCES/EBUSY，
+        // 这是瞬时竞争，同样走排队窗口，超时仍按 LOCK_BUSY 报。
+        const transient = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code);
+        if (!transient) throw dataError('LOCK_UNWRITABLE', `锁创建失败（${file}）：${e.message}`);
+        if (Date.now() < deadline) { sleepSync(LOCK_WAIT_STEP_MS); continue; }
+        throw conflictError('LOCK_BUSY', `锁文件正在重建（${e.code}）；稍后重试`, { code: e.code, file });
+      }
+      // 排队窗口内持锁者多为短写收尾（log-exit 等），等它放锁即可；超时才是冲突。
+      if (Date.now() < deadline) { sleepSync(LOCK_WAIT_STEP_MS); continue; }
+      const holder = readLockHolder(file);
+      const who = holder ? `pid=${holder.pid}，op=${holder.op ?? '?'}` : '持有者信息不可读';
+      throw conflictError('LOCK_BUSY',
+        `另一 manager 正在操作（${who}）；稍后重试。若确认该进程已退出，删除 ${file} 后重试`,
+        { pid: holder?.pid ?? null, op: holder?.op ?? null, file });
     }
-    const holder = readLockHolder(file);
-    const who = holder ? `pid=${holder.pid}，op=${holder.op ?? '?'}` : '持有者信息不可读';
-    // 锁不做任何等待、重试或"判断持有者是否还活着"：抢不到就把事实抛给调用方。
-    throw conflictError('LOCK_BUSY',
-      `另一 manager 正在操作（${who}）；稍后重试。若确认该进程已退出，删除 ${file} 后重试`,
-      { pid: holder?.pid ?? null, op: holder?.op ?? null, file });
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
+    } finally {
+      try { fs.closeSync(fd); } catch { /* 忽略 */ }
+    }
+    return () => releaseLock(file);
   }
-  try {
-    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
-  } finally {
-    try { fs.closeSync(fd); } catch { /* 忽略 */ }
-  }
-  return () => releaseLock(file);
 }
 
 export function withLock(home, name, op, fn) {
