@@ -49,7 +49,9 @@ jobs:
         run: npm ci
 
       - name: 全量冒烟
-        run: node scripts/test-all.mjs
+        # -j 4 并发：独立临时 home + 随机端口可并行，进程枚举类测试由
+        # test-all 内部 EXCLUSIVE 收尾串行；串行版约 2-3min，并发后减半
+        run: node scripts/test-all.mjs -j 4
 
   test-windows-critical:
     name: 冒烟测试（Windows 关键集）
@@ -70,7 +72,7 @@ jobs:
         run: npm ci
 
       - name: 关键集冒烟
-        run: node scripts/test-all.mjs manager-smoke env-smoke discovery-redaction-smoke locks-smoke home-migration cli-smoke
+        run: node scripts/test-all.mjs -j 4 manager-smoke env-smoke discovery-redaction-smoke locks-smoke home-migration cli-smoke
 
   # 全量矩阵墙钟约 3-5 分钟（探针每次起 pwsh 约 550ms）：只在发版 tag、每周巡检、
   # 手动触发时执行；main push 与 PR 都不跑，Windows 回归由巡检/发版闸门兜底。
