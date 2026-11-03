@@ -776,16 +776,14 @@ await check('prune 默认 dry-run：列出将删内容且不删除任何文件',
   assert.equal(pd.code, 0, pd.text);
   assert.equal(pd.json.ok, true);
   assert.equal(pd.json.data.dryRun, true);
-  if (probeOk) {
-    const files = pd.json.data.logs.flatMap((a) => a.files).map((f) => f.file);
-    assert(files.includes(path.join(aokLogs, 'rold1.stdout.log')), `应列出超保留期日志：${files.join(',')}`);
-    assert(files.includes(path.join(aokLogs, 'rold1.stdout.log.1')), `应列出超保留期轮转日志：${files.join(',')}`);
-    assert(files.includes(path.join(aokLogs, 'rold2.stderr.log')));
-    assert(files.includes(path.join(aokLogs, '.rold1.pid')), `应列出超保留期运行元文件：${files.join(',')}`);
-    assert(files.includes(path.join(aokLogs, '.rold1.sink.json')));
-  } else {
-    assert(pd.json.data.skipped.some((s) => s.kind === 'logs' && s.reason.includes('PWSH_MISSING')));
-  }
+  // 应用锁是纯 fs.openSync('wx')（#194 后不再起 pwsh），prune 不依赖进程探针；
+  // 无论探针是否可用都应列出全部超保留期文件
+  const pdFiles = pd.json.data.logs.flatMap((a) => a.files).map((f) => f.file);
+  assert(pdFiles.includes(path.join(aokLogs, 'rold1.stdout.log')), `应列出超保留期日志：${pdFiles.join(',')}`);
+  assert(pdFiles.includes(path.join(aokLogs, 'rold1.stdout.log.1')), `应列出超保留期轮转日志：${pdFiles.join(',')}`);
+  assert(pdFiles.includes(path.join(aokLogs, 'rold2.stderr.log')));
+  assert(pdFiles.includes(path.join(aokLogs, '.rold1.pid')), `应列出超保留期运行元文件：${pdFiles.join(',')}`);
+  assert(pdFiles.includes(path.join(aokLogs, '.rold1.sink.json')));
   assert(pd.json.data.staleLocks.some((f) => f.file.endsWith('azombie.lock.stale-1700000000000')));
   assert(pd.json.data.tmpOrphans.some((f) => f.file === oldTmp1));
   assert(pd.json.data.tmpOrphans.some((f) => f.file === oldTmp2));
@@ -805,13 +803,12 @@ await check('prune --apply：回收超保留期日志、死锁残留与孤儿临
   const pa = await run(['prune', '--apply', '--json']);
   assert.equal(pa.code, 0, pa.text);
   assert.equal(pa.json.data.dryRun, false);
-  if (probeOk) {
-    assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log')));
-    assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log.1')));
-    assert(!fs.existsSync(path.join(aokLogs, 'rold2.stderr.log')));
-    assert(!fs.existsSync(path.join(aokLogs, '.rold1.pid')));
-    assert(!fs.existsSync(path.join(aokLogs, '.rold1.sink.json')));
-  }
+  // 与 dry-run 同理：prune 不依赖进程探针，超保留期文件在无 pwsh 的机器上也应被回收
+  assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log')));
+  assert(!fs.existsSync(path.join(aokLogs, 'rold1.stdout.log.1')));
+  assert(!fs.existsSync(path.join(aokLogs, 'rold2.stderr.log')));
+  assert(!fs.existsSync(path.join(aokLogs, '.rold1.pid')));
+  assert(!fs.existsSync(path.join(aokLogs, '.rold1.sink.json')));
   assert(!fs.existsSync(path.join(home, 'locks', 'azombie.lock.stale-1700000000000')));
   assert(!fs.existsSync(oldTmp1));
   assert(!fs.existsSync(oldTmp2));
@@ -854,13 +851,15 @@ await check('损坏运行记录按 DATA_CORRUPT 整体拒绝且不删任何文�
 
 // ---------- remove ----------
 
+// remove 的错误契约与 STOPPED/未结记录移除只走注册表与运行记录，不依赖进程探针；
+// 只有 RUNNING 拒绝与「确认退出」需要真实存活进程身份（pwsh capture），单独受 probeOk 门控
+await check('remove 缺 ref / 未知 ref 退出码 1/2', async () => {
+  assert.equal((await run(['remove'])).code, 1);
+  const r0 = await run(['remove', 'nope', '--json']);
+  assert.equal(r0.code, 2);
+  assert.equal(r0.json.error.code, 'NOT_FOUND');
+});
 if (probeOk) {
-  await check('remove 缺 ref / 未知 ref 退出码 1/2', async () => {
-    assert.equal((await run(['remove'])).code, 1);
-    const r0 = await run(['remove', 'nope', '--json']);
-    assert.equal(r0.code, 2);
-    assert.equal(r0.json.error.code, 'NOT_FOUND');
-  });
   await check('remove RUNNING 受管实例拒绝（退出码 3 INSTANCE_RUNNING）', async () => {
     const live = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
@@ -889,6 +888,9 @@ if (probeOk) {
     assert.equal(rtArun.current.phase, 'STOPPED', 'RUNNING→STOPPED 应按 OS 事实落账');
     assert(fs.existsSync(path.join(home, 'logs', 'arun', 'rrun1.stdout.log')));
   });
+} else {
+  console.log('  skip（缺 pwsh 7：RUNNING 拒绝/确认退出需要真实存活进程身份核验）');
+}
   const astuckBefore = fs.readFileSync(path.join(home, 'runtime', 'astuck.json'), 'utf8');
   await check('remove 未结记录默认拒绝（UNRESOLVED_RUN 退出码 3）', async () => {
     const r1 = await run(['remove', 'stuck', '--json']);
@@ -928,9 +930,6 @@ if (probeOk) {
     assert(fs.existsSync(path.join(home, 'runtime', 'aok.json')));
     assert(fs.existsSync(path.join(aokLogs, 'rkeep1.stdout.log')));
   });
-} else {
-  console.log('  skip（缺 pwsh 7：remove/prune 日志回收依赖应用锁与身份核验）');
-}
 
   // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。
   let cleaned = false;
