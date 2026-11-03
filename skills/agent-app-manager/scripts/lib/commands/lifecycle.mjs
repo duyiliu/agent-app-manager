@@ -300,11 +300,15 @@ export async function cmdStart(ctx, ref) {
 // --tree 快照：目标身份核验通过后按 PPID 向下枚举当时仍在的后代（含多级），
 // 各自用 capture 采集 pid+创建时间+映像。只向下、不向上，不认领外部进程。
 function snapshotTree(cur) {
-  const rows = listDescendants(cur.pid);
+  const rows = listDescendants(cur.pid, cur);
   const snapshot = [];
   for (const row of rows) {
     const pid = Number.isInteger(row) ? row : row?.pid;
     if (!Number.isInteger(pid) || pid <= 0 || pid === cur.pid) continue;
+    if (row.creationFileTime && row.image) {
+      snapshot.push({ pid, creationFileTime: row.creationFileTime, image: row.image });
+      continue;
+    }
     try {
       const id = psProc('capture', { id: pid });
       if (id.result === 'ok') snapshot.push({ pid, creationFileTime: id.creationFileTime, image: id.image });

@@ -194,7 +194,7 @@ try {
     try { await cli(['stop', name, '--tree'], 20000); } catch { /* 已退出 */ }
   }
   for (const pid of pids.filter(Boolean)) {
-    try { killTree(pid); } catch { /* 已退出 */ }
+    try { killTree(pid, base); } catch { /* 已退出 */ }
   }
   if (server) await new Promise((resolve) => server.close(resolve));
   fs.rmSync(base, { recursive: true, force: true });

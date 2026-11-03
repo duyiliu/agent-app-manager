@@ -232,11 +232,13 @@ export function portConflict(port, force, ignorePid = null) {
 
 // 枚举目标进程当时仍在的后代（PPID 树，含多级）：stop --tree 在终止目标前留证（#39）。
 // 只向下遍历，不向上爬、不认领外部进程。返回 [{pid,image}]。
-export function listDescendants(pid) {
+export function listDescendants(pid, expected = null) {
   ensureSupported();
   if (!Number.isInteger(pid) || pid <= 0) return [];
   if (IS_LINUX) return linuxProc.descendants(pid);
-  const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'descendants', '-Id', String(pid)],
+  const args = ['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'descendants', '-Id', String(pid)];
+  if (expected?.creationFileTime && expected?.image) args.push('-CreationFileTime', String(expected.creationFileTime), '-Image', expected.image);
+  const r = spawnPwsh(args,
     { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');

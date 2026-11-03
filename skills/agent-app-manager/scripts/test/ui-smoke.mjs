@@ -627,7 +627,7 @@ try {
     try {
       if (!pid) continue;
       const cap = psProc('capture', { id: pid });
-      if (cap.result === 'ok') killTree(pid);
+      if (cap.result === 'ok') killTree(pid, base);
     } catch { /* 已退出/探针不可用 */ }
   }
   // Windows 上被杀进程的句柄释放有延迟，rmSync 可能 EBUSY。清理失败只告警，不让已完成的断言判负。
