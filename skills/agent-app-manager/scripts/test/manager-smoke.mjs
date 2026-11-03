@@ -8,20 +8,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { hasProcessProbe, isWindows } from './platform.mjs';
+import { MANAGER, sleep, runManager, runManagerWithLockRetry } from './lib.mjs';
 import { MANAGER_VERSION } from '../lib/constants.mjs';
 import { psProc, verifyRuns } from '../lib/probe.mjs';
 
-const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-manager-smoke-'));
 const home = path.join(base, 'home');
 fs.mkdirSync(path.join(base, 'proj'), { recursive: true });
 const proj = fs.realpathSync(path.join(base, 'proj'));
 
-// 同步休眠（主线程，用于轮询进程退出落账）
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const waitLogPid = (file, re) => {
   let pid = null;
   for (let i = 0; i < 50 && pid == null; i++) {
@@ -34,32 +31,11 @@ const waitLogPid = (file, re) => {
   return pid;
 };
 
-const runOnce = (args, { json = true } = {}) => {
-  const r = spawnSync(process.execPath, [MANAGER, '--home', home, ...(json ? ['--json'] : []), ...args], {
-    encoding: 'utf8', timeout: 120000, windowsHide: true,
-  });
-  let parsed = null;
-  try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（文本模式或崩溃） */ }
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
-};
-// 调用方行为：锁忙由调用方退避重试（最多 3 次），与 Agent 的处理方式一致；
-// 其他错误照常返回，不在这里掩盖。
-const run = (args, opts) => {
-  let r = runOnce(args, opts);
-  for (let i = 0; i < 2 && r.json?.error?.code === 'LOCK_BUSY'; i++) {
-    sleep(200);
-    r = runOnce(args, opts);
-  }
-  return r;
-};
-const runAt = (targetHome, args, { json = true } = {}) => {
-  const r = spawnSync(process.execPath, [MANAGER, '--home', targetHome, ...(json ? ['--json'] : []), ...args], {
-    encoding: 'utf8', timeout: 120000, windowsHide: true,
-  });
-  let parsed = null;
-  try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON */ }
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
-};
+// 调用方行为：锁忙由调用方退避重试（见 locks.mjs），与 Agent 的处理方式一致；
+// 锁空闲屏障与退避口径统一由 lib.mjs 提供，其他错误照常返回、不在这里掩盖。
+const runOnce = (args, opts) => runManager(home, args, opts);
+const run = (args, opts) => runManagerWithLockRetry(home, args, opts);
+const runAt = (targetHome, args, opts) => runManagerWithLockRetry(targetHome, args, opts);
 // dry-run 零写入断言：比较 registry/runtime 内容、locks 目录与 logs 文件清单。
 const walkNames = (dir) => {
   const out = [];
@@ -198,7 +174,8 @@ try {
     fs.writeFileSync(path.join(homeReal, 'locks', 'agood.lock'), '{}');
     const orphan = path.join(homeReal, '.tmp-1234-deadbeef');
     fs.writeFileSync(orphan, 'x');
-    const r = runAt(homeReal, ['doctor']);
+    // 本用例人为造锁：必须绕过锁空闲屏障，否则屏障会一直等这把永不释放的锁。
+    const r = runManager(homeReal, ['doctor']);
     assert.equal(r.code, 0, `doctor 应正常退出：${r.stdout}${r.stderr}`);
     assert.equal(r.json.ok, true);
     assert(r.json.data.problems.find((p) => p.file === registryFile), '缺少损坏注册表');
@@ -437,11 +414,12 @@ try {
     fs.writeFileSync(rtFile(), JSON.stringify(rt, null, 2));
     fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, creationFileTime: '1', op: 'start', at: new Date().toISOString() }));
     try {
-      const st = expectOk(run(['status', 'smoke']));
+      // 本用例人为造锁：必须用 runOnce 绕过锁空闲屏障，否则屏障会一直等这把永不释放的锁。
+      const st = expectOk(runOnce(['status', 'smoke']));
       assert.equal(st.data.status, 'UNKNOWN');
       assert(st.data.note.includes('启动中断'), `note 未提示启动中断：${st.data.note}`);
       // 残留锁不再自动回收：先报 LOCK_BUSY 并给出确切文件，人工清理后才轮到未结记录判定
-      const busy = expectFail(run(['start', 'smoke']), 3, 'LOCK_BUSY');
+      const busy = expectFail(runOnce(['start', 'smoke']), 3, 'LOCK_BUSY');
       assert(busy.error.message.includes(path.basename(lockFile)), `错误信息未给出残留锁路径：${busy.error.message}`);
       fs.unlinkSync(lockFile);
       expectFail(run(['start', 'smoke']), 3, 'UNRESOLVED_RUN');

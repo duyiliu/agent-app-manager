@@ -8,13 +8,12 @@ import os from 'node:os';
 import http from 'node:http';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { hasProcessProbe, isWindows, killTree } from './platform.mjs';
+import { MANAGER, runManagerAsync } from './lib.mjs';
 import { psProc } from '../lib/probe.mjs';
 
-const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ui-smoke-'));
 const home = path.join(base, 'home');
 const proj = path.join(base, 'proj');
@@ -528,27 +527,8 @@ try {
     if (!hasProbe) { console.log(`  skip  ${name}（缺进程探针，跳过生命周期参数检查）`); return; }
     return check(name, fn);
   };
-  const runManagerOnce = async (args) => {
-    // stdout 才是 --json 结果；stderr 的 Node 警告不能混入 JSON 解析。
-    const c = spawn(process.execPath, [MANAGER, '--home', home, '--json', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    c.stdout.on('data', (d) => { out += d; });
-    c.stderr.on('data', (d) => { err += d; });
-    const code = await new Promise((res) => c.on('exit', res));
-    let json = null;
-    try { json = JSON.parse(out); } catch { /* 非 JSON：用 text 报错 */ }
-    return { code, text: out + err, json };
-  };
-  // 上一个用例的 detached log-writer 可能仍在写退出记录并持有应用锁（op=log-exit），
-  // 此时 start-new 会得到 LOCK_BUSY。调用方按约定退避重试，测试同样处理，避免误判。
-  const runManager = async (args) => {
-    let r = await runManagerOnce(args);
-    for (let i = 0; i < 6 && r.json?.error?.code === 'LOCK_BUSY'; i++) {
-      await new Promise((res) => setTimeout(res, 250));
-      r = await runManagerOnce(args);
-    }
-    return r;
-  };
+  // 锁空闲屏障 + LOCK_BUSY 兜底退避统一由 lib.mjs 提供；异步版不能阻塞 HTTP 事件循环。
+  const runManager = (args) => runManagerAsync(home, args);
   const waitLogPid = async (file, re) => {
     for (let i = 0; i < 60; i++) {
       try {

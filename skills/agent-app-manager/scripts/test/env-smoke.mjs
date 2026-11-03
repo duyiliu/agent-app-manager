@@ -4,38 +4,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { hasProcessProbe, isWindows } from './platform.mjs';
+import { sleep, runManagerWithLockRetry } from './lib.mjs';
 import { SENSITIVE_ENV_NAME_RE, isSensitiveEnvName, displayEnv, envSecretWarnings } from '../lib/env.mjs';
 
-const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-env-smoke-'));
 const proj = path.join(base, 'proj');
 fs.mkdirSync(proj, { recursive: true });
 const root = fs.realpathSync(proj);
 
-// 上一用例 detached 停下的 log-writer 可能仍在写退出记录并短暂持有应用锁（op=log-exit），
-// 慢 runner 上这个窗口会盖住紧随其后的 start。锁忙只陈述事实、重试交给调用方（见 locks.mjs），
-// 因此 CLI 调用遇到 LOCK_BUSY 时在这里退避重试，与 manager-smoke / ui-smoke 同一口径。
-const runAt = (home, args, extraEnv = {}) => {
-  const invoke = () => {
-    const r = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args], {
-      encoding: 'utf8', timeout: 120000, windowsHide: true,
-      env: { ...process.env, ...extraEnv },
-    });
-    let parsed = null;
-    try { parsed = JSON.parse(r.stdout); } catch { /* 非 JSON（崩溃或文本模式） */ }
-    return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', json: parsed };
-  };
-  for (let attempt = 0; ; attempt++) {
-    const out = invoke();
-    if (out.json?.error?.code !== 'LOCK_BUSY' || attempt >= 5) return out;
-    sleep(250 * (attempt + 1));
-  }
-};
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// 锁空闲屏障 + LOCK_BUSY 兜底退避统一由 lib.mjs 提供（后台 log-writer 收尾窗口会盖住下一条命令）。
+const runAt = (home, args, extraEnv = {}) => runManagerWithLockRetry(home, args, { timeout: 120000, env: extraEnv });
 const waitFile = (file, timeoutMs = 8000) => {
   for (let i = 0; i < timeoutMs / 100; i++) {
     if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').trim()) return true;

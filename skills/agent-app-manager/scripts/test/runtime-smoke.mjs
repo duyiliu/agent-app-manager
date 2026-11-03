@@ -7,14 +7,13 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { isWindows, findExecutable, killTree, listDescendants, findProcesses } from './platform.mjs';
+import { runManagerWithLockRetry } from './lib.mjs';
 import { computeAppId } from '../lib/desc.mjs';
 import { psProc, listListeningPorts } from '../lib/probe.mjs';
 import { persistableDiscovery } from '../lib/launch.mjs';
 
-const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const processPattern = 'two\\.js|srv\\.js|multi\\.js|lsn\\.js|crash\\.js|stable\\.js|clean\\.js|cmd-crash\\.js|npm-cli\\.js run dev|setInterval|sleep 30';
 const existingProcesses = new Map(findProcesses(processPattern).filter((pid) => pid !== process.pid).map((pid) => {
   try { const info = psProc('capture', { id: pid }); return [pid, info.result === 'ok' ? info.creationFileTime : null]; }
@@ -88,17 +87,17 @@ fs.writeFileSync(path.join(projNpm, 'fallback.js'),
   + 'primaryServer.listen(primary, "127.0.0.1", () => console.log("primary-ready PORT=" + primary));\n', 'utf8');
 
 // restartPolicy 回归：直连/命令模式各自定时异常退出；stable 由人为 stop 终止；clean 正常退出。
-// 崩溃延迟 5s（不是 1.2s）：直连模式的自动重启由 log-writer 在目标 spawn 后用 pwsh 采集新目标
+// 退出延迟统一 5s（不是 1.2s）：直连模式的自动重启由 log-writer 在目标 spawn 后用 pwsh 采集新目标
 // 身份，慢 runner 上这一步（含探针重试）能耗数秒。目标在身份采集完成前就退出时，重启会被记成
-// restart-failed、运行记录里的 pid 停在旧值，断言只能看到「pid 未变化」——与 cmd-crash.js 用 15s
-// 同理，这是夹具时机过紧而非产品缺陷。
+// restart-failed、运行记录里的 pid 停在旧值，断言只能看到「pid 未变化」；clean 更会直接
+// IDENTITY_CAPTURE_FAILED。与 cmd-crash.js 用 15s 同理，这是夹具时机过紧而非产品缺陷。
 const crashBody = (tag) => `console.log("${tag}-start pid=" + process.pid);\n`
   + `setTimeout(() => { console.log("${tag}-exit pid=" + process.pid); process.exit(7); }, 5000);\n`;
 fs.writeFileSync(path.join(projRestart, 'crash.js'), crashBody('crash'), 'utf8');
 fs.writeFileSync(path.join(projRestart, 'stable.js'),
   'console.log("stable-start pid=" + process.pid);\nsetInterval(() => {}, 1000);\n', 'utf8');
 fs.writeFileSync(path.join(projRestart, 'clean.js'),
-  'console.log("clean-start pid=" + process.pid);\nsetTimeout(() => { console.log("clean-exit"); process.exit(0); }, 1200);\n', 'utf8');
+  'console.log("clean-start pid=" + process.pid);\nsetTimeout(() => { console.log("clean-exit"); process.exit(0); }, 5000);\n', 'utf8');
 fs.writeFileSync(path.join(projCmdRestart, 'cmd-crash.js'),
   'console.log("cmd-crash-start pid=" + process.pid);\n'
   // 15s 后才崩溃：Windows 发现 + exit-watcher 就绪可能耗数秒，6s 会让目标在 watcher
@@ -112,20 +111,8 @@ const freePort = () => new Promise((resolve, reject) => {
   s.once('error', reject);
   s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
 });
-const runCli = (...args) => spawnSync(process.execPath, [MANAGER, '--home', home, '--json', ...args],
-  { encoding: 'utf8', windowsHide: true, timeout: 60000 });
-const cli = (...args) => {
-  let r = runCli(...args);
-  // 慢速 Windows runner 上偶发：命令以非 0 退出但 stdout/stderr 全空（连错误信封都没有），
-  // 复跑一次即恢复。真实失败一定会带 JSON 错误信封，所以只对「全空」重试，并留痕便于追溯。
-  if ((r.status ?? 0) !== 0 && !`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) {
-    console.log(`  note 空输出退出（status=${r.status ?? '-'}，signal=${r.signal ?? '-'}），重试一次：${args.join(' ')}`);
-    r = runCli(...args);
-  }
-  let json = null;
-  try { json = JSON.parse(r.stdout || ''); } catch { /* 保留原始输出 */ }
-  return { code: r.status, json, text: `${r.stdout ?? ''}${r.stderr ?? ''}` };
-};
+// 锁空闲屏障 + LOCK_BUSY 兜底退避统一由 lib.mjs 提供；空输出复跑是本文件特有。
+const cli = (...args) => runManagerWithLockRetry(home, args, { timeout: 60000, retryEmptyOutput: true });
 const descFile = (d) => {
   if (isWindows && d.command) {
     // 让夹具显式携带本次目录，兜底清理可以证明归属，避免按裸 PID 清理。
@@ -290,19 +277,9 @@ try {
       assert.equal(cli('status', 'nodeapp').json.data.status, 'STOPPED');
     });
     await check('跨 node 进程 start 在 PORT 未设置时仍传递持久化值', async () => {
-      const childEnv = { ...process.env };
-      delete childEnv.PORT;
-      let start;
-      const deadline = Date.now() + 5000;
-      do {
-        start = spawnSync(process.execPath, [MANAGER, '--home', home, '--json', 'start', 'nodeapp'],
-          { encoding: 'utf8', windowsHide: true, timeout: 60000, env: childEnv });
-        let code;
-        try { code = JSON.parse(start.stdout).error?.code; } catch { /* 保留原始错误用于断言 */ }
-        if (code !== 'LOCK_BUSY' || Date.now() >= deadline) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      } while (true);
-      assert.equal(start.status, 0, `${start.stdout}${start.stderr}`);
+      // 子进程不继承 PORT：持久化值必须由 registry 恢复，而不是靠环境泄漏。
+      const start = runManagerWithLockRetry(home, ['start', 'nodeapp'], { timeout: 60000, unsetEnv: ['PORT'] });
+      assert.equal(start.code, 0, start.text);
       assert.equal(cli('status', 'nodeapp').json.data.env.PORT, '3001');
       const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${cli('status', 'nodeapp').json.data.appId}.json`), 'utf8'));
       assert(await logHas(rt.current.logPaths.stdout, 'node-ready PORT=3001'), '跨进程 start 未见 PORT=3001');

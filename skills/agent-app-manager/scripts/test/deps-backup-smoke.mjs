@@ -5,13 +5,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { sleep, runManagerWithLockRetry } from './lib.mjs';
 import { computeAppId } from '../lib/desc.mjs';
 import { checksumOf } from '../lib/commands/backup.mjs';
 
-const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-deps-backup-'));
 const home = path.join(base, 'home');
 const home2 = path.join(base, 'home2');
@@ -20,23 +18,8 @@ fs.mkdirSync(proj, { recursive: true });
 const projRoot = fs.realpathSync.native(proj);
 const nodeImage = path.basename(process.execPath);
 
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const runOnce = (targetHome, args) => {
-  const r = spawnSync(process.execPath, [MANAGER, '--home', targetHome, '--json', ...args],
-    { encoding: 'utf8', timeout: 120000, windowsHide: true });
-  let json = null;
-  try { json = JSON.parse(r.stdout); } catch { /* 非 JSON */ }
-  return { code: r.status, text: `${r.stdout ?? ''}${r.stderr ?? ''}`, json };
-};
-// 上一个用例的 detached log-writer 可能仍在写退出记录并持有应用锁：调用方按约定退避重试。
-const runAt = (targetHome, args) => {
-  let r = runOnce(targetHome, args);
-  for (let i = 0; i < 6 && (r.json?.error?.code === 'LOCK_BUSY' || r.json?.error?.detail?.cause === 'LOCK_BUSY'); i++) {
-    sleep(250);
-    r = runOnce(targetHome, args);
-  }
-  return r;
-};
+// 锁空闲屏障 + LOCK_BUSY 兜底退避统一由 lib.mjs 提供（后台 log-writer 收尾窗口会盖住下一条命令）。
+const runAt = (targetHome, args) => runManagerWithLockRetry(targetHome, args, { timeout: 120000 });
 const ok = (r) => {
   assert.equal(r.json?.ok, true, r.text);
   return r.json.data;
