@@ -369,8 +369,29 @@ public static class ProcUtil {
 }
 '@
 
-# 每次 pwsh -File 都是新进程，直接编译加载即可
-Add-Type -TypeDefinition $typeSrc -Language CSharp
+# 每次 pwsh -File 都是新进程，但 C# 源码不变时编译产物可复用：按源码哈希缓存 DLL，
+# 命中直接加载，省掉每次 0.5-1s 的 Roslyn 编译（冒烟场景每用例数十次探针调用）。
+# 并发编译各写独立临时文件再原子移动，重复写出的产物字节相同，无竞态窗口。
+$cacheDir = Join-Path ([IO.Path]::GetTempPath()) 'aam-proc-cache'
+$srcHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($typeSrc))).Replace('-', '').Substring(0, 16)
+$dll = Join-Path $cacheDir "proc-$srcHash.dll"
+$loaded = $false
+if (Test-Path $dll) {
+  try { Add-Type -Path $dll; $loaded = $true } catch { $loaded = $false }
+}
+if (-not $loaded) {
+  try {
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    $tmp = Join-Path $cacheDir "proc-$srcHash.$PID.dll"
+    Add-Type -TypeDefinition $typeSrc -Language CSharp -OutputAssembly $tmp
+    Move-Item -Force $tmp $dll
+    Add-Type -Path $dll # -OutputAssembly 只写文件不加载，需显式导入
+  } catch {
+    # 缓存路径任何一步失败都回退内存编译，探针功能不受影响；
+    # SilentlyContinue 容忍-Partial 加载已注册的类型
+    Add-Type -TypeDefinition $typeSrc -Language CSharp -ErrorAction SilentlyContinue
+  }
+}
 
 function Parse-Result([string]$raw) {
   $parts = $raw -split "`t", 3
