@@ -15,7 +15,7 @@ import { readinessTimeoutError, conflictError } from '../errors.mjs';
 import { bootId } from '../proc-linux.mjs';
 import { displayEnv } from '../env.mjs';
 import { DEFAULT_MAX_RESTARTS, DEFAULT_BACKOFF_MS } from '../restart.mjs';
-import { sampleRunResources } from '../resources.mjs';
+import { sampleRunResources, recordRunResourcePeaks } from '../resources.mjs';
 import { detectLegacySkills } from '../legacy-skill.mjs';
 import { loadGlobalOnExit } from '../notify.mjs';
 
@@ -285,6 +285,7 @@ export function cmdList(ctx) {
         rows[c.index].memoryBytes = s.rssBytes ?? null;
         rows[c.index].cpuPercent = s.cpuPercent ?? null;
         rows[c.index].resourcesScope = s.scope;
+        recordRunResourcePeaks(ctx.home, rows[c.index].appId, s); // #191
       } else {
         rows[c.index].resourcesNote = s?.reason ?? '资源采样不可用';
       }
@@ -572,6 +573,14 @@ export async function cmdHealth(ctx) {
       };
     }
     const running = st.status === 'RUNNING';
+    if (running && probe?.resources) {
+      // #191：health 的组合探针本就预取资源段——顺手合并峰值，无额外采样成本。
+      const [s] = sampleRunResources(
+        [{ pid: st.pid ?? rt?.current?.pid, kind: rt?.current?.kind ?? 'direct', verified: true }],
+        { sampled: probe.resources },
+      );
+      recordRunResourcePeaks(ctx.home, app.appId, s);
+    }
     const listening = running && base.expectedPort != null ? await tcpListening(base.expectedPort) : null;
     const readiness = running
       ? await readinessCheck(ctx.home, app, rt?.current)
@@ -627,6 +636,7 @@ export function sampleAppUsage(home, ref) {
   if (cur.phase !== 'RUNNING') return { alias, runId: cur.runId ?? null, available: false, reason: `非 RUNNING（${cur.phase}），不采样资源用量` };
   if (!Number.isInteger(cur.pid) || cur.pid <= 0) return { alias, available: false, reason: '运行记录无可用 pid' };
   const [r] = sampleRunResources([{ pid: cur.pid, kind: cur.kind ?? 'direct', creationFileTime: cur.creationFileTime, image: cur.image }]);
+  recordRunResourcePeaks(home, appId, r); // #191：合并峰值证据回 run 详情
   return { alias, runId: cur.runId ?? null, ...(r ?? { available: false, reason: '采样不可用' }) };
 }
 
@@ -662,6 +672,7 @@ export function buildRunHistory(rt) {
     durationMs: runDurationMs(run),
     exit: run.exit ?? null, restartCount: run.restartCount ?? null,
     archiveReason: run.archiveReason ?? null, exitNote: run.exitNote ?? null,
+    resources: run.resources ?? null, // #191：持久化的 run 峰值证据
   }));
 }
 
@@ -761,6 +772,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
   const resources = resourcesRequested ? statusResources(st, cur, probe?.resources ?? undefined) : null;
+  if (resources?.available) recordRunResourcePeaks(ctx.home, appId, resources); // #191
   const runExit = cur?.exit ?? null;
   const runExitSummary = exitSummary(cur);
   return {
@@ -802,6 +814,7 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       lastExit: cur.lastExit ?? null,
       restartEvents: cur.restartEvents ?? [],
       notifiedAt: cur.notifiedAt ?? null, notifyResult: cur.notifyResult ?? null,
+      resources: cur.resources ?? null, // #191：当前 run 持久化的峰值证据
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),

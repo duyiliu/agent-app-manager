@@ -51,6 +51,7 @@ export function archiveCurrent(rt, opts = {}) {
       lastExit: cur.lastExit ?? null,
       stopRequested: cur.stopRequested === true ? true : null,
       exitNote: cur.exitNote ?? null,
+      resources: cur.resources ?? null, // #191：run 峰值证据随批次归档保留
     };
     if (opts.reason) {
       // 显式 ack 放弃的未结记录：保留完整身份与日志证据，注明归档原因

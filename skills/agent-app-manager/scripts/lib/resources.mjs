@@ -4,8 +4,41 @@
 // aggregates. Command-mode runs aggregate the real target and its descendants
 // so npm/vite style launchers report the whole working set.
 import { sampleResources, verifyRun, RESOURCE_SAMPLE_INTERVAL_MS } from './probe.mjs';
+import { readRuntimeStrict } from './store.mjs';
+import { writeRuntime } from './runtime.mjs';
 
 export { RESOURCE_SAMPLE_INTERVAL_MS };
+
+// #191：把单次资源采样合并进 run 详情的持久化峰值证据。
+// 峰值语义取"历史最大"，CPU 峰值按百分比记；samples 只随真实采样递增，
+// lastSampledAt 记最近一次有效采样时间。写回有界幂等：无新峰值不抖动文件。
+export function mergeRunResourcePeaks(cur, sample) {
+  if (!cur || !sample?.available) return false;
+  const peakRss = Number.isFinite(sample.peakRssBytes) ? sample.peakRssBytes : null;
+  const peakCpu = Number.isFinite(sample.cpuPercent) ? sample.cpuPercent : null;
+  if (peakRss == null && peakCpu == null) return false;
+  const prev = cur.resources && typeof cur.resources === 'object' ? cur.resources : {};
+  const next = {
+    peakRssBytes: Math.max(peakRss ?? 0, prev.peakRssBytes ?? 0) || null,
+    peakCpuPercent: Math.max(peakCpu ?? 0, prev.peakCpuPercent ?? 0) || null,
+    samples: (Number.isInteger(prev.samples) ? prev.samples : 0) + 1,
+    lastSampledAt: sample.sampledAt ?? new Date().toISOString(),
+  };
+  if (next.peakRssBytes == null && next.peakCpuPercent == null) return false;
+  cur.resources = next;
+  return true;
+}
+
+// 采样并写回：内部重新读 rt 再合并写盘，避免调用方持有的旧 rt 覆盖 log-writer 的并发更新。
+// 返回是否真实写入了新峰值证据。
+export function recordRunResourcePeaks(home, appId, sample) {
+  if (!sample?.available) return false;
+  const rt = readRuntimeStrict(home, appId);
+  const cur = rt?.current;
+  if (!mergeRunResourcePeaks(cur, sample)) return false;
+  writeRuntime(home, appId, rt);
+  return true;
+}
 
 function sumField(processes, field) {
   let total = 0;
@@ -21,6 +54,7 @@ function publicProcess(p) {
   return {
     pid: p.pid,
     rssBytes: p.rssBytes ?? null,
+    peakRssBytes: p.peakRssBytes ?? null,
     privateBytes: p.privateBytes ?? null,
     cpuPercent: p.cpuPercent ?? null,
     cpuTimeMs: p.cpuTimeMs ?? null,
@@ -98,6 +132,7 @@ export function sampleRunResources(runs, opts = {}) {
       intervalMs: sampled.intervalMs ?? intervalMs,
       processCount: processes.length,
       rssBytes: sumField(processes, 'rssBytes'),
+      peakRssBytes: sumField(processes, 'peakRssBytes'),
       privateBytes: sumField(processes, 'privateBytes'),
       cpuPercent: sumField(processes, 'cpuPercent'),
       cpuTimeMs: sumField(processes, 'cpuTimeMs'),
