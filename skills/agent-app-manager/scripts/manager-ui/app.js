@@ -1148,6 +1148,13 @@ function renderDetail(d) {
   } else if (live && live.rssBytes == null) {
     kvRow(grid, '内存（RSS）', '不可用：' + (live.reason ?? '采样失败'), 'dim');
   }
+  // #191：持久化的峰值证据（跨会话可读的泄漏/OOM 前兆线索）。
+  const peakRss = run?.resources?.peakRssBytes ?? live?.peakRssBytes ?? null;
+  if (peakRss != null) {
+    const pcpu = run?.resources?.peakCpuPercent ?? null;
+    const ns = run?.resources?.samples ?? null;
+    kvRow(moreGrid, '峰值内存（HWM）', `${fmtSize(peakRss)}${pcpu != null ? ` · CPU峰值 ${Number(pcpu).toFixed(1)}%` : ''}${ns != null ? ` · 采样 ${ns} 次` : ''}`, 'dim');
+  }
   kvRow(moreGrid, 'runId', run?.runId);
   kvRow(moreGrid, 'phase', run?.phase);
   if (run?.restartPolicy && run.restartPolicy !== 'never') {
@@ -1223,6 +1230,7 @@ function renderDetail(d) {
       if (p.pid != null) row.appendChild(el('span', 'dim', 'pid ' + p.pid));
       if (p.archivedAt) row.appendChild(el('span', 'dim', '归档 ' + fmtTime(p.archivedAt)));
       if (p.archiveReason) row.appendChild(el('span', 'why', p.archiveReason));
+      if (p.resources?.peakRssBytes != null) row.appendChild(el('span', 'dim', '峰值 ' + fmtSize(p.resources.peakRssBytes)));
       if (p.lastError) row.appendChild(el('span', 'dim', p.lastError));
       row.addEventListener('click', () => selectHistoryRun(p.runId));
       row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectHistoryRun(p.runId); } });

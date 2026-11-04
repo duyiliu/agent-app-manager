@@ -393,6 +393,7 @@ export function normalizeResourceSample(raw, intervalMs = RESOURCE_SAMPLE_INTERV
       pid: Number(p.pid),
       result: typeof p.result === 'string' ? p.result : 'ok',
       rssBytes: numOrNull(p.rssBytes),
+      peakRssBytes: numOrNull(p.peakRssBytes),
       privateBytes: numOrNull(p.privateBytes),
       cpuPercent: numOrNull(p.cpuPercent),
       cpuTimeMs: numOrNull(p.cpuTimeMs),

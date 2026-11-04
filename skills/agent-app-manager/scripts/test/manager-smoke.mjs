@@ -288,6 +288,18 @@ try {
     assert(Number.isFinite(res.cpuPercent) && res.cpuPercent >= 0, `cpuPercent 异常：${res.cpuPercent}`);
     assert(Number.isFinite(res.cpuTimeMs) && res.cpuTimeMs >= 0, `cpuTimeMs 异常：${res.cpuTimeMs}`);
     assert.equal(res.processes[0].pid, currentPid);
+    // #191：平台采样带出峰值 RSS（Linux VmHWM / Windows PeakWorkingSet），并写回 run 详情。
+    assert(Number.isFinite(res.peakRssBytes) && res.peakRssBytes > 0, `peakRssBytes 异常：${res.peakRssBytes}`);
+    assert(res.peakRssBytes >= res.rssBytes, `峰值应不低于当前 RSS：${res.peakRssBytes} < ${res.rssBytes}`);
+    const rtPeak = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${appId}.json`), 'utf8'));
+    assert.equal(rtPeak.current?.resources?.peakRssBytes, res.peakRssBytes, `峰值未写回 run 详情：${JSON.stringify(rtPeak.current?.resources)}`);
+    assert(rtPeak.current?.resources?.samples >= 1, 'samples 未递增');
+    assert(rtPeak.current?.resources?.lastSampledAt, 'lastSampledAt 缺失');
+    // 再采样一次：峰值单调不减、samples 递增（有界幂等写回）。
+    expectOk(run(['status', 'smoke', '--resources']));
+    const rtPeak2 = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${appId}.json`), 'utf8'));
+    assert(rtPeak2.current.resources.samples >= 2, `samples 应递增：${JSON.stringify(rtPeak2.current.resources)}`);
+    assert(rtPeak2.current.resources.peakRssBytes >= rtPeak.current.resources.peakRssBytes, '峰值应单调不减');
   });
 
   lifecycle('list 内存列来自单点采样（RUNNING 行有 RSS）', () => {
@@ -332,6 +344,18 @@ try {
     assert.equal(j.data.status, 'STOPPED');
     assert.equal(j.data.resources?.available, false);
     assert.match(String(j.data.resources?.reason), /非 RUNNING/);
+  });
+
+  lifecycle('#191 停止后 --history 仍能读到上一 run 的持久化峰值', () => {
+    const j = expectOk(run(['status', 'smoke', '--history']));
+    const ended = (j.data.history ?? []).filter((h) => h.outcome !== 'active');
+    const withPeak = ended.find((h) => h.resources?.peakRssBytes != null);
+    assert(withPeak, `已结束 run 无峰值证据：${JSON.stringify(ended)}`);
+    assert(Number.isFinite(withPeak.resources.peakRssBytes) && withPeak.resources.peakRssBytes > 0);
+    // 峰值只随采样写回：停止后原记录上的证据仍可读（下次启动归档进 prevRuns）。
+    const rtAfter = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${appId}.json`), 'utf8'));
+    const endedRec = rtAfter.current?.resources?.peakRssBytes ?? rtAfter.prevRuns?.[0]?.resources?.peakRssBytes;
+    assert(Number.isFinite(endedRec) && endedRec > 0, `停止后峰值证据不可读：${JSON.stringify(rtAfter)}`);
   });
 
   lifecycle('重复 stop → alreadyStopped', () => {

@@ -307,6 +307,7 @@ public static class ProcUtil {
     long[] user1 = new long[n];
     ulong[] ws = new ulong[n];
     ulong[] pb = new ulong[n];
+    ulong[] pws = new ulong[n];
     bool[] memOk = new bool[n];
     string[] err = new string[n];
     for (int i = 0; i < n; i++) {
@@ -340,6 +341,7 @@ public static class ProcUtil {
         if (GetProcessMemoryInfo(h, out counters, counters.cb)) {
           ws[i] = counters.WorkingSetSize.ToUInt64();
           pb[i] = counters.PagefileUsage.ToUInt64();
+          pws[i] = counters.PeakWorkingSetSize.ToUInt64();
           memOk[i] = true;
         }
       }
@@ -360,8 +362,9 @@ public static class ProcUtil {
         double cpuPct = intervalMs > 0 ? delta / ((double)intervalMs * 10000.0) * 100.0 : 0.0;
         string wsText = memOk[i] ? ws[i].ToString(inv) : "-1";
         string pbText = memOk[i] ? pb[i].ToString(inv) : "-1";
+        string pwsText = memOk[i] ? pws[i].ToString(inv) : "-1";
         outLines[i] = "OK\t" + pids[i].ToString(inv) + "\t" + wsText + "\t" + pbText + "\t"
-          + cpuPct.ToString("F2", inv) + "\t" + (total / 10000.0).ToString("F1", inv);
+          + cpuPct.ToString("F2", inv) + "\t" + (total / 10000.0).ToString("F1", inv) + "\t" + pwsText;
       }
       finally { CloseHandle(handles[i]); }
     }
@@ -494,10 +497,11 @@ function Invoke-ResourceSample($items, [int]$intervalMs) {
   $lines = @([ProcUtil]::SampleResources([int[]]$unique.ToArray(), $intervalMs))
   $procs = @()
   foreach ($line in $lines) {
-    $parts = $line -split "`t", 6
+    $parts = $line -split "`t", 7
     if ($parts[0] -eq 'OK') {
       $rss = [long]$parts[2]
       $pb = [long]$parts[3]
+      $pws = if ($parts.Count -ge 7) { [long]$parts[6] } else { [long]-1 }
       $procs += [pscustomobject]@{
         pid = [int]$parts[1]
         result = 'ok'
@@ -505,6 +509,7 @@ function Invoke-ResourceSample($items, [int]$intervalMs) {
         privateBytes = $(if ($pb -ge 0) { $pb } else { $null })
         cpuPercent = [double]$parts[4]
         cpuTimeMs = [double]$parts[5]
+        peakRssBytes = $(if ($pws -ge 0) { $pws } else { $null })
       }
     } elseif ($parts.Count -ge 3) {
       $procs += [pscustomobject]@{ pid = [int]$parts[1]; result = 'error'; code = [string]$parts[2] }
