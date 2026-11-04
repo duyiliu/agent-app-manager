@@ -115,6 +115,29 @@ function depStartOrder(reg, rootAppId) {
   return order;
 }
 
+// 批内整体拓扑（#192）：从所有批次根做全图 DFS，批外依赖参与排序与环/未知校验
+// 但不占批次位；DEP_CYCLE / DEP_UNKNOWN 在任何启动前整体拒绝，不产生半启动结果。
+function batchStartOrder(reg, batchAppIds) {
+  const order = [], visiting = new Set(), done = new Set();
+  const visit = (appId, trail) => {
+    if (done.has(appId)) return;
+    if (visiting.has(appId)) {
+      throw conflictError('DEP_CYCLE', `依赖环：${[...trail, appId].map((id) => reg.apps[id]?.alias ?? id).join(' → ')}`);
+    }
+    visiting.add(appId);
+    const app = reg.apps[appId];
+    for (const depRef of app?.dependsOn ?? []) {
+      let depId;
+      try { depId = resolveAppId(reg, depRef); }
+      catch { throw conflictError('DEP_UNKNOWN', `${app.alias} 的依赖 ${depRef} 未登记（可用 list 查看）`); }
+      visit(depId, [...trail, appId]);
+    }
+    visiting.delete(appId); done.add(appId); order.push(appId);
+  };
+  for (const appId of batchAppIds) visit(appId, []);
+  return order;
+}
+
 // 依赖目标的应用停止序（被依赖最深的最后停，目标自身排最末之外的另行处理）。
 // 反向邻接：depId → 依赖它的应用集合；后续 DFS 让 dependents 先于目标返回。
 function dependentsStopOrder(reg, rootAppId) {
@@ -681,9 +704,13 @@ export function selectAppsByTags(home, tags) {
 
 // 批量语义固定为「逐条执行、失败继续、不回滚」：stop 场景尽量清理其余应用，
 // start/restart 场景保留已成功部分并回报，绝不静默中断。
-async function runBatch(command, tags, apps, op) {
+// beforeEach 返回非 null 时该条目预跳过（不调用 op），由调用方决定跳过语义；
+// SKIPPED_DEP 条目计入 skipped 与 failed（「有失败即非 0」批次约定不变）。
+async function runBatch(command, tags, apps, op, beforeEach = null) {
   const results = [];
   for (const app of apps) {
+    const pre = beforeEach ? await beforeEach(app) : null;
+    if (pre) { results.push(pre); continue; }
     try {
       const data = await op(app);
       results.push({ ok: true, ...(data ?? {}) });
@@ -695,9 +722,10 @@ async function runBatch(command, tags, apps, op) {
     }
   }
   const succeeded = results.filter((r) => r.ok).length;
+  const skipped = results.filter((r) => !r.ok && r.error?.code === 'SKIPPED_DEP').length;
   const failed = results.length - succeeded;
   return {
-    batch: true, command, tags, matched: apps.length, succeeded, failed, partialFailure: failed > 0, results,
+    batch: true, command, tags, matched: apps.length, succeeded, skipped, failed, partialFailure: failed > 0, results,
     note: '按标签逐条执行：单条失败不中断后续、不回滚已完成的应用；每条结果以 results[].ok 为准',
   };
 }
@@ -710,7 +738,35 @@ function batchAppsOrNotFound(home, tags) {
 
 export async function cmdStartByTags(ctx, tags, cleanArgs = []) {
   const apps = batchAppsOrNotFound(ctx.home, tags);
-  return runBatch('start', tags, apps, (app) => cmdStart({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias));
+  const reg = readRegistry(ctx.home);
+  const batchIds = new Set(apps.map((a) => a.appId));
+  // 批内按 dependsOn 整体拓扑排序（#192）：B dependsOn A 且 B 注册序在 A 前时
+  // 仍先启 A；批外依赖不占批次位，由各应用自身 dep 先行序照常拉起。
+  const order = batchStartOrder(reg, [...batchIds]).filter((id) => batchIds.has(id));
+  const byId = new Map(apps.map((a) => [a.appId, a]));
+  const ordered = order.map((id) => byId.get(id));
+  const blockedBy = new Map(); // appId → 导致它被跳过的前置 alias（失败或连带跳过）
+  const depIdsOf = (app) => (app.dependsOn ?? []).map((ref) => {
+    try { return resolveAppId(reg, ref); } catch { return null; }
+  });
+  const op = async (app) => {
+    try {
+      return await cmdStart({ ...ctx, rest: [app.alias, ...cleanArgs] }, app.alias);
+    } catch (e) {
+      blockedBy.set(app.appId, app.alias); // 批内前置失败 → 其直接/间接依赖者预跳过
+      throw e;
+    }
+  };
+  return runBatch('start', tags, ordered, op, (app) => {
+    const badDep = depIdsOf(app).find((d) => d && batchIds.has(d) && blockedBy.has(d));
+    if (!badDep) return null;
+    const depAlias = blockedBy.get(badDep);
+    blockedBy.set(app.appId, depAlias); // 连带跳过也向下游传播
+    return {
+      ok: false, alias: app.alias, appId: app.appId,
+      error: { code: 'SKIPPED_DEP', message: `批内前置依赖 ${depAlias} 未启动成功，跳过 ${app.alias}`, detail: { dep: depAlias } },
+    };
+  });
 }
 
 export function cmdStopByTags(ctx, tags, cleanArgs = []) {

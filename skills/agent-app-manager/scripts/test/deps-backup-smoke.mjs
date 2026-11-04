@@ -90,6 +90,59 @@ try {
   const ghostErr = failWith(runAt(home, ['start-new', '--desc', ghostFile]), 'DEP_UNKNOWN');
   assert.match(ghostErr.message, /no-such-dep/);
 
+  // 7.5 #192：start --tag 批内拓扑排序、前置失败 SKIPPED_DEP、DEP_CYCLE 整体拒绝。
+  const batchDescs = [
+    ['batch-a', []], ['batch-b', ['batch-a']], ['batch-c', ['batch-b']],
+  ];
+  for (const [alias, deps] of batchDescs) {
+    const f = writeDesc(`${alias}.json`, {
+      alias, entry: alias, command: keeperCommand, expectedImage: nodeImage,
+      dependsOn: deps, tags: ['depbatch'],
+    });
+    assert.equal(ok(runAt(home, ['start-new', '--desc', f])).status, 'RUNNING');
+    cleanup.push({ home, alias });
+  }
+  ok(runAt(home, ['stop', '--tag', 'depbatch']));
+
+  // 7.5a 注册表键序倒排后，批内执行序仍按拓扑 a→b→c，依赖命中 RUNNING 去重。
+  const regFile = path.join(home, 'registry.json');
+  const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+  const reversed = { ...reg, apps: Object.fromEntries(Object.entries(reg.apps).reverse()) };
+  fs.writeFileSync(regFile, JSON.stringify(reversed), 'utf8');
+  const ordered = ok(runAt(home, ['start', '--tag', 'depbatch']));
+  assert.deepEqual(ordered.results.map((r) => r.alias), ['batch-a', 'batch-b', 'batch-c'],
+    `批内未按拓扑排序：${JSON.stringify(ordered.results.map((r) => r.alias))}`);
+  assert.equal(ordered.succeeded, 3);
+  assert.deepEqual(ordered.results[1].dependsOn?.skipped, ['batch-a'], '批内依赖未按已运行去重');
+  ok(runAt(home, ['stop', '--tag', 'depbatch']));
+
+  // 7.5b 批内前置失败 → 直接/间接依赖者 SKIPPED_DEP（不盲启），退出语义沿用批次约定。
+  const reg2 = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+  const aId = Object.keys(reg2.apps).find((id) => reg2.apps[id].alias === 'batch-a');
+  delete reg2.apps[aId].command;
+  fs.writeFileSync(regFile, JSON.stringify(reg2), 'utf8');
+  const blocked = ok(runAt(home, ['start', '--tag', 'depbatch']));
+  assert.equal(blocked.results[0].alias, 'batch-a');
+  assert.equal(blocked.results[0].ok, false, 'batch-a 应启动失败');
+  for (const r of blocked.results.slice(1)) {
+    assert.equal(r.ok, false);
+    assert.equal(r.error?.code, 'SKIPPED_DEP', `应为 SKIPPED_DEP：${JSON.stringify(r)}`);
+  }
+  assert.equal(blocked.skipped, 2, `skipped 计数异常：${JSON.stringify(blocked)}`);
+  reg2.apps[aId].command = keeperCommand;
+  fs.writeFileSync(regFile, JSON.stringify(reg2), 'utf8');
+
+  // 7.5c 批内依赖环 → 整体 DEP_CYCLE，不产生半启动结果。
+  const reg3 = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+  const cId = Object.keys(reg3.apps).find((id) => reg3.apps[id].alias === 'batch-c');
+  const aId3 = Object.keys(reg3.apps).find((id) => reg3.apps[id].alias === 'batch-a');
+  reg3.apps[aId3].dependsOn = ['batch-c'];
+  fs.writeFileSync(regFile, JSON.stringify(reg3), 'utf8');
+  failWith(runAt(home, ['start', '--tag', 'depbatch']), 'DEP_CYCLE');
+  reg3.apps[aId3].dependsOn = [];
+  fs.writeFileSync(regFile, JSON.stringify(reg3), 'utf8');
+  void cId;
+
   // 7. DEP_UNRESOLVED：依赖留下未结记录时，错误直接给出 ack 恢复命令模板。
   const depId = computeAppId(projRoot, 'dep');
   const rtFile = path.join(home, 'runtime', `${depId}.json`);
