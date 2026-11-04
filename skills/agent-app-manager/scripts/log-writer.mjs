@@ -11,6 +11,7 @@ import { withLockAsync, withLogEvidenceLock } from './lib/locks.mjs';
 import { psProc, verifyRun } from './lib/probe.mjs';
 import { effectiveRestartSettings, planRestart, exitDescription } from './lib/restart.mjs';
 import { startTargetExitWatcherAsync } from './lib/exit-watch.mjs';
+import { EXIT_WATCH_PROTOCOL } from './lib/constants.mjs';
 import { resolveOnExit, notifyEnv, runNotifyCommand } from './lib/notify.mjs';
 
 const [configPath] = process.argv.slice(2);
@@ -715,6 +716,7 @@ async function performRestart() {
       cur.exit = null;
       cur.exitWatchError = null;
       cur.wrapperExit = null;
+      cur.watcherProtocol = EXIT_WATCH_PROTOCOL; // 本轮 run 的退出证据协议版本（#199）
       cur.restartStartedAt = new Date().toISOString();
       appendRestartEvent(cur, { type: 'restarted', attempt: cur.restartCount, pid: cur.pid, image: cur.image });
       atomicWriteJson(runtimeFile, rt);

@@ -89,7 +89,8 @@ def main():
     if len(sys.argv) >= 4 and sys.argv[3]:
         try:
             with open(sys.argv[3], "w", encoding="utf-8") as f:
-                f.write("ready")
+                # 与 lib/constants.mjs 的 EXIT_WATCH_PROTOCOL 保持一致（#199）
+                f.write('{"protocol": 1}')
         except OSError:
             pass
 

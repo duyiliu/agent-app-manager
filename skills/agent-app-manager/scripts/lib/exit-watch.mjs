@@ -7,10 +7,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { EXIT_WATCH_PROTOCOL } from './constants.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const EXIT_WATCHER = path.join(SCRIPTS_DIR, 'exit-watcher.mjs');
 const READY_TIMEOUT_ITERATIONS = 250; // 250 × 20ms = 5s
+
+// readyFile 内容核验（#199）：升级覆盖脚本后新旧 watcher 可能并存，就绪标记带
+// protocol 版本位；读不出/版本未知一律按未就绪处理，文件写入半途（空内容）继续等。
+function watchReadyStatus(readyFile) {
+  let raw;
+  try { raw = fs.readFileSync(readyFile, 'utf8'); } catch { return 'absent'; }
+  if (!raw.trim()) return 'pending';
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.protocol === EXIT_WATCH_PROTOCOL ? 'ready' : 'mismatch';
+  } catch {
+    return 'mismatch';
+  }
+}
 
 function needsWatcher(cur) {
   if (!Number.isInteger(cur?.pid) || cur.pid <= 0 || !cur.creationFileTime) return false;
@@ -40,10 +55,12 @@ export function startTargetExitWatcher(home, appId, runId, cur) {
     spawnWatcher(home, appId, runId, cur, readyFile);
     // 等 helper 真正持有目标句柄/pidfd 后再返回启动成功；否则目标可能在 watcher
     // 就绪前退出并被 wrapper 回收，真实退出证据永久缺失。
-    for (let i = 0; i < READY_TIMEOUT_ITERATIONS && !fs.existsSync(readyFile); i++) {
+    for (let i = 0; i < READY_TIMEOUT_ITERATIONS; i++) {
+      const s = watchReadyStatus(readyFile);
+      if (s === 'ready') { ready = true; break; }
+      if (s === 'mismatch') break; // 协议未知立即失败，不必等满 5s
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
-    ready = fs.existsSync(readyFile);
   } catch { /* 下面按未就绪处理 */ }
   try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
   return ready;
@@ -58,10 +75,12 @@ export async function startTargetExitWatcherAsync(home, appId, runId, cur) {
   try {
     spawnWatcher(home, appId, runId, cur, readyFile);
     // 与同步版同语义的就绪等待，但用异步 sleep 避免冻结监督进程的事件循环。
-    for (let i = 0; i < READY_TIMEOUT_ITERATIONS && !fs.existsSync(readyFile); i++) {
+    for (let i = 0; i < READY_TIMEOUT_ITERATIONS; i++) {
+      const s = watchReadyStatus(readyFile);
+      if (s === 'ready') { ready = true; break; }
+      if (s === 'mismatch') break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    ready = fs.existsSync(readyFile);
   } catch { /* 下面按未就绪处理 */ }
   try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
   return ready;

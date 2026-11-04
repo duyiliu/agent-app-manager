@@ -236,7 +236,8 @@ public static class ProcUtil {
       if (c != creationFileTime) return "MISMATCH\tcreationTime";
       // 先发出 ready：manager 等 watcher 真正拿到句柄后才返回启动成功，
       // 避免目标在 pwsh 冷启动期间退出导致证据漏采。
-      if (!string.IsNullOrEmpty(readyFile)) { try { System.IO.File.WriteAllText(readyFile, "ready"); } catch { } }
+      // ready 内容带协议版本位，与 lib/constants.mjs 的 EXIT_WATCH_PROTOCOL 一致（#199）
+      if (!string.IsNullOrEmpty(readyFile)) { try { System.IO.File.WriteAllText(readyFile, "{\"protocol\": 1}"); } catch { } }
       uint w = WaitForSingleObject(h, 0xFFFFFFFF);
       if (w != 0) return Err("waitFailed", (int)w);
       uint code;
