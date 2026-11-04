@@ -364,7 +364,7 @@ function renderHuman(command, data) {
 }
 
 function renderBatch(command, data) {
-  const lines = [`批量 ${command} tags=${data.tags.join(',')}：匹配 ${data.matched}，成功 ${data.succeeded}，失败 ${data.failed}`];
+  const lines = [`批量 ${command} tags=${data.tags.join(',')}：匹配 ${data.matched}，成功 ${data.succeeded}，失败 ${data.failed}${data.skipped ? `（含依赖跳过 ${data.skipped}）` : ''}`];
   for (const r of data.results) {
     if (!r.ok) {
       lines.push(`- ${r.alias} (${r.appId}) 失败[${r.error.code}] ${r.error.message}`);
