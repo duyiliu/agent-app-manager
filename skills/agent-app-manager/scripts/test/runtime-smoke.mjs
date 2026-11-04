@@ -571,6 +571,16 @@ try {
     assert.equal(dead.status, 'DEAD');
     assert.equal(dead.run.restartCount, 2, `restartCount 异常：${dead.run.restartCount}`);
     assert(dead.run.restartEvents?.some((e) => e.type === 'dead'), 'restartEvents 缺少 dead 事件');
+    // #198：退避带抖动且随连续失败加长——base=100 时第 n 次尝试落在
+    // [100*2^(n-1), 100*2^(n-1)*1.5]；不再常数、不再同刻。
+    const backoffs = (dead.run.restartEvents ?? []).filter((e) => e.type === 'backoff');
+    assert.equal(backoffs.length, 2, `backoff 事件数异常：${JSON.stringify(backoffs)}`);
+    for (const [i, e] of backoffs.entries()) {
+      const lo = 100 * 2 ** i, hi = lo * 1.5;
+      assert(Number.isInteger(e.delayMs) && e.delayMs >= lo && e.delayMs <= hi,
+        `第 ${i + 1} 次退避越界 [${lo}, ${hi}]：${e.delayMs}`);
+      assert(e.nextRestartAt, `第 ${i + 1} 次退避缺少 nextRestartAt：${JSON.stringify(e)}`);
+    }
     const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${dead.appId}.json`), 'utf8'));
     assert.equal(rt.current.phase, 'DEAD');
     const list = cli('list');

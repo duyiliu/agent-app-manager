@@ -59,8 +59,20 @@ export function isCrashExit(code, signal) {
   return signal != null || (code != null && code !== 0);
 }
 
+// 重启间隔：base × min(2^(attempt-1), 上限) × (1 + rand[0,0.5))，再收敛到
+// MAX_BACKOFF_MS 内（#198）。批量场景同刻齐步会把外部依赖再次打挂、常数间隔又
+// 不会随连续失败变长；抖动错开节奏、指数加长给依赖恢复窗口。rand 可注入便于测试。
+const BACKOFF_JITTER_SPAN = 0.5;
+export function computeRestartDelay(backoffMs, attempt, rand = Math.random) {
+  const base = Number.isInteger(backoffMs) && backoffMs > 0 ? backoffMs : DEFAULT_BACKOFF_MS;
+  const n = Number.isInteger(attempt) && attempt >= 1 ? attempt : 1;
+  const growth = Math.min(2 ** (n - 1), Math.max(1, Math.floor(MAX_BACKOFF_MS / base)));
+  const jitter = 1 + Math.min(Math.max(rand() || 0, 0), 0.999999) * BACKOFF_JITTER_SPAN;
+  return Math.min(MAX_BACKOFF_MS, Math.round(base * growth * jitter));
+}
+
 // 纯决策：返回 stop（不重启）/ dead（达到上限）/ restart（下一次自动重启）。
-export function planRestart(settings, restartCount, code, signal) {
+export function planRestart(settings, restartCount, code, signal, rand = Math.random) {
   if (settings.restartPolicy !== 'on-failure') return { action: 'stop', reason: 'policy-never' };
   // 证据缺失时不按崩溃处理：一个正常退出但采集不到 code 的目标不应触发
   // on-failure 自动重启；落 STOPPED + evidence 供人工判断（#157）。
@@ -72,7 +84,7 @@ export function planRestart(settings, restartCount, code, signal) {
   }
   return {
     action: 'restart', reason: 'on-failure',
-    restartCount: count + 1, delayMs: settings.backoffMs,
+    restartCount: count + 1, delayMs: computeRestartDelay(settings.backoffMs, count + 1, rand),
   };
 }
 
