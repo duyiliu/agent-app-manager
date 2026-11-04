@@ -6,6 +6,9 @@ export const EXIT = Object.freeze({ OK: 0, USAGE: 1, NOT_FOUND: 2, CONFLICT: 3, 
 
 // 进程探针等待上限（Windows pwsh 与 Linux /proc 共用同一语义）
 export const TERMINATE_WAIT_MS = 10000;
+// exit-watcher readyFile 协议版本（#199）：升级就地覆盖脚本后，新旧版进程可能并存；
+// ready 文件带显式版本位，读侧遇未知协议按未就绪处理（启动路径已会显式失败）。
+export const EXIT_WATCH_PROTOCOL = 1;
 export const COMMAND_DISCOVER_TIMEOUT_MS = 45000;
 
 // 统一错误类型：manager 与 lib 共用同一类，instanceof 检查才能跨模块生效

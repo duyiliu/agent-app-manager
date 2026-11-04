@@ -20,6 +20,8 @@ npx skills-cn@latest add duyiliu/agent-app-manager#v0.13.0 --skill agent-app-man
 
 安装命令默认固定版本；换成其他版本时修改 `#vX.Y.Z` 即可，版本列表见 [GitHub Releases](https://github.com/duyiliu/agent-app-manager/releases)；国内加速命令同样支持指定版本。省略 `#vX.Y.Z` 则安装最新主线。`-g` 表示全局安装，`-y` 表示跳过交互确认；`skills-cn` 为第三方 CLI。安装后根据 Agent 实际加载的 Skill 目录定位脚本，已安装版本可通过 `manager.mjs version` 查看。
 
+**升级提示**：升级是脚本就地覆盖，正在运行的受管应用仍由旧版监督进程看管，直到下次重启才切换到新协议；run 详情里的 `watcherProtocol` 记录了每次运行由哪一版退出证据协议采集。若介意并存窗口，升级前先 `stop --tag <tag>` 停掉在册应用再覆盖安装。
+
 ## 核心定位与差异化
 
 **Agent-native Application Lifecycle Manager：让任意 Coding Agent 自然地启动、观察和管理真实开发应用。**

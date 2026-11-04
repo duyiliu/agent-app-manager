@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SCHEMA_VERSION } from './constants.mjs';
+import { SCHEMA_VERSION, EXIT_WATCH_PROTOCOL } from './constants.mjs';
 import { runtimePath, readRuntimeStrict } from './store.mjs';
 import { psProc, COMMAND_DISCOVER_TIMEOUT_MS } from './probe.mjs';
 import { resolveExe, newRunId, RUN_LOG_MAX_BYTES } from './desc.mjs';
@@ -301,6 +301,9 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.pid = d.candidates[0].pid;
       rt.current.creationFileTime = t.creationFileTime;
       rt.current.image = t.image;
+      // 记录本次 run 的退出证据是哪一版 watcher 协议负责采集（#199），
+      // 升级并存窗口内可审计；协议本身由 readyFile 内容核验。
+      rt.current.watcherProtocol = EXIT_WATCH_PROTOCOL;
       captureLoggerCreationFileTime(rt.current);
       writeLaunchState();
       if (!startTargetExitWatcher(home, appId, runId, rt.current)) {
