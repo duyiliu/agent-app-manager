@@ -20,16 +20,20 @@ function needsWatcher(cur) {
 }
 
 function spawnWatcher(home, appId, runId, cur, readyFile) {
+  // home/readyFile 一律先落成绝对路径再传入（#197）：watcher 的 cwd 是 readyFile
+  // 所在目录而非 launch 侧 cwd，任何相对路径都会在 watcher 侧按错误基点解释。
+  const absHome = path.resolve(home);
+  const absReady = path.resolve(readyFile);
   const watcher = spawn(process.execPath, [
-    EXIT_WATCHER, home, appId, runId, String(cur.pid), String(cur.creationFileTime), readyFile,
-  ], { cwd: path.dirname(readyFile), detached: true, windowsHide: true, stdio: 'ignore' });
+    EXIT_WATCHER, absHome, appId, runId, String(cur.pid), String(cur.creationFileTime), absReady,
+  ], { cwd: path.dirname(absReady), detached: true, windowsHide: true, stdio: 'ignore' });
   watcher.unref();
 }
 
 export function startTargetExitWatcher(home, appId, runId, cur) {
   if (!needsWatcher(cur)) return true;
   const logDir = cur.logPaths ? path.dirname(cur.logPaths.stdout) : SCRIPTS_DIR;
-  const readyFile = path.join(logDir, `.${runId}.exit-watch.ready`);
+  const readyFile = path.resolve(logDir, `.${runId}.exit-watch.ready`);
   let ready = false;
   try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
   try {
@@ -48,7 +52,7 @@ export function startTargetExitWatcher(home, appId, runId, cur) {
 export async function startTargetExitWatcherAsync(home, appId, runId, cur) {
   if (!needsWatcher(cur)) return true;
   const logDir = cur.logPaths ? path.dirname(cur.logPaths.stdout) : SCRIPTS_DIR;
-  const readyFile = path.join(logDir, `.${runId}.exit-watch.ready`);
+  const readyFile = path.resolve(logDir, `.${runId}.exit-watch.ready`);
   let ready = false;
   try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
   try {
