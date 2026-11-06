@@ -14,3 +14,9 @@
    - 命令模式与直连都不可行 → 报 `UNSUPPORTED_LAUNCH` 类限制说明后按原授权执行项目命令，`record-unmanaged` 登记日志线索（`--log-hints` 指向 `.tmp/runner-local-*` 日志），不伪造托管。
 5. **[比对] 端口**：以实际输出/配置为准；`vite.config.*`/`vue.config.js`/`next.config.*`/`.env*` 中的 `server.port`/`PORT` 优先于框架默认（vite 5173、next 3000、ng 4200、vue-cli 8080）。注意 vite 等在端口被占用时可能自动换用下一个端口并在输出中说明——就绪端口以实际输出为准，不是配置文件。`.env*` 只读取值，不改写、不外泄。
 6. **热更新**：前端 dev server 的 HMR/文件监听是框架能力，不是本 Skill 承诺；验证方式=改动源文件后看 dev server 输出或页面。
+
+## 多 worktree 端口覆盖
+
+按 [worktree 与端口流程](worktrees.md) 选端口。先核对当前依赖 CLI 帮助和项目脚本：支持端口参数时写入实际 Node 入口的 `args`，使用包管理器命令时确认参数转发规则；应用源码明确读取 `process.env.PORT` 时才用 `env.PORT`，不能将它通用于所有前端框架。脚本中的固定参数可能覆盖环境变量。项目已支持严格端口选项时可采用，避免静默顺延导致地址失配；发生顺延仍按受管进程证据核验。
+
+前后端分别登记，核对当前 worktree 的代理目标/API 地址与后端端口；明确地址是启动时读取还是构建时固化。独立 HMR 监听/客户端端口只有项目已启用时才一起检查。不要通过改写共享 `.env` 或 `vite.config.*` 绕过冲突。

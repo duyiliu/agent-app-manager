@@ -44,7 +44,7 @@ Standalone JRebel 不依赖 IDE 插件；安装路径、`REBEL_HOME`/`REBEL_BASE
 
 - 受管优先级：`exe` 直连 → `command`+`expectedImage` 命令模式 → 非受管登记；前两者都不行才登记为非受管，不得伪造托管。
 - `.cmd`/`.bat`/`.ps1` 包装、WindowsApps 执行别名、Linux `#!` 包装不得直接作为受管 `exe`。
-- `mode` 取 `python`、`node`、`proc`；端口只采用项目证据，歧义即停。
+- `mode` 取 `python`、`node`、`proc`；默认端口与覆盖方式采用项目证据，多 worktree 隔离按第 4 节处理，覆盖方式不明时停止。
 
 ## 2. 展示匹配结果与处理不确定项
 
@@ -74,9 +74,9 @@ Standalone JRebel 不依赖 IDE 插件；安装路径、`REBEL_HOME`/`REBEL_BASE
 
 本节第 1–3 条是第 3 节编译、资源同步或改项目文件之前的前置阻断条件；第 4–5 条在真正启动前复核。
 
-1. 检查目标端口及已有项目进程。若同一项目已有受管实例正常运行（无论 `mode` 是 `java` 还是 `jrebel`），优先复用它；只有用户已授权本轮编译时才先构建，再按项目模式验证热加载或重启式验证。
-2. 若端口被占用，报告 PID、进程信息与日志线索，默认不杀进程、不启动第二份。只有用户明确要求重启/停止且目标进程已核实属于当前项目时才停止；不要只凭端口号猜测进程归属。
-3. 不自动选择另一个端口来绕开冲突，因为应用的外部依赖、回调地址或 profile 可能仍指向原端口。只有用户明确要求隔离验证并确认替代端口可用时才采用。
+1. 用户明确指定应用别名/ID/路径时先核对该目标；启动当前项目时按当前 worktree 的真实根目录与应用入口匹配登记，同仓其他 worktree 的实例不是当前目标。当前目标已有正常受管实例时优先复用，明确的重启请求按原授权执行；只有用户已授权本轮编译时才先构建，再验证热加载或重启结果。
+2. 若端口被占用，诊断占用者并核对身份；不凭端口认领或停止进程，不用 `--force` 绕过冲突。当前 worktree 启动不授权停止其他 worktree 或外部服务。
+3. 多 worktree、用户要求隔离运行或端口冲突时，先读 [worktree 与端口流程](references/worktrees.md)：用户指定/项目要求固定的端口冲突即报告；其余仅在已确认覆盖入口和关联地址可同步时选择空闲端口，写入实际启动参数或环境变量，并对齐 `expectedPort`、就绪与调用地址。复用同一管理数据目录，不修改受版本控制的配置；普通非隔离启动保留原端口约定。
 4. 启动日志放在目标仓库 `.tmp/` 下，确保目录存在；通用启动日志命名必须与 `manager ui` 的 `.tmp` 兼容扫描规则匹配：
    - `jrebel-local-<yyyyMMdd-HHmmss>.stdout.log` / `.stderr.log`（Java/JRebel 沿用名）
    - `runner-local-<yyyyMMdd-HHmmss>.stdout.log` / `.stderr.log`（非 Java 项目脚本日志的通用名，同规则被扫描）
@@ -87,6 +87,7 @@ Standalone JRebel 不依赖 IDE 插件；安装路径、`REBEL_HOME`/`REBEL_BASE
 - 后台启动并将 stdout/stderr 重定向到上述日志文件，勿在前台长时间等待。
 - 受管 `start`/`start-new`/`restart` 可加 `--wait-ready [--ready-timeout <ms>]`（默认 60s）：启动前必须已配置 `readyLogPattern`/`readyUrl`，否则用法错误且不产生进程；进程 RUNNING 后同步轮询就绪，READY 才返回 0，超时返回退出码 6/`READY_TIMEOUT` 且进程保持 RUNNING，进程提前退出立即失败。等待期从本批次日志起点增量扫描（上限 `logMaxBytes`），不会漏掉超出 5000 行尾部窗口的早期标记。
 - 再确认应用自身就绪消息（Java 的 started 日志、vite 的 `Local: http://...`、uvicorn 的 `Application startup complete`、Django 的 `Starting development server at` 等，以项目实际输出为准）或项目明确的 readiness 接口，并核对目标端口监听。端口开放或通用 health 成功只说明进程存活，不足以证明目标业务功能生效。
+- 多 worktree 必须核对服务端口属于本次受管进程（或有完整身份证据的服务后代），再解释 HTTP 就绪结果；`--wait-ready` 不自动证明端口归属。多监听端口时根据服务证据选业务入口，不取 `actualPorts` 第一项。核验失败标未验证，不冒充可用。
 - 验证具体改动时，按用户要求调用业务接口或既有场景；不擅自执行全量测试、制造/清理业务数据。
 - Java/JRebel 的 banner、`Reloading class`、mapper XML 与 `jrebel.log` 位置见 [Java 启动参考](references/java.md) 第 3 节；`mode: java` 没有热加载，验证方式只能是重新编译并重启，重启前说明服务中断影响。
 - **统一日志网页（manager ui）**：本 Skill 执行任何受管操作（detect/start-new/start/stop/restart/record-unmanaged）时，先后台确保 ui 已运行并把固定地址 `http://127.0.0.1:8199` 交给用户，不等用户询问：

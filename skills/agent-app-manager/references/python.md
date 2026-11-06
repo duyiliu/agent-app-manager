@@ -8,3 +8,9 @@
 4. **[比对] 端口**：以项目配置与启动参数为准；框架默认（Django 8000、Flask 5000、uvicorn 8000）只是候选，不冒充实际监听。
 5. **desc 形态**：`exe`=真实解释器（Windows 为 venv 内的 `python.exe`；Linux 为 venv 内的 `bin/python` 或真实 `python3`），`args`=命令去掉解释器后的数组，`cwd`=项目根或项目约定目录，`mode`=`python`，`expectedPort` 有证据才填。
 6. **热更新**：uvicorn `--reload`、flask debug 等由项目配置决定，不擅自添加参数；验证方式=改动源文件后看 dev server 输出或页面。
+
+## 多 worktree 端口覆盖
+
+按 [worktree 与端口流程](worktrees.md) 选端口。依据项目启动入口和当前版本 CLI 帮助确定覆盖位置：Django `runserver` 的地址/端口位置参数，或 Flask/Uvicorn 启动子命令提供的端口选项，均写入真实解释器后面的 `args`。自定义 `app.py` 需确认源码读取的参数/环境变量，不假定 `PORT` 有效；调用已有脚本时核对它是否转发覆盖值。
+
+项目已启用 reload/多进程时，监听者可能是服务子进程；保留该启动约定，依据进程身份及后代关系核验端口。发现多个目标候选仍遵守 manager 的发现边界，不为换端口关闭 reload 或伪造受管成功。

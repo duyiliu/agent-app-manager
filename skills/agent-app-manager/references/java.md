@@ -20,6 +20,7 @@
 - 无项目脚本时，默认按 Spring Boot 插件 → 已存在且与源码相符的 fat jar → `-cp` 主类的顺序选型。该顺序只是默认偏好，项目约定、profile 要求或产物新鲜度可以推翻它，推翻时按 `SKILL.md` 第 2 节说明理由。
 - 无项目脚本时，根据已确认的项目构建结果组装启动命令：Windows classpath 分隔符为 `;`，Linux 为 `:`；引用路径和 `-D` 参数；依赖从项目生成的 classpath 或已准备好的依赖目录获取。fat jar 使用 `-jar`。不要把示例中的占位主类或 classpath 当作真实配置。
 - 改 Java 源码后按 `SKILL.md` 第 3 节增量编译（默认不 `clean`）；`manager start/restart` 不会编译。
+- 多 worktree 端口按 [worktree 与端口流程](worktrees.md) 处理。确认 Spring Boot 的配置绑定及覆盖优先级后，应用参数放在 `-jar <jar>` 或主类之后，JVM 系统属性放在其之前；Maven/Gradle 插件启动需使用当前插件版本支持的应用参数转发方式，不能把应用端口直接当成构建工具参数。环境变量仅在项目实际读取且不会被更高优先级值覆盖时使用。独立 management/JDWP 等已启用监听也需检查；覆盖能力不明、远程配置或回调地址无法同步时停止，不修改共享配置或为换端口改变 profile。
 - 以下 JRebel 参数仅在按本文件第 1 节第 6 项选定 `mode: jrebel` 时添加；`mode: java` 的普通启动一律不带。
 - 将 `REBEL_HOME`/`JREBEL_HOME` 展开为实际绝对路径，再传给 `-agentpath`，不要把变量占位符原样传给 JVM。通常优先用平台原生 agent；只有原生 agent 不适用于目标架构时，才按官方 `agent-setup.md` 使用 `-javaagent` 两段式 bootstrap。
 - `-Drebel.base` 指向用户配置目录。关闭 Spring DevTools 仅在项目确实使用 DevTools 且项目约定要求时添加。
