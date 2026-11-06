@@ -26,6 +26,19 @@ npm run check     # build + test，提交前跑这个
 
 单个冒烟可以直跑，例如 `node skills/agent-app-manager/scripts/test/ui-smoke.mjs`。
 
+### 变异测试（按需手动，不进 check）
+
+`scripts/mutation-test.mjs` 是零依赖行级变异器：对目标 lib 模块做算子翻转 / 字面量翻转 / 取反移除 / 边界 ±1，
+逐变异体在临时目录跑对应单元测试，报告杀灭率与存活清单（有存活退出码 2）：
+
+```bash
+node skills/agent-app-manager/scripts/mutation-test.mjs lib/restart.mjs test/unit-restart-notify.mjs [--lines a-b] [--json]
+```
+
+改 lib 纯函数后建议跑一轮：存活体里**等价变异不追杀灭率**（`?? null`↔`?? undefined` 在 `==` 断言下不可区分、
+正则字符类数字翻转集合相同、`!= null` 双等号匹配两值、win32/真实进程路径单元层不可达）；真正杀不掉的才回去补断言。
+逐变异体跑套件成本较高，不进 `npm run check`。
+
 ## 仓库结构
 
 ```text
