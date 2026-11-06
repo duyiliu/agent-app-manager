@@ -15,7 +15,7 @@ import { SCHEMA_VERSION } from '../lib/constants.mjs';
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-unit-desc-'));
 const proj = path.join(base, 'proj');
 fs.mkdirSync(proj, { recursive: true });
-const root = fs.realpathSync(proj);
+const root = fs.realpathSync.native(proj); // Windows 上需展开 8.3 短名，与 canonicalizeDesc 同口径
 
 let failed = 0;
 const check = (name, fn) => {
@@ -89,7 +89,8 @@ try {
   });
   check('loadManagedDesc：command 模式期望 expectedImage', () => {
     expectErr('USAGE', () => loadManagedDesc(writeDesc({ ...validManaged(), exe: null, command: 'java -jar a.jar' })), /expectedImage/);
-    const d = loadManagedDesc(writeDesc({ ...validManaged(), exe: null, command: 'java -jar a.jar', expectedImage: 'java' }));
+    // Windows 要求映像名 .exe/.com 后缀；'java.exe' 两平台均合法
+    const d = loadManagedDesc(writeDesc({ ...validManaged(), exe: null, command: 'java -jar a.jar', expectedImage: 'java.exe' }));
     assert.equal(d.command, 'java -jar a.jar');
     assert.equal(d.exe, null);
   });
