@@ -9,7 +9,7 @@ import {
   parseLeadingTimestamp, parseSinceValue, createLogFilter, filterLogEntries,
   readTailLines, readStderrTailSafe, RUN_LOG_FILE_RE, RUN_META_FILE_RE, MAX_LOG_LINES,
 } from '../lib/logs.mjs';
-import { parseEnvFile, prepareLaunchEnv, envSecretWarnings } from '../lib/env.mjs';
+import { parseEnvFile, prepareLaunchEnv, envSecretWarnings, envWarningMessage, displayEnv } from '../lib/env.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-unit-logs-env-'));
 
@@ -144,6 +144,9 @@ __proto__=polluted
     assert.equal(vars.D, 'single');
     assert.equal(vars.E, 'plain');
     assert.equal(vars.__proto__, 'polluted'); // 自有键，不触发原型 setter
+    // __proto__ 必须走 defineProperty：可枚举（deepEqual/keys 可见）、可重定义
+    assert.ok(Object.keys(vars).includes('__proto__'));
+    assert.equal(parseEnvFile('__proto__=a\n__proto__=b').__proto__, 'b');
     assert.deepEqual(parseEnvFile(''), {});
     assert.equal(parseEnvFile('\uFEFFA=1').A, '1'); // BOM
   });
@@ -152,11 +155,29 @@ __proto__=polluted
     assert.match(e.message, /第 1 行/);
     assert.match(e.message, /f\.env/);
     expectErr('ENV_FILE_INVALID', () => parseEnvFile('1BAD=1'), /变量名不合法/);
+    // 变量名不合法必须报出所在行号（i+1 变异必须被杀）
+    const e3 = expectErr('ENV_FILE_INVALID', () => parseEnvFile('A=1\n2BAD=x'));
+    assert.match(e3.message, /第 2 行/);
+    assert.equal(e3.detail?.line, 2);
+    // 引号未闭合的行号同样要精确（unquote 的 lineNo 参数变异必须被杀）
+    const e4 = expectErr('ENV_FILE_INVALID', () => parseEnvFile('A=1\nB="unclosed'));
+    assert.match(e4.message, /第 2 行/);
     expectErr('ENV_FILE_INVALID', () => parseEnvFile('A="open'), /双引号未闭合/);
     expectErr('ENV_FILE_INVALID', () => parseEnvFile("A='open"), /单引号未闭合/);
+    // 引号闭合后只允许空白/注释；单个多余字符也必须拒绝（slice(i+1) 边界变异必须被杀）
+    expectErr('ENV_FILE_INVALID', () => parseEnvFile('A="v"j'), /多余内容/);
+    expectErr('ENV_FILE_INVALID', () => parseEnvFile("A='v'x"), /多余内容/);
+    expectErr('ENV_FILE_INVALID', () => parseEnvFile("A=''x"), /多余内容/); // 空串单引号紧跟杂物
+    assert.equal(parseEnvFile('A="v" # ok').A, 'v');
+    // 转义表：\n \r \t 与首字符即转义（escaped 初值/分支映射变异必须被杀）
+    assert.equal(parseEnvFile('A="\\nx"').A, '\nx');
+    assert.equal(parseEnvFile('A="a\\rb\\tc"').A, 'a\rb\tc');
     // 值不回显在错误里
     const e2 = expectErr('ENV_FILE_INVALID', () => parseEnvFile('A=1\nBAD LINE\nSECRET_VAL=leak', 'f.env'));
     assert.ok(!e2.message.includes('leak'));
+    // 行号必须精确到出错的第 2 行（i+1 的 ±1 变异必须被杀）
+    assert.match(e2.message, /第 2 行/);
+    assert.equal(e2.detail?.line ?? e2.line, 2);
   });
   check('prepareLaunchEnv：envRefs 缺失抛 ENV_MISSING 并列出', () => {
     const e = expectErr('ENV_MISSING', () => prepareLaunchEnv({
@@ -180,11 +201,42 @@ __proto__=polluted
     assert.equal(out.env.UNIT_HOST_VAR, 'host');
     assert.deepEqual(out.envResolved.sort(), ['FILE_VAR', 'UNIT_HOST_VAR']);
   });
+  check('prepareLaunchEnv：POSIX 上变量名大小写敏感、不误删同名小写', () => {
+    if (process.platform === 'win32') return;
+    fs.writeFileSync(path.join(base, 'case.env'), 'unit_case_var=2\n');
+    const out = prepareLaunchEnv({ envFile: 'case.env', env: { UNIT_CASE_VAR: '1' }, cwd: base });
+    // ENV_CASE_INSENSITIVE 分支若在 Linux 误启用，小写键会顶掉大写键
+    assert.equal(out.env.UNIT_CASE_VAR, '1');
+    assert.equal(out.env.unit_case_var, '2');
+  });
+  check('displayEnv：非字符串值转字符串、>120 截断、边界两侧', () => {
+    const out = displayEnv({ NUM: 5, LONG: 'x'.repeat(121), EDGE: 'y'.repeat(120) });
+    assert.equal(out.NUM, '5');
+    assert.equal(out.EDGE, 'y'.repeat(120));
+    assert.equal(out.LONG, `${'x'.repeat(120)}… (截断)`);
+  });
   check('envSecretWarnings：敏感名告警', () => {
     assert.deepEqual(envSecretWarnings({}), []);
     const w = envSecretWarnings({ MY_TOKEN: 'x', NORMAL: 'y' });
     assert.equal(w.length, 1);
     assert.match(w[0], /MY_TOKEN/);
+  });
+  check('envSecretWarnings：值形态识别（bearer/JWT/PEM/URL 口令/令牌前缀）', () => {
+    const w = envSecretWarnings({
+      A: 'bearer abc.def', U: 'BEARER upper', B: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnMTIz',
+      C: '-----BEGIN PRIVATE KEY-----\nabc', D: 'https://user:pass@host/x',
+      // 令牌前缀运行时拼接，避免与真实密钥格式连续出现（GitHub push protection 会拦）
+      E: 'sk' + '_live_4eC39HqLyjWDarjtT1zdp7dc', F: 'gh' + 'p_abcdefghij1234567',
+      G: 'xo' + 'xb-1234567890-abc', H: 'AK' + 'IAIOSFODNN7EXAMPLE', I: 'AI' + 'zaSyD4iE2xVSpkLLOXoyq2jxnRUPaaaaIp8',
+      J: 'normal-value', K: 123, L: '',
+    });
+    assert.deepEqual(w.sort(), ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'U'].sort());
+  });
+  check('envWarningMessage：空名单为 null，非空为含名称的告警串', () => {
+    assert.equal(envWarningMessage([]), null);
+    const m = envWarningMessage(['MY_TOKEN']);
+    assert.equal(typeof m, 'string');
+    assert.match(m, /MY_TOKEN/);
   });
 } finally {
   delete process.env.UNIT_HOST_VAR;

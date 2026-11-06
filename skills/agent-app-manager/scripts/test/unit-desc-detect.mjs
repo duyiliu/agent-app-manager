@@ -113,6 +113,21 @@ try {
     const a1 = upsertApp(reg, 'a0123456789abcde', desc);
     assert.equal(a1.configRevision, 1);
     assert.equal(a1.alias, 'demo');
+    // 缺省字段必须归一化为 null/默认常量（?? null 的 undefined 变异必须被杀）
+    assert.equal(a1.command, null);
+    assert.equal(a1.expectedImage, null);
+    assert.equal(a1.envFile, null);
+    assert.equal(a1.expectedPort, null);
+    assert.equal(a1.expectedPortConfidence, null);
+    assert.equal(a1.readyUrl, null);
+    assert.equal(a1.readyLogPattern, null);
+    assert.equal(a1.maxRestarts, null);
+    assert.equal(a1.backoffMs, null);
+    assert.equal(a1.onExit, null);
+    assert.equal(a1.discoverTimeoutMs, null);
+    assert.equal(a1.sourceFingerprint, null);
+    assert.equal(a1.logMaxBytes, RUN_LOG_MAX_BYTES);
+    assert.equal(a1.restartPolicy, 'never');
     // alias 大小写不敏感冲突
     expectErr('ALIAS_TAKEN', () => upsertApp(reg, 'a111111111111111', { ...desc, alias: 'DEMO' }));
     // 覆盖重建：旧 env/x- 字段被清理，configRevision+1，createdAt 保留
@@ -179,6 +194,71 @@ try {
     fs.writeFileSync(path.join(dir, '.hidden', 'package.json'), JSON.stringify({ scripts: { dev: 'x' } }));
     const { candidates } = detectProjects(dir);
     assert.equal(candidates.length, 0);
+  });
+  check('detectProjects：composer artisan 生成 php 候选并去重同目录入口文件', () => {
+    const dir = path.join(base, 'phpapp');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'composer.json'), '{}');
+    fs.writeFileSync(path.join(dir, 'artisan'), '#!/usr/bin/env php\n');
+    fs.writeFileSync(path.join(dir, 'app.py'), 'x = 1\n'); // 已有候选的目录不再产出低置信入口候选
+    const { candidates } = detectProjects(dir);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].desc.command, 'php artisan serve');
+    assert.equal(candidates[0].evidence.rule, 'composer-laravel:artisan');
+    assert.match(candidates[0].desc.expectedImage, /^php/);
+  });
+  check('detectProjects：public/index.php 需端口证据才产出 php -S', () => {
+    const dir = path.join(base, 'phpweb');
+    fs.mkdirSync(path.join(dir, 'public'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'composer.json'), '{}');
+    fs.writeFileSync(path.join(dir, 'public', 'index.php'), '<?php\n');
+    fs.writeFileSync(path.join(dir, '.env'), 'PORT=8765\n');
+    let r = detectProjects(dir);
+    assert.equal(r.candidates.length, 1);
+    assert.equal(r.candidates[0].desc.command, 'php -S 127.0.0.1:8765 -t public');
+    assert.equal(r.candidates[0].desc.expectedPort, 8765);
+    // 无端口证据：只留 notes，不默认绑 8000
+    const dir2 = path.join(base, 'phpweb2');
+    fs.mkdirSync(path.join(dir2, 'public'), { recursive: true });
+    fs.writeFileSync(path.join(dir2, 'composer.json'), '{}');
+    fs.writeFileSync(path.join(dir2, 'public', 'index.php'), '<?php\n');
+    r = detectProjects(dir2);
+    assert.equal(r.candidates.length, 0);
+    assert.match(r.notes[0].suggestion, /未发现端口证据/);
+  });
+  check('detectProjects：入口文件低置信候选（python/node 各一）', () => {
+    const dir = path.join(base, 'entryapp');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'app.py'), 'print(1)\n');
+    const { candidates } = detectProjects(dir);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].desc.mode, 'python');
+    assert.equal(candidates[0].confidence, 'low');
+    assert.match(candidates[0].desc.command, /app\.py$/);
+    const dir2 = path.join(base, 'entrynode');
+    fs.mkdirSync(dir2, { recursive: true });
+    fs.writeFileSync(path.join(dir2, 'server.js'), 'require("http")\n');
+    const r2 = detectProjects(dir2);
+    assert.equal(r2.candidates.length, 1);
+    assert.equal(r2.candidates[0].desc.mode, 'node');
+    assert.equal(r2.candidates[0].desc.command, 'node server.js');
+  });
+  check('detectProjects：cargo 单 [[bin]] 出候选、元字符 bin 名拒绝', () => {
+    const dir = path.join(base, 'rustapp');
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Cargo.toml'), '[package]\nname = "x"\nversion = "0.1.0"\n\n[[bin]]\nname = "my-bin"\n');
+    fs.writeFileSync(path.join(dir, 'src', 'main.rs'), 'fn main() {}\n');
+    const { candidates } = detectProjects(dir);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].desc.command, 'cargo run --bin my-bin');
+    assert.equal(candidates[0].evidence.rule, 'cargo-bin:my-bin');
+    const bad = path.join(base, 'rustbad');
+    fs.mkdirSync(path.join(bad, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(bad, 'Cargo.toml'), '[package]\nname = "x"\nversion = "0.1.0"\n\n[[bin]]\nname = "evil;rm"\n');
+    fs.writeFileSync(path.join(bad, 'src', 'main.rs'), 'fn main() {}\n');
+    const r = detectProjects(bad);
+    assert.equal(r.candidates.length, 0);
+    assert.match(r.notes[0].suggestion, /shell 元字符/);
   });
 } finally {
   try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* 清理失败不判负 */ }

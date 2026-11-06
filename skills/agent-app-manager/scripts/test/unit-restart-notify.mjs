@@ -52,8 +52,9 @@ try {
     assert.deepEqual(normalizeRestartFields({}), { restartPolicy: 'never', maxRestarts: null, backoffMs: null });
     assert.deepEqual(normalizeRestartFields({ restartPolicy: 'never', maxRestarts: 5, backoffMs: 9 }),
       { restartPolicy: 'never', maxRestarts: null, backoffMs: null });
+    // 断言具体值而不是常量符号：变异体改 DEFAULT_MAX_RESTARTS/DEFAULT_BACKOFF_MS 必须被杀
     assert.deepEqual(normalizeRestartFields({ restartPolicy: 'on-failure' }),
-      { restartPolicy: 'on-failure', maxRestarts: DEFAULT_MAX_RESTARTS, backoffMs: DEFAULT_BACKOFF_MS });
+      { restartPolicy: 'on-failure', maxRestarts: 3, backoffMs: 1000 });
     assert.deepEqual(normalizeRestartFields({ restartPolicy: 'on-failure', maxRestarts: 7, backoffMs: 50 }),
       { restartPolicy: 'on-failure', maxRestarts: 7, backoffMs: 50 });
   });
@@ -61,7 +62,12 @@ try {
     assert.deepEqual(effectiveRestartSettings(), { restartPolicy: 'never', maxRestarts: 0, backoffMs: 0 });
     assert.deepEqual(effectiveRestartSettings({ restartPolicy: 'bogus' }), { restartPolicy: 'never', maxRestarts: 0, backoffMs: 0 });
     assert.deepEqual(effectiveRestartSettings({ restartPolicy: 'on-failure', maxRestarts: -1, backoffMs: 'x' }),
-      { restartPolicy: 'on-failure', maxRestarts: DEFAULT_MAX_RESTARTS, backoffMs: DEFAULT_BACKOFF_MS });
+      { restartPolicy: 'on-failure', maxRestarts: 3, backoffMs: 1000 });
+    // 边界两侧：0 是合法值、上限外回落默认（&& 链被翻成 || 时这些必须失败）
+    assert.deepEqual(effectiveRestartSettings({ restartPolicy: 'on-failure', maxRestarts: 0, backoffMs: 0 }),
+      { restartPolicy: 'on-failure', maxRestarts: 0, backoffMs: 0 });
+    assert.deepEqual(effectiveRestartSettings({ restartPolicy: 'on-failure', maxRestarts: MAX_RESTARTS_LIMIT + 1, backoffMs: MAX_BACKOFF_MS + 1 }),
+      { restartPolicy: 'on-failure', maxRestarts: 3, backoffMs: 1000 });
     assert.deepEqual(effectiveRestartSettings({ restartPolicy: 'on-failure', maxRestarts: 2, backoffMs: 500 }),
       { restartPolicy: 'on-failure', maxRestarts: 2, backoffMs: 500 });
   });
@@ -80,6 +86,8 @@ try {
     // 非法输入回落默认
     assert.equal(computeRestartDelay(0, 1, r0), DEFAULT_BACKOFF_MS);
     assert.equal(computeRestartDelay(1000, 0, r0), 1000);
+    // backoffMs=1 是合法值（>0 边界）：变异体把 >0 改成 >1 时必须失败
+    assert.equal(computeRestartDelay(1, 1, r0), 1);
     // 抖动上界：rand→1 时 delay ≈ base*growth*1.5
     assert.equal(computeRestartDelay(1000, 2, () => 0.999999), 3000);
     // 指数顶到 MAX_BACKOFF_MS 上限
@@ -96,10 +104,12 @@ try {
     assert.equal(go.reason, 'on-failure');
     assert.equal(go.restartCount, 2);
     assert.equal(go.delayMs, 2000);
-    // restartCount 非整数按 0 计
+    // restartCount 非整数/负数按 0 计（&& 翻 || 后负数会被采信，restartCount 变成 0+(-1+1)=0）
     const first = planRestart(okSettings, 'x', 1, null, () => 0);
     assert.equal(first.restartCount, 1);
     assert.equal(first.delayMs, 1000);
+    const neg = planRestart(okSettings, -1, 1, null, () => 0);
+    assert.equal(neg.restartCount, 1);
   });
   check('exitDescription：信号优先，缺证为 unknown', () => {
     assert.equal(exitDescription(0, 'SIGTERM'), 'signal=SIGTERM');
@@ -116,6 +126,11 @@ try {
     fs.writeFileSync(path.join(home, 'config.json'), '{bad json');
     assert.equal(loadGlobalOnExit(home), null);
     fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ onExit: 'x'.repeat(NOTIFY_COMMAND_MAX + 1) }));
+    assert.equal(loadGlobalOnExit(home), null);
+    // 上限两侧用具体值：NOTIFY_COMMAND_MAX=1000 恰收、1001 拒（常量符号自身变异必须被杀）
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ onExit: 'x'.repeat(1000) }));
+    assert.equal(loadGlobalOnExit(home), 'x'.repeat(1000));
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ onExit: 'x'.repeat(1001) }));
     assert.equal(loadGlobalOnExit(home), null);
     fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ onExit: '  ' }));
     assert.equal(loadGlobalOnExit(home), null);
@@ -167,6 +182,9 @@ try {
       `printf '%s' "$PROJECT_RUNNER_APP_ID" > ${JSON.stringify(out)}`,
       { PROJECT_RUNNER_APP_ID: 'aenv1' }, home), 'ok');
     assert.equal(fs.readFileSync(out, 'utf8'), 'aenv1');
+    // 信号分支：SIGTERM 归类 timeout，其余信号归类 signal:<名>
+    assert.equal(runNotifyCommand('kill -TERM $$', {}, home), 'timeout');
+    assert.equal(runNotifyCommand('kill -SEGV $$', {}, home), 'signal:SIGSEGV');
   });
 } finally {
   try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* 清理失败不判负 */ }

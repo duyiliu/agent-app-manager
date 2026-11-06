@@ -48,16 +48,39 @@ try {
   fs.utimesSync(oldTmp, past, past);
   const newTmp = path.join(home, '.tmp-222-abcdef01');
   fs.writeFileSync(newTmp, 't');
+  // 回收窗口边界两侧：60.5s 已过期应回收、59.5s 仍视为进行中应跳过（±1s 变异必须被杀）
+  const edgeOld = path.join(home, '.tmp-333-abcdef01');
+  fs.writeFileSync(edgeOld, 'tt');
+  const edgeOldTs = (Date.now() - 60500) / 1000;
+  fs.utimesSync(edgeOld, edgeOldTs, edgeOldTs);
+  const edgeNew = path.join(home, '.tmp-444-abcdef01');
+  fs.writeFileSync(edgeNew, 'tt');
+  const edgeNewTs = (Date.now() - 59500) / 1000;
+  fs.utimesSync(edgeNew, edgeNewTs, edgeNewTs);
+  // 毫秒级边界：59970ms 仍 recent（杀 60*999=59940 窗口变异）、60030ms 已过期（杀 60*1001=60060）
+  const msIn = path.join(home, '.tmp-555-abcdef01');
+  fs.writeFileSync(msIn, 't');
+  const msInTs = (Date.now() - 59970) / 1000;
+  fs.utimesSync(msIn, msInTs, msInTs);
+  const msOut = path.join(home, '.tmp-666-abcdef01');
+  fs.writeFileSync(msOut, 't');
+  const msOutTs = (Date.now() - 60030) / 1000;
+  fs.utimesSync(msOut, msOutTs, msOutTs);
 
   check('planPrune：保留 current/prevRuns，回收其余 runId 日志与 meta', () => {
     const plan = planPrune(home);
     const files = plan.logs.flatMap((a) => a.files.map((f) => path.basename(f.file))).sort();
     assert.deepEqual(files, ['.r-old.pid', 'r-old.stderr.log.1', 'r-old.stdout.log']);
     assert.equal(plan.staleLocks.length, 1);
-    assert.equal(plan.tmpOrphans.length, 1);
-    assert.equal(path.basename(plan.tmpOrphans[0].file), '.tmp-111-abcdef01');
+    assert.equal(plan.tmpOrphans.length, 3);
+    assert.deepEqual(plan.tmpOrphans.map((t) => path.basename(t.file)).sort(), ['.tmp-111-abcdef01', '.tmp-333-abcdef01', '.tmp-666-abcdef01']);
+    // size 字段必须取真实文件大小（fileSizeOf 异常分支/常量变异必须被杀）
+    assert.equal(plan.staleLocks[0].size, 5);
+    assert.equal(plan.tmpOrphans.find((t) => t.file === edgeOld).size, 2);
     // 近期临时文件与非法/游离条目进 skipped
     assert.ok(plan.skipped.some((s) => s.kind === 'tmp' && path.basename(s.target) === '.tmp-222-abcdef01'));
+    assert.ok(plan.skipped.some((s) => s.kind === 'tmp' && path.basename(s.target) === '.tmp-444-abcdef01'));
+    assert.ok(plan.skipped.some((s) => s.kind === 'tmp' && path.basename(s.target) === '.tmp-555-abcdef01'));
   });
   check('applyPrune：删除回收对象，保留证据不动', () => {
     const plan = planPrune(home);
@@ -71,7 +94,35 @@ try {
     assert.ok(!fs.existsSync(path.join(locksDir, 'registry.lock.stale-123')));
     assert.ok(fs.existsSync(path.join(locksDir, 'registry.lock')));
     assert.ok(!fs.existsSync(oldTmp));
+    assert.ok(!fs.existsSync(edgeOld));
+    assert.ok(!fs.existsSync(msOut));
     assert.ok(fs.existsSync(newTmp));
+    assert.ok(fs.existsSync(edgeNew));
+    assert.ok(fs.existsSync(msIn));
+  });
+  check('applyPrune：home 外路径与符号链接路径拒绝删除', () => {
+    // isSafeRegularFile 的越界守卫（|| 链 / 逐段 lstat / symlink 拒绝）被翻坏时必须失败
+    const outside = path.join(base, 'outside-victim.txt');
+    fs.writeFileSync(outside, 'victim');
+    // home 内的符号链接（指向 base 下受害者文件）：词法上在 home 内，逐段 lstat 必须拦截
+    const linkInHome = path.join(home, 'locks', '.tmp-999-aaaa1111');
+    fs.symlinkSync(outside, linkInHome);
+    const plan = {
+      home, logs: [], staleLocks: [], tmpOrphans: [], skipped: [],
+    };
+    plan.tmpOrphans.push({ file: outside, size: 1 }, { file: linkInHome, size: 1 });
+    // 末段是目录、或中间目录已不存在：isSafeRegularFile 必须判不安全，走 skipped 而非 unlink
+    const dirEntry = path.join(home, 'locks');
+    const missingDirFile = path.join(home, 'no-such-dir', 'x.tmp');
+    plan.tmpOrphans.push({ file: dirEntry, size: 1 }, { file: missingDirFile, size: 1 });
+    applyPrune(plan);
+    assert.ok(fs.existsSync(outside));
+    assert.ok(fs.existsSync(linkInHome)); // 链接本身也保留（unlink 的是普通文件，不是 symlink 目标）
+    assert.ok(fs.existsSync(dirEntry));
+    assert.equal(plan.tmpOrphans.length, 0);
+    assert.equal(plan.skipped.length, 4);
+    // lstat 抛错分支返回 false：skipped 原因必须是"路径已变化"，而非 ENOENT 兜底话术
+    assert.ok(plan.skipped.some((s) => s.target === missingDirFile && s.reason.includes('路径已变化')));
   });
   check('planPrune：无 runtime 记录/非法 appId 目录进 skipped', () => {
     const bad1 = path.join(home, 'logs', 'noapp');
