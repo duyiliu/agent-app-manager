@@ -60,6 +60,7 @@ function lifecycleConfirm(alias, op, extra, d) {
   const ackRunId = new URLSearchParams(String(extra).replace(/^&/, '')).get('ack');
   const title = { start: '启动', restart: '重启', stop: '停止' }[op] ?? op;
   const lines = [];
+  if (d?.root) lines.push(`工作目录：${d.root}`);
   if (op === 'start') {
     lines.push(`将复用已保存配置启动 ${alias}${port ? `（端口 ${port}）` : ''}。`);
     if (ackRunId) lines.push(`将放弃未结记录 ${ackRunId} 并重新启动。`);
@@ -559,6 +560,47 @@ function portAnchor(port, title, scheme = 'http') {
   a.addEventListener('click', (e) => e.stopPropagation());
   return a;
 }
+// 以登记的真实 root 分组；目录名仅供展示，不据名称猜测仓库或分支。
+function directoryInfo(root) {
+  const raw = String(root ?? '');
+  const windows = /^[A-Za-z]:[\\/]|^\\\\/.test(raw);
+  const normalized = (windows ? raw.replace(/\\/g, '/') : raw).replace(/\/+$/, '') || (raw.startsWith('/') ? '/' : '');
+  return { key: windows ? normalized.toLowerCase() : normalized, path: raw, name: normalized.split('/').pop() || raw || '未记录目录', parts: normalized.split('/').filter(Boolean) };
+}
+// 只有同名目录才补充最短、可区分的父目录；不把绝对路径当作常驻副标题。
+function directoryParentLabel(info, roots) {
+  const peers = roots.filter(other => other.key !== info.key && other.name.toLowerCase() === info.name.toLowerCase());
+  if (!peers.length) return '';
+  const parents = info.parts.slice(0, -1);
+  for (let depth = 1; depth <= parents.length; depth++) {
+    const label = parents.slice(-depth).join(' › ');
+    if (peers.every(other => other.parts.slice(0, -1).slice(-depth).join(' › ').toLowerCase() !== label.toLowerCase())) return label;
+  }
+  return parents.join(' › ') || '根目录';
+}
+function directoryDisplayLabel(info, roots) {
+  return [directoryParentLabel(info, roots), info.name].filter(Boolean).join(' › ');
+}
+let appView = 'flat';
+const collapsedDirectories = new Set();
+try {
+  const savedView = localStorage.getItem('pr-ui-app-view');
+  if (['flat', 'directories'].includes(savedView)) appView = savedView;
+  const saved = JSON.parse(localStorage.getItem('pr-ui-collapsed-directories') || '[]');
+  if (Array.isArray(saved)) saved.filter(k => typeof k === 'string').forEach(k => collapsedDirectories.add(k));
+} catch { /* 浏览器存储不可用时仍可分组。 */ }
+const directoryGroupIds = new Map();
+function saveDirectoryView() {
+  try {
+    localStorage.setItem('pr-ui-app-view', appView);
+    localStorage.setItem('pr-ui-collapsed-directories', JSON.stringify([...collapsedDirectories]));
+  } catch { /* 保留本次页面内的选择。 */ }
+}
+function reconcileChildren(parent, children) {
+  const keep = new Set(children);
+  for (const child of [...parent.children]) if (!keep.has(child)) child.remove();
+  children.forEach((child, i) => { if (parent.children[i] !== child) parent.insertBefore(child, parent.children[i] ?? null); });
+}
 function renderApps() {
   // 未选中应用时收起整块日志区（含工具栏），避免右侧同时出现两个空状态
   document.body.classList.toggle('no-selection', !selected);
@@ -569,14 +611,19 @@ function renderApps() {
     .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state, ...(a.tags ?? []), ...actualPortsOf(a)].some(v => String(v ?? '').toLowerCase().includes(q)))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
   $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
+  const directoryCount = new Set(filtered.map(a => directoryInfo(a.root).key)).size;
+  $('#directoryCount').textContent = `${directoryCount} 组`;
+  $('#directoryCount').hidden = appView === 'flat';
+  const directoryRoots = [...new Map(appsCache.map(a => { const info = directoryInfo(a.root); return [info.key, info]; })).values()];
   const previousScroll = list.scrollTop;
   const existing = new Map([...list.querySelectorAll('.app-card')].map(card => [card.dataset.appId, card]));
+  const existingGroups = new Map([...list.querySelectorAll('.directory-group')].map(group => [group.dataset.root, group]));
   if (!appsCache.length) {
-    if (!list.querySelector('.empty')) list.replaceChildren(el('div', 'empty', '注册表为空：尚无由本 Skill 启动并登记的应用。\n用 Skill/Agent 启动第一个项目后会自动出现在这里。'));
+    list.replaceChildren(el('div', 'empty', '注册表为空：尚无由本 Skill 启动并登记的应用。\n用 Skill/Agent 启动第一个项目后会自动出现在这里。'));
     return;
   }
   list.querySelector('.empty')?.remove();
-  if (!filtered.length) { list.appendChild(el('div', 'empty', '无匹配应用')); return; }
+  if (!filtered.length) { list.replaceChildren(el('div', 'empty', '无匹配应用')); return; }
   const ordered = [];
   for (const a of filtered) {
     // <button> 内含 <a> 是嵌套交互元素（HTML 无效且 SR 混乱，#167）：卡片改用
@@ -647,14 +694,74 @@ function renderApps() {
     if (a.tags?.length) meta.appendChild(el('span', 'm-tags', a.tags.map(t => '#' + t).join(' ')));
     if (a.error) meta.appendChild(el('span', 'm-err v bad', a.error));
     card.appendChild(meta);
-    card.appendChild(el('div', 'app-root', a.root ?? ''));
     card.title = a.error ? `${a.alias}：${a.error}` : [a.alias, a.displayName !== a.alias ? a.displayName : null, a.appId, health ? health.state : null].filter(Boolean).join(' · ');
+    if (a.root) card.title += `\n工作目录：${a.root}`;
     card.onclick = () => selectApp(a.alias);
     card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectApp(a.alias); } };
     ordered.push(card);
   }
   for (const stale of existing.values()) stale.remove();
-  ordered.forEach((card, i) => { if (list.children[i] !== card) list.insertBefore(card, list.children[i] ?? null); });
+  list.classList.toggle('grouped', appView === 'directories');
+  if (appView === 'flat') reconcileChildren(list, ordered);
+  else {
+    const groups = new Map();
+    filtered.forEach((app, i) => {
+      const info = directoryInfo(app.root);
+      if (!groups.has(info.key)) groups.set(info.key, { ...info, apps: [], cards: [] });
+      groups.get(info.key).apps.push(app);
+      groups.get(info.key).cards.push(ordered[i]);
+    });
+    const sorted = [...groups.values()].sort((a, b) => a.path.localeCompare(b.path));
+    const sections = sorted.map(g => {
+      let group = existingGroups.get(g.key);
+      if (!group) {
+        group = el('section', 'directory-group');
+        group.dataset.root = g.key;
+        if (!directoryGroupIds.has(g.key)) directoryGroupIds.set(g.key, 'directory-' + directoryGroupIds.size);
+        const toggle = el('button', 'directory-toggle');
+        toggle.type = 'button';
+        const chevron = el('span', 'directory-chevron', '▾');
+        chevron.setAttribute('aria-hidden', 'true');
+        const label = el('span', 'directory-label');
+        label.append(el('strong', 'directory-name'), el('span', 'directory-stats'));
+        toggle.append(chevron, label);
+        const path = el('div', 'directory-path');
+        const body = el('div', 'directory-apps');
+        body.id = directoryGroupIds.get(g.key);
+        toggle.setAttribute('aria-controls', body.id);
+        toggle.addEventListener('click', () => {
+          if (collapsedDirectories.has(g.key)) collapsedDirectories.delete(g.key);
+          else collapsedDirectories.add(g.key);
+          saveDirectoryView();
+          renderApps();
+        });
+        group.append(toggle, path, body);
+      }
+      const toggle = group.querySelector('.directory-toggle');
+      const expanded = !!q || !collapsedDirectories.has(g.key);
+      const all = appsCache.filter(a => directoryInfo(a.root).key === g.key);
+      const count = q ? `${g.apps.length}/${all.length}` : String(all.length);
+      group.classList.toggle('has-selection', g.apps.some(a => a.alias === selected));
+      group.querySelector('.directory-name').textContent = g.name;
+      group.querySelector('.directory-stats').textContent = `${count} 应用 · ${all.filter(a => a.status === 'RUNNING').length} 运行`;
+      group.querySelector('.directory-chevron').textContent = expanded ? '▾' : '▸';
+      const parentLabel = directoryParentLabel(g, directoryRoots);
+      const pathLabel = group.querySelector('.directory-path');
+      pathLabel.textContent = parentLabel;
+      pathLabel.hidden = !parentLabel;
+      pathLabel.title = g.path;
+      pathLabel.setAttribute('aria-label', `父目录：${parentLabel}`);
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.setAttribute('aria-label', `${g.name}，${g.path || '未记录目录'}，${count} 个应用`);
+      toggle.title = q ? '搜索时自动展开匹配目录' : `${expanded ? '收起' : '展开'} ${g.path || '未记录目录'}`;
+      toggle.disabled = !!q;
+      const body = group.querySelector('.directory-apps');
+      body.hidden = !expanded;
+      reconcileChildren(body, g.cards);
+      return group;
+    });
+    reconcileChildren(list, sections);
+  }
   list.scrollTop = previousScroll;
   const liveKeys = new Set(appsCache.map(resKey));
   for (const k of [...cpuStreaks.keys()]) if (!liveKeys.has(k)) cpuStreaks.delete(k);
@@ -961,6 +1068,19 @@ function renderDetail(d) {
   const keepScroll = box.scrollTop;
   const historyOpen = sameApp && !!box.querySelector('.run-history')?.open;
   currentDetail = d;
+  const directoryContext = $('#directoryContext');
+  const root = d?.root ?? '';
+  directoryContext.hidden = !root;
+  if (directoryContext.dataset.root !== root) {
+    directoryContext.dataset.root = root;
+    $('#directoryFullPath').hidden = true;
+    $('#directoryPathToggle').setAttribute('aria-expanded', 'false');
+    $('#directoryCopyStatus').textContent = '';
+  }
+  $('#directoryPath').textContent = root ? directoryDisplayLabel(directoryInfo(root), appsCache.map(a => directoryInfo(a.root))) : '';
+  $('#directoryPath').title = root;
+  $('#directoryFullPath').textContent = root;
+  $('#directoryPathToggle').textContent = $('#directoryFullPath').hidden ? '完整路径' : '收起路径';
   const bar = $('#detailBar');
   box.replaceChildren();
   if (!d) {
@@ -1186,7 +1306,7 @@ function renderDetail(d) {
   more.appendChild(el('summary', null, '更多诊断信息'));
   kvRow(moreGrid, '应用 ID', d.appId, 'dim');
   // 静态配置与低频诊断放一起：仓库/入口只在确认对象时看一次，不必常驻。
-  kvRow(moreGrid, '仓库', d.root, 'dim');
+  kvRow(moreGrid, '工作目录', d.root, 'dim');
   kvRow(moreGrid, '入口', d.entry, 'dim');
   kvRow(moreGrid, 'tags', d.tags?.length ? d.tags.join(', ') : null, 'dim');
   kvRow(moreGrid, '依赖', d.dependsOn?.length ? d.dependsOn.join(', ') : null, 'dim');
@@ -1439,6 +1559,9 @@ async function loadHealth() {
 function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
+  // URL 直达应用时展开所属目录，避免选中项藏在上次保存的折叠分组内。
+  const target = appsCache.find(a => a.alias === alias);
+  if (target && collapsedDirectories.delete(directoryInfo(target.root).key)) saveDirectoryView();
   workbenchEpoch++;
   workbench = null;
   loadWorkbench();
@@ -1834,6 +1957,24 @@ $('#refreshBtn').addEventListener('click', manualReload);
 // 通知授权入口在退出状态横幅的「开启通知」按钮上（notifyExit）：那里才有明确的
 // 授权动机与用户手势上下文；不再做「首次点击页面任意处即申请」的模糊时机。
 $('#appSearch').addEventListener('input', renderApps);
+$('#appView').value = appView;
+$('#appView').addEventListener('change', () => {
+  appView = $('#appView').value;
+  saveDirectoryView();
+  renderApps();
+});
+$('#copyDirectoryBtn').addEventListener('click', async () => {
+  if (!currentDetail?.root) return;
+  const ok = await copyText(currentDetail.root);
+  $('#directoryCopyStatus').textContent = ok ? '已复制目录' : '复制失败';
+  setTimeout(() => { $('#directoryCopyStatus').textContent = ''; }, 1600);
+});
+$('#directoryPathToggle').addEventListener('click', () => {
+  const path = $('#directoryFullPath');
+  path.hidden = !path.hidden;
+  $('#directoryPathToggle').setAttribute('aria-expanded', String(!path.hidden));
+  $('#directoryPathToggle').textContent = path.hidden ? '完整路径' : '收起路径';
+});
 $('#pauseBtn').addEventListener('click', () => {
   paused = !paused;
   $('#pauseBtn').textContent = paused ? '恢复刷新' : '暂停';

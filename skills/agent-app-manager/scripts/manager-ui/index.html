@@ -294,14 +294,6 @@ aside {
 .m-exit { grid-column:4 }
 .m-tags { grid-column:5 }
 .m-err { grid-column:6 }
-.app-root {
-  margin-top:4px;
-  font:10px/1.4 var(--mono-font);
-  color:var(--text-faint);
-  overflow:hidden;
-  white-space:nowrap;
-  text-overflow:ellipsis}
-
 .pill {
   flex:none;
   display:inline-flex;
@@ -770,7 +762,30 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .app-search input { height:34px; padding:6px 9px 6px 32px; font:12px var(--ui-font) }
 .app-search input:focus-visible { outline:2px solid var(--accent); outline-offset:1px }
 #appList { padding:4px 8px 8px }
-.app-card { margin-bottom:4px; padding:11px 10px; border-left:2px solid transparent }
+.app-view { display:flex; align-items:center; gap:8px; padding:0 12px 8px }
+.app-view label { flex:none; color:var(--text-faint); font-size:11px }
+.app-view select { min-width:0; max-width:55%; height:26px; padding-left:8px; font-size:11px; background-color:transparent }
+#directoryCount { color:var(--text-faint); font-size:10px; white-space:nowrap }
+.directory-group { margin:0 0 8px; min-width:0 }
+.directory-toggle { width:100%; height:auto; justify-content:flex-start; gap:7px; padding:5px 6px; border-color:transparent; text-align:left }
+.directory-toggle:disabled { opacity:1; cursor:default }
+.directory-chevron { color:var(--text-faint); width:10px; flex:none }
+.directory-label { min-width:0; flex:1; display:flex; align-items:center; gap:8px }
+.directory-name { flex:1; min-width:0; color:var(--text); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.directory-stats { flex:none; color:var(--text-faint); font-size:10px; font-weight:400 }
+.directory-path { padding:0 7px 6px 24px; color:var(--text-faint); font:10px/1.4 var(--mono-font); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.directory-apps { margin-left:8px; padding-left:4px; border-left:1px solid var(--line) }
+.directory-group.has-selection > .directory-toggle { background:var(--surface) }
+.directory-context { flex:none; display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--surface); color:var(--text-dim); font-size:11px }
+.directory-context > span:first-child { flex:none; color:var(--text-faint) }
+#directoryPath { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:11px var(--mono-font) }
+.directory-context button { flex:none; height:25px; padding:0 7px; font-size:10px }
+#directoryFullPath { flex:0 0 100%; min-width:0; padding:8px; border:1px solid var(--line); border-radius:var(--radius-sm); color:var(--text-dim); font:11px/1.6 var(--mono-font); white-space:pre-wrap; overflow-wrap:anywhere }
+#directoryCopyStatus { color:var(--ok-text); font-size:10px }
+#directoryCopyStatus:empty { display:none }
+.app-card { margin-bottom:2px; padding:8px 10px; border-left:2px solid transparent }
+.app-card .app-alias { font-size:12px; font-weight:500 }
+.app-card .app-meta { margin-top:3px }
 .app-card.selected { border-left-color:var(--text) }
 .log-toolbar { gap:7px; padding:10px 12px }
 .log-toolbar button { height:32px }
@@ -820,6 +835,11 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
       <button id="refreshBtn" data-icon="refresh" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
     </div>
     <div class="app-search" data-icon="search"><input id="appSearch" type="search" placeholder="过滤应用（别名/显示名/ID/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
+    <div class="app-view">
+      <label for="appView">分组</label>
+      <select id="appView" aria-label="应用分组"><option value="flat">不分组</option><option value="directories">工作目录</option></select>
+      <span id="directoryCount" hidden>0 组</span>
+    </div>
     <div id="appList"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
@@ -831,6 +851,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
     </button>
     <span id="detailOps" class="op-group detail-ops" hidden></span>
     </div>
+    <div id="directoryContext" class="directory-context" hidden><span>工作目录</span><code id="directoryPath"></code><span id="directoryCopyStatus" role="status"></span><button id="directoryPathToggle" type="button" aria-expanded="false" aria-controls="directoryFullPath">完整路径</button><button id="copyDirectoryBtn" type="button" title="复制当前应用的完整工作目录">复制路径</button><code id="directoryFullPath" hidden></code></div>
     <div id="detail"><div class="empty">正在加载注册表…<br>这里展示由本 Skill 启动并登记的应用；IDEA / 手工启动的进程不会出现。</div></div>
     <section class="log-panel" aria-label="运行日志">
       <div class="log-toolbar">
