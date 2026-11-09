@@ -1700,7 +1700,7 @@ if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 // 回调里再判一次 following：用户在帧间滚轮上滑/拖条不会被拽回底部。
 // scroll 事件是异步派发的：跟随落点记在 followAnchor，监听器只对位置确实
 // 变化过的滚动作解除判定，否则新增行撑高 scrollHeight 会被误判成用户上滑。
-let lastPinAt = 0;
+let lastPinAt = 0, lastSeenSH = 0;
 function scrollLogToEnd() {
   if (followRaf) return;
   followRaf = requestAnimationFrame(() => {
@@ -1709,9 +1709,47 @@ function scrollLogToEnd() {
     const box = $('#log');
     box.scrollTop = box.scrollHeight;
     followAnchor = box.scrollTop;
+    lastSeenSH = box.scrollHeight; // 布局基线同步给 scroll 监听器的前置门
     lastPinAt = performance.now(); // 供 scroll 监听器判定宽限期
+    syncLineHeight(); // 钉底帧视口行必然已渲染，此处测得的是真实行高
   });
 }
+let lineHApplied = 0; // 已应用的行总高（盒高）；写回 intrinsic 的是内容盒 = 总高 - padding - border
+// 屏外行高估计值运行时回写（#212 D1）：contain-intrinsic-height 填的是内容盒，
+// 行总高 = 估计值 + padding + border——估计值一旦偏离「真实总高 - chrome」，
+// 跳行区延迟实测修正会搬动 scrollTop（实测 -405/-469px），超出宽限期误解除
+// 跟随。写死值跨字体环境必然失真，改为运行时求值写回 --aam-line-h，
+// 字体加载完成再校（fonts.ready）。
+// 取数只信两路（跳过态行的盒高恰等于「当前估计+chrome」，把它当真值回写曾
+// +2px/轮正反馈漂到 400px+）：
+// 1. 几何确在视口内的末行实测——读数与当前应用值几乎相同时是估计回波，拒收；
+// 2. 计算样式解析 lineHeight+padding+border——跳过态下计算样式仍是真实排版
+//    属性，与渲染状态无关。末路 sanity 区间拦异常读数。
+// 写变量可能诱发一次性修正，同步刷新 lastPinAt 让其落在宽限期内。
+function syncLineHeight() {
+  const box = $('#log');
+  // 无布局面（测试 DOM 桩）直接跳过：估计值校准是纯增强，缺 API 时静默放弃
+  if (typeof box?.getBoundingClientRect !== 'function' || typeof getComputedStyle !== 'function') return;
+  const r = box.getBoundingClientRect();
+  if (r.height < 30) return; // 面板不可见时无参照行，跳过
+  const row = box.querySelector('.line');
+  if (!row) return;
+  const cs = getComputedStyle(row);
+  const chrome = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+    + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+  let total = 0;
+  const last = box.lastElementChild;
+  if (last?.classList.contains('line')) {
+    const rr = last.getBoundingClientRect();
+    if (rr.bottom > r.top && rr.top < r.bottom && (!lineHApplied || Math.abs(rr.height - lineHApplied) > 0.01)) total = rr.height;
+  }
+  if (!total) total = parseFloat(cs.lineHeight) + chrome;
+  if (!(total >= 8 && total <= 80) || Math.abs(total - lineHApplied) < 0.05) return;
+  lineHApplied = total;
+  box.style.setProperty?.('--aam-line-h', total - chrome + 'px');
+  lastPinAt = performance.now();
+}
+document.fonts?.ready?.then(() => { lineHApplied = 0; syncLineHeight(); });
 function renderLines(force = false) {
   hitCountStale = true;
   const box = $('#log');
@@ -1730,7 +1768,7 @@ function renderLines(force = false) {
     // 顶部可能有边界提示节点，用 querySelector 定位最靠前的 .line，之后只沿
     // nextElementSibling 步进（行节点只会与行节点相邻），不再每个 victim 重查。
     let victim = box.querySelector('.line');
-    const rowH = victim?.getBoundingClientRect().height || 24.25; // 单行不换行，行高一致（取亚像素真实值，整型 offsetHeight 会丢尾差）
+    const rowH = lineHApplied || victim?.getBoundingClientRect?.().height || 24.25; // 单行不换行，行高一致（优先已校准的实测值；victim 处于跳过态时其盒高是估计值+padding，不可用）
     let pruned = 0;
     while (victim && renderedDomCount > MAX_LINES) {
       const next = victim.nextElementSibling;
@@ -1745,6 +1783,7 @@ function renderLines(force = false) {
     if (pruned && !following) box.scrollTop = Math.max(0, box.scrollTop - pruned * rowH);
     renderedId = lines.at(-1)?.id ?? renderedId;
     if (following) scrollLogToEnd();
+    syncLineHeight();
     return;
   }
   const wasEmpty = box.querySelector('.empty') !== null;
@@ -1763,6 +1802,7 @@ function renderLines(force = false) {
   // 重建会让 scrollHeight 骤缩、scrollTop 被浏览器钳位，这个 scroll 事件同样不是
   // 用户上滑：锚点先同步到钳位后的实际位置，等跟随滚动的 rAF 落地再刷新到底部。
   followAnchor = box.scrollTop;
+  lastSeenSH = box.scrollHeight;
   // 行数必须在构建时计：frag 被 replaceChildren 消费后 childElementCount 恒为 0，
   // 基线旧写法使 renderedDomCount 归零，修剪窗口漂到 8000+本次重建行数
   //（#212 实测 DOM 曾无界涨到 16000）。built 即当前过滤精确命中数，同步落
@@ -1773,6 +1813,9 @@ function renderLines(force = false) {
   hitCount = built; hitCountStale = false;
   if (following) scrollLogToEnd();
   renderMeta();
+  // 重建后全部行重新进入"未渲染"估计态，是修正风暴的触发点（D1 三处复现场景
+  // 均为重建）：立即以视口真实行高校准估计，不等下一帧修正找上门。
+  syncLineHeight();
 }
 async function pollTail() {
   if (fatal || (paused && !manualRefresh) || degrading || !selected || !logSrc || tailBusy || (srcDead && !manualRefresh)) return;
@@ -2173,6 +2216,15 @@ document.addEventListener('keydown', (e) => {
 });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
+  const box = $('#log');
+  // 前置门（#212 D1）：scrollHeight 相对上次 scroll 事件发生变化，说明本轮位移
+  // 是布局侧驱动的（追加撑高、修剪钳位、content-visibility 估计修正、变量回写），
+  // 与用户上滑无法区分，不做解除判定并把新高度记为基线。真实用户滚动（滚轮/
+  // 拖条/键盘/触摸）是持续事件流，scrollHeight 在两次轮询间保持稳定，下一个
+  // 事件即被正常判定——只延迟不吞没。
+  const layoutMoved = box.scrollHeight !== lastSeenSH;
+  lastSeenSH = box.scrollHeight;
+  if (layoutMoved) return;
   // 解除跟随需同时满足三条（#212）：
   // 1. 时间门控：跟随滚动经 rAF 落地后，content-visibility 的跳行区尺寸修正会
   //    在数十毫秒内继续微调 scrollTop 并借落地事件异步派发——这些位置变化与
@@ -2182,7 +2234,6 @@ $('#log').addEventListener('scroll', () => {
   //    程序滚动的旧落点距底渐远，但下面第 3 条能挡住。
   // 3. 确实相对跟随落点 followAnchor 上移：顶部修剪使 scrollHeight 净缩时
   //    scrollTop 被钳低，但此时位置仍贴新底部，上面第 2 条能挡住。
-  const box = $('#log');
   if (following
     && performance.now() - lastPinAt > 200
     && box.scrollTop + box.clientHeight < box.scrollHeight - 40
