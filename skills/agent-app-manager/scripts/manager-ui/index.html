@@ -628,6 +628,10 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 #log {
   flex:1;
   overflow:auto;
+  /* 关闭浏览器滚动锚定（#212）：修剪顶部行时 anchoring 会自动下调 scrollTop
+     保持视口内行不动，这个位移与用户上滑在 scroll 事件里无法区分，会误解除
+     跟随。改为禁用后由 JS 在修剪时手动补偿阅读位置（见 renderLines）。 */
+  overflow-anchor:none;
   padding:10px 0 40px;
   background:var(--bg);
   /* 日志按原样保留单行：折行会把堆栈/配置行拆成多段，缩进丢失后与真实换行无法区分。
@@ -637,7 +641,17 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   font-family:var(--mono-font);
   font-size:12.5px;
   outline:none}
-#log .line { width:max-content; min-width:100% }
+#log .line {
+  width:max-content;
+  min-width:100%;
+  /* 屏外行跳过布局与绘制（#212）：width:max-content 下 8000 行每行都做内在
+     尺寸测量。宽用 auto none（已渲染行滚出屏后继续上报实测宽度，横向滚动条
+     不塌缩）；高用 auto 24.25px——必须取真实行高而非估算公式值：本字体下
+     line-height 20.25 + padding 2 的算式得 22.25，实际行盒高 24.25，估计
+     偏差会让浏览器对跳行区做滚动位置修正，把跟随误判成用户上滑。 */
+  content-visibility:auto;
+  contain-intrinsic-width:auto none;
+  contain-intrinsic-height:auto 24.25px}
 #log>.empty { margin:30px auto }
 .line {
   padding:1px 16px 1px 13px;

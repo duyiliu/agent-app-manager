@@ -1632,6 +1632,10 @@ let lines = [], nextId = 1, boundary = '', removed = 0, following = true, tailBu
 // errorsOnly 等价内置 errorPattern；自定义正则无效时给出提示而非静默失效（不过滤 + 输入框标红 + meta 提示）。
 let errorsOnly = false, filterRe = null, filterError = null;
 let logFallbackLabel = '日志', renderedDomCount = 0;
+// 命中计数缓存（#212）：lines 数组或过滤条件一旦变化，由 renderLines/resetLog/
+// compileFilter 置脏；renderMeta 仅在脏且过滤激活时重算，静默轮询不再每秒全扫
+// 8000 行。
+let hitCount = 0, hitCountStale = true;
 
 function compileFilter() {
   const input = $('#logFilter');
@@ -1640,13 +1644,14 @@ function compileFilter() {
   filterError = null;
   input.classList.remove('invalid');
   input.title = '';
-  if (!raw) return;
+  if (!raw) { hitCountStale = true; updateDlBtn(); return; }
   try { filterRe = new RegExp(raw); }
   catch (e) {
     filterError = e.message;
     input.classList.add('invalid');
     input.title = `正则无效：${e.message}`;
   }
+  hitCountStale = true;
   updateDlBtn();
 }
 function lineVisible(text) {
@@ -1660,7 +1665,10 @@ function renderMeta() {
   if (logMerged) text += ' · 合并 stdout/stderr，顺序为近似顺序（无统一时间戳）';
   if (removed) text += ` · 已移除较早 ${removed} 行`;
   if (filterError) text += ` · 正则无效（${filterError}），已按未过滤显示`;
-  else if (filterRe || errorsOnly) text += ` · 命中 ${visibleLines().length} 行`;
+  else if (filterRe || errorsOnly) {
+    if (hitCountStale) { hitCount = visibleLines().length; hitCountStale = false; }
+    text += ` · 命中 ${hitCount} 行`;
+  }
   $('#logMeta').textContent = text;
 }
 
@@ -1673,7 +1681,7 @@ function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
   logMerged = isMergedSrc(logSrc); mergedTails = newMergedTails();
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true; srcDead = false;
-  logFallbackLabel = '日志'; renderedDomCount = 0;
+  logFallbackLabel = '日志'; renderedDomCount = 0; hitCountStale = true;
   updateFollow();
   renderMeta();
   if (selected) logHint('等待日志输出…'); else logHint('选择左侧应用后查看日志。');
@@ -1682,7 +1690,30 @@ function updateFollow() {
   $('#followBtn').textContent = following ? '跟随中' : '恢复跟随';
   $('#followBtn').setAttribute('aria-pressed', String(following));
 }
+let followRaf = 0, followAnchor = -1;
+// 关闭浏览器的滚动位置恢复（#212）：刷新/同址重进时它会把 scrollTop 恢复到上次
+// 的半高位置，这个 scroll 事件与跟随锚点判定冲突会误解除跟随；跟随语义下刷新后
+// 应回到日志尾部，本就不需要位置恢复。
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+// 跟随滚动合并进 rAF（#212）：轮询到数据、截断重绘等都可能把 scrollTop 钉到
+// scrollHeight，同步读写每次都强制布局；合并后同一帧至多落地一次滚动。
+// 回调里再判一次 following：用户在帧间滚轮上滑/拖条不会被拽回底部。
+// scroll 事件是异步派发的：跟随落点记在 followAnchor，监听器只对位置确实
+// 变化过的滚动作解除判定，否则新增行撑高 scrollHeight 会被误判成用户上滑。
+let lastPinAt = 0;
+function scrollLogToEnd() {
+  if (followRaf) return;
+  followRaf = requestAnimationFrame(() => {
+    followRaf = 0;
+    if (!following) return;
+    const box = $('#log');
+    box.scrollTop = box.scrollHeight;
+    followAnchor = box.scrollTop;
+    lastPinAt = performance.now(); // 供 scroll 监听器判定宽限期
+  });
+}
 function renderLines(force = false) {
+  hitCountStale = true;
   const box = $('#log');
   if (!force && renderedId && lines[0]?.id <= renderedId) {
     const frag = document.createDocumentFragment();
@@ -1696,32 +1727,51 @@ function renderLines(force = false) {
     renderedDomCount += appended;
     // DOM 窗口有界：不再全量 querySelectorAll。过滤激活时可见行数 < 缓存行数，
     // 旧逻辑按「DOM 行数 - 缓存行数」修剪永远不会触发，长会话下 DOM 无界增长。
-    // 顶部可能有边界提示节点，用 querySelector 定位最靠前的 .line，不图断在提示节点上。
-    while (renderedDomCount > MAX_LINES) {
-      const victim = box.querySelector('.line');
-      if (!victim) break;
+    // 顶部可能有边界提示节点，用 querySelector 定位最靠前的 .line，之后只沿
+    // nextElementSibling 步进（行节点只会与行节点相邻），不再每个 victim 重查。
+    let victim = box.querySelector('.line');
+    const rowH = victim?.getBoundingClientRect().height || 24.25; // 单行不换行，行高一致（取亚像素真实值，整型 offsetHeight 会丢尾差）
+    let pruned = 0;
+    while (victim && renderedDomCount > MAX_LINES) {
+      const next = victim.nextElementSibling;
       victim.remove();
       renderedDomCount--;
+      pruned++;
+      victim = next;
     }
+    // 阅读位置补偿（#212）：#log 已关 scroll anchoring（其自动下调会与用户上滑
+    // 混淆而误解除跟随），非跟随状态下修剪顶部行时手动回退 scrollTop，保住
+    // 「滚上去读日志不被新行顶跑」的体验。跟随时视口由 scrollLogToEnd 钉底，无需补偿。
+    if (pruned && !following) box.scrollTop = Math.max(0, box.scrollTop - pruned * rowH);
     renderedId = lines.at(-1)?.id ?? renderedId;
-    if (following) box.scrollTop = box.scrollHeight;
+    if (following) scrollLogToEnd();
     return;
   }
   const wasEmpty = box.querySelector('.empty') !== null;
   if (!force && wasEmpty && !lines.length) return;
   const frag = document.createDocumentFragment();
+  let built = 0;
   for (const l of lines) {
     if (!lineVisible(l.text)) continue; // 增量新行也按当前条件入视图
     const row = el('div', 'line ' + classify(l.text));
     row.dataset.id = l.id;
     row.appendChild(document.createTextNode(l.text || ' '));
-    frag.appendChild(row);
+    frag.appendChild(row); built++;
   }
   box.replaceChildren(frag);
   if (boundary) box.prepend(el('div', 'empty', boundary));
-  renderedDomCount = frag.childElementCount;
+  // 重建会让 scrollHeight 骤缩、scrollTop 被浏览器钳位，这个 scroll 事件同样不是
+  // 用户上滑：锚点先同步到钳位后的实际位置，等跟随滚动的 rAF 落地再刷新到底部。
+  followAnchor = box.scrollTop;
+  // 行数必须在构建时计：frag 被 replaceChildren 消费后 childElementCount 恒为 0，
+  // 基线旧写法使 renderedDomCount 归零，修剪窗口漂到 8000+本次重建行数
+  //（#212 实测 DOM 曾无界涨到 16000）。built 即当前过滤精确命中数，同步落
+  // 命中缓存；增量分支不能用 DOM 行数代替（轮转 splice 后 DOM 可能暂存已移出
+  // 缓存的行）。
+  renderedDomCount = built;
   renderedId = lines.at(-1)?.id ?? 0;
-  if (following) box.scrollTop = box.scrollHeight;
+  hitCount = built; hitCountStale = false;
+  if (following) scrollLogToEnd();
   renderMeta();
 }
 async function pollTail() {
@@ -2020,9 +2070,15 @@ $('#detailBar').addEventListener('click', () => {
 });
 $('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
 $('#clearBtn').addEventListener('click', () => { lines = []; renderedId = 0; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(true); });
-$('#logFilter').addEventListener('input', () => { compileFilter(); renderLines(true); });
+// 过滤输入 150ms 防抖（#212）：原实现每按键全量重建最多 8000 个行节点。
+// Escape 清空属于强取消语义，立即生效不走防抖。
+let filterTimer = 0;
+$('#logFilter').addEventListener('input', () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => { filterTimer = 0; compileFilter(); renderLines(true); }, 150);
+});
 $('#logFilter').addEventListener('keydown', e => {
-  if (e.key === 'Escape') { e.target.value = ''; compileFilter(); renderLines(true); }
+  if (e.key === 'Escape') { clearTimeout(filterTimer); filterTimer = 0; e.target.value = ''; compileFilter(); renderLines(true); }
 });
 $('#errorsBtn').addEventListener('click', () => {
   errorsOnly = !errorsOnly;
@@ -2117,8 +2173,20 @@ document.addEventListener('keydown', (e) => {
 });
 $('#log').addEventListener('wheel', e => { if (e.deltaY < 0 && following) { following = false; updateFollow(); } }, { passive: true });
 $('#log').addEventListener('scroll', () => {
+  // 解除跟随需同时满足三条（#212）：
+  // 1. 时间门控：跟随滚动经 rAF 落地后，content-visibility 的跳行区尺寸修正会
+  //    在数十毫秒内继续微调 scrollTop 并借落地事件异步派发——这些位置变化与
+  //    用户上滑无法区分，落地后 200ms 宽限期内的 scroll 事件一律不做解除判定。
+  //    用户滚动是持续事件流（拖条/键盘/触摸），宽限期只延迟不吞没。
+  // 2. 确实离开当前底部 >40px（阈值与原版一致）：新增行撑高 scrollHeight 时
+  //    程序滚动的旧落点距底渐远，但下面第 3 条能挡住。
+  // 3. 确实相对跟随落点 followAnchor 上移：顶部修剪使 scrollHeight 净缩时
+  //    scrollTop 被钳低，但此时位置仍贴新底部，上面第 2 条能挡住。
   const box = $('#log');
-  if (box.scrollTop + box.clientHeight < box.scrollHeight - 40 && following) { following = false; updateFollow(); }
+  if (following
+    && performance.now() - lastPinAt > 200
+    && box.scrollTop + box.clientHeight < box.scrollHeight - 40
+    && box.scrollTop < followAnchor - 40) { following = false; updateFollow(); }
 }, { passive: true });
 
 // ---------- 项目文件（只读，替代原单项 viewer 的文件树/预览） ----------
