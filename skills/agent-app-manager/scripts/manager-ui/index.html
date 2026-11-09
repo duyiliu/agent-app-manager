@@ -628,6 +628,10 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 #log {
   flex:1;
   overflow:auto;
+  /* 关闭浏览器滚动锚定（#212）：修剪顶部行时 anchoring 会自动下调 scrollTop
+     保持视口内行不动，这个位移与用户上滑在 scroll 事件里无法区分，会误解除
+     跟随。改为禁用后由 JS 在修剪时手动补偿阅读位置（见 renderLines）。 */
+  overflow-anchor:none;
   padding:10px 0 40px;
   background:var(--bg);
   /* 日志按原样保留单行：折行会把堆栈/配置行拆成多段，缩进丢失后与真实换行无法区分。
@@ -637,7 +641,20 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   font-family:var(--mono-font);
   font-size:12.5px;
   outline:none}
-#log .line { width:max-content; min-width:100% }
+#log .line {
+  width:max-content;
+  min-width:100%;
+  /* 屏外行跳过布局与绘制（#212）：width:max-content 下 8000 行每行都做内在
+     尺寸测量。宽用 auto none（已渲染行滚出屏后继续上报实测宽度，横向滚动条
+     不塌缩）；高用 auto var(--aam-line-h)。注意 intrinsic 填的是内容盒：
+     跳行行总高 = 估计值 + padding + border，估计值一旦偏离「真实行高 - chrome」，
+     跳行区延迟实测修正会搬动 scrollTop（D1：写死 24.25px 时跳行盒高 26.25px，
+     与真实行高偏差数 px/行，修正累计搬移 -405/-469px 误解除跟随），故估计值
+     不写死——由 JS 运行时求值回写 --aam-line-h（见 app.js syncLineHeight），
+     20.25px（= line-height 解析值）仅作首帧兜底。 */
+  content-visibility:auto;
+  contain-intrinsic-width:auto none;
+  contain-intrinsic-height:auto var(--aam-line-h, 20.25px)}
 #log>.empty { margin:30px auto }
 .line {
   padding:1px 16px 1px 13px;
