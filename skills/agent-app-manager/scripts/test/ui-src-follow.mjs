@@ -128,15 +128,19 @@ const documentStub = {
   visibilityState: 'visible',
   documentElement: new El('html'),
   body: new El('body'),
+  activeElement: null,
+  handlers: {},
   createElement: (t) => { const e = new El(t); allEls.push(e); return e; },
   createElementNS: (_ns, t) => { const e = new El(t); allEls.push(e); return e; },
   createDocumentFragment: () => new Frag(),
+  createTextNode: (t) => new El('#text').withText(t),
   querySelector: (sel) => sel.startsWith('#') ? elFor(sel.slice(1)) : (allEls.find((e) => matchEl(e, sel)) ?? null),
   querySelectorAll: (sel) => {
     if (sel.startsWith('#')) { const e = byId.get(sel.slice(1)); return e ? [e] : []; }
     return allEls.filter((e) => matchEl(e, sel));
   },
-  addEventListener: () => {},
+  addEventListener(t, fn) { (this.handlers[t] ??= []).push(fn); },
+  dispatch(t, ev) { for (const f of this.handlers[t] ?? []) f(ev); },
   execCommand: () => false,
 };
 // 页面通过 $('#id') 取元素：预挂到 body 下，保证 querySelectorAll 子树搜索与 closest 可用
@@ -400,6 +404,165 @@ try {
     assert.equal(run("lineVisible('[err] rtest8 later err')"), true);
     assert.equal(run("lineVisible('rtest8 stdout')"), false);
     run('filterRe = null');
+  });
+
+  await check('错误块复制：Java 堆栈整段聚合，普通行不聚合', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 10:00:00 ERROR 启动失败' },
+      { id: 2, text: 'java.lang.IllegalStateException: bad' },
+      { id: 3, text: '\\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 4, text: 'Caused by: java.io.IOException: io' },
+      { id: 5, text: '\\tat com.foo.Baz.run(Baz.java:2)' },
+      { id: 6, text: '2026-01-01 10:00:01 INFO 后续正常' }
+    ]`);
+    const block = run('errorBlockText(0)');
+    assert.equal(block.split('\n').length, 5);
+    assert(block.includes('Caused by: java.io.IOException: io'));
+    assert(!block.includes('后续正常'));
+    assert.equal(run('errorBlockText(1)'), block, '异常头紧邻错误首行应归入同一块');
+    assert.equal(run('errorBlockText(2)'), block, '堆栈帧应回溯归属所在 dump 块');
+    assert.equal(run('errorBlockText(5)'), null, '普通行不走错误块');
+    run('lines = __savedLines');
+  });
+
+  await check('错误块复制：空行分隔的裸异常 dump 自成块首', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 10:00:00 ERROR 请求地址:/api/x 处理失败' },
+      { id: 2, text: '' },
+      { id: 3, text: 'java.lang.RuntimeException: 读取记录失败' },
+      { id: 4, text: '\\tat com.foo.Service.run(Service.java:42)' },
+      { id: 5, text: '\\tat com.foo.Main.main(Main.java:9)' },
+      { id: 6, text: '2026-01-01 10:00:01 INFO 后续正常' }
+    ]`);
+    const dump = run('errorBlockText(2)');
+    assert.equal(dump.split('\n').length, 3, '空行分隔的异常头应自成块首');
+    assert(dump.startsWith('java.lang.RuntimeException'), '块首应是异常头而非日志行');
+    assert.equal(run('errorBlockText(3)'), dump, '堆栈帧应回溯到 dump 头');
+    assert.equal(run('errorBlockText(0)').split('\n').length, 1, '空行前的日志行不吞并 dump');
+    run(`lines = [
+      { id: 1, text: 'java.lang.IllegalStateException: lone' },
+      { id: 2, text: '2026-01-01 INFO next' }
+    ]`);
+    assert.equal(run('errorBlockText(0)'), null, '无堆栈跟随的孤立异常头不成块');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 INFO 普通' },
+      { id: 2, text: '\\tat com.foo.Bar.baz(Bar.java:1)' }
+    ]`);
+    assert.equal(run('errorBlockText(1)'), null, '无首行的孤立帧不猜父块');
+    run('lines = __savedLines');
+  });
+
+  await check('错误块复制：Python Traceback 含末行异常', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: 'Traceback (most recent call last):' },
+      { id: 2, text: '  File "app.py", line 1, in <module>' },
+      { id: 3, text: '    foo()' },
+      { id: 4, text: 'ValueError: bad' }
+    ]`);
+    const block = run('errorBlockText(0)');
+    assert.equal(block.split('\n').length, 4);
+    assert(block.endsWith('ValueError: bad'));
+    run('lines = __savedLines');
+  });
+
+  await check('错误块复制：剥离合并源的 [err] 前缀', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: '[err] 2026-01-01 ERROR 失败' },
+      { id: 2, text: '[err] java.lang.NullPointerException: npe' },
+      { id: 3, text: '[err] \\tat com.foo.Bar.baz(Bar.java:10)' }
+    ]`);
+    const block = run('errorBlockText(0)');
+    assert.equal(block.split('\n').length, 3);
+    assert(!block.includes('[err]'), '整段复制不应带 UI 注入前缀');
+    assert(block.includes('at com.foo.Bar.baz(Bar.java:10)'));
+    run('lines = __savedLines');
+  });
+
+  await check('点击错误行只选中整段（不写剪贴板），Shift+点击扩展', async () => {
+    run('globalThis.__savedLines = lines; globalThis.__origCopyText = copyText; globalThis.__copyTexts = []');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 ERROR 失败' },
+      { id: 2, text: 'java.lang.IllegalStateException: bad' },
+      { id: 3, text: '\\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 4, text: '2026-01-01 INFO ok' }
+    ]`);
+    run('blockSel = null; renderLines(true)');
+    run('copyText = async (t) => { __copyTexts.push(t); return true; }');
+    const box = elFor('log');
+    let rows = box.querySelectorAll('.line');
+    assert.equal(rows.length, 4, '日志区应渲染 4 行');
+    box.dispatch('click', { target: rows[0], shiftKey: false });
+    await wait(0);
+    assert.equal(run('__copyTexts.length'), 0, '单击不应写剪贴板');
+    assert.equal(run('blockSel && blockSel.fromId'), 1, '错误首行应作为选中起点');
+    assert.equal(run('blockSel && blockSel.toId'), 3, '整段堆栈应被选中');
+    assert(rows[0].classList.contains('selected'), '错误首行应高亮');
+    assert(rows[2].classList.contains('selected'), '堆栈末行应高亮');
+    assert(!rows[3].classList.contains('selected'), '后续普通行不应高亮');
+    box.dispatch('click', { target: rows[3], shiftKey: true });
+    await wait(0);
+    assert.equal(run('blockSel && blockSel.toId'), 4, 'Shift+点击应扩展选区');
+    assert(rows[3].classList.contains('selected'), '扩展到的行应高亮');
+    run('blockSel = null; renderLines(true)');
+    rows = box.querySelectorAll('.line');
+    box.dispatch('click', { target: rows[3], shiftKey: false });
+    assert.equal(run('blockSel'), null, '普通行不建立块选中');
+    run('copyText = __origCopyText; lines = __savedLines; blockSel = null; renderLines(true)');
+  });
+
+  await check('Ctrl+C：块选中优先复制整段并剥离 [err]，无选中复制可见行，原生选区放行', async () => {
+    run('globalThis.__savedLines = lines; globalThis.__origCopyText = copyText; globalThis.__copyTexts = []');
+    run(`lines = [
+      { id: 1, text: '[err] 2026-01-01 ERROR 失败' },
+      { id: 2, text: '[err] \\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 3, text: '2026-01-01 INFO ok' }
+    ]`);
+    run('blockSel = { anchorId: 1, fromId: 1, toId: 2 }; renderLines(true)');
+    run('copyText = async (t) => { __copyTexts.push(t); return true; }');
+    documentStub.activeElement = elFor('log');
+    const ev1 = { ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'c', preventDefault() { this.prevented = true; } };
+    documentStub.dispatch('keydown', ev1);
+    await wait(0);
+    assert.equal(run('__copyTexts.length'), 1, '块选中应触发复制');
+    assert.equal(run('__copyTexts[0]').split('\n').length, 2, '应复制选中的 2 行');
+    assert(!run('__copyTexts[0]').includes('[err]'), '复制选中块不应带 UI 注入前缀');
+    assert.equal(ev1.prevented, true, '应阻止浏览器默认复制');
+    run('blockSel = null; renderLines(true)');
+    const ev2 = { ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'c', preventDefault() { this.prevented = true; } };
+    documentStub.dispatch('keydown', ev2);
+    await wait(0);
+    assert.equal(run('__copyTexts[1]').split('\n').length, 3, '无选区应复制全部可见行');
+    run('window.getSelection = () => ({ isCollapsed: false, rangeCount: 1, anchorNode: document.querySelector("#log"), toString: () => "manual pick" })');
+    const ev3 = { ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'c', preventDefault() { this.prevented = true; } };
+    documentStub.dispatch('keydown', ev3);
+    await wait(0);
+    assert.equal(run('__copyTexts.length'), 2, '原生选区不应劫持复制');
+    assert.equal(ev3.prevented, undefined, '原生选区不应阻止默认行为');
+    run('delete window.getSelection; copyText = __origCopyText; lines = __savedLines; blockSel = null; renderLines(true)');
+    documentStub.activeElement = null;
+  });
+
+  await check('复制按钮：有选中复制选中块，无选中复制可见行', async () => {
+    run('globalThis.__savedLines = lines; globalThis.__origCopyText = copyText; globalThis.__copyTexts = []');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 ERROR 失败' },
+      { id: 2, text: '\\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 3, text: '2026-01-01 INFO ok' }
+    ]`);
+    run('copyText = async (t) => { __copyTexts.push(t); return true; }');
+    run('blockSel = { anchorId: 1, fromId: 1, toId: 2 }; renderLines(true)');
+    elFor('copyBtn').dispatch('click', {});
+    await wait(0);
+    assert.equal(run('__copyTexts[0]').split('\n').length, 2, '有选中时应只复制选中块');
+    run('blockSel = null; renderLines(true)');
+    elFor('copyBtn').dispatch('click', {});
+    await wait(0);
+    assert.equal(run('__copyTexts[1]').split('\n').length, 3, '无选中时应复制可见行');
+    run('copyText = __origCopyText; lines = __savedLines; blockSel = null; renderLines(true)');
   });
 
   await restartAndSync('rtest9');

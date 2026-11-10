@@ -1,11 +1,13 @@
 // agent-app-manager 本地 Web 管理台服务（design.md §2.2 / AC08）。
-// 仅 127.0.0.1 + Host 校验，无令牌（本机可信用户）；GET 全部只读，启停仅 POST /api/lifecycle
+// 默认仅 127.0.0.1 + Host 校验、无令牌（本机可信用户）；传 --token 后启用令牌鉴权，
+// 配合 --host / --public-host 可经隧道暴露。GET 全部只读，启停仅 POST /api/lifecycle
 // （start|stop|restart，复用 CLI 同一实现）。数据层全部经 api 注入复用 manager.mjs，
 // 本文件不实现任何业务逻辑。前台常驻直到 Ctrl+C，无守护、无自动重启。
 
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION, MANAGER_VERSION, errorStatus } from '../lib/constants.mjs';
@@ -17,6 +19,9 @@ const MANAGER_SCRIPT = path.resolve(SCRIPT_DIR, '..', 'manager.mjs');
 const APP_JS_FILE = path.join(SCRIPT_DIR, 'app.js');
 const TAIL_CHUNK = 256 * 1024;
 const fail = (status, message, code) => Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
+// 定长摘要后比较：既规避长度侧信道，也避免 timingSafeEqual 对不等长直接抛错。
+const digest = (s) => crypto.createHash('sha256').update(String(s)).digest();
+const sameDigest = (a, b) => a.length === b.length && crypto.timingSafeEqual(a, b);
 
 // ---- HTTP 出口白名单 -------------------------------------------------------
 // 端口/进程诊断只回传定位所需字段，绝不透传 commandLine（可能含密码、token、
@@ -151,8 +156,8 @@ function readTailChunk(file, rawOffset) {
   return { exists: true, start: offset, offset: offset + read, size, encoding, b64: bytes.toString('base64'), fileId };
 }
 
-function sendJson(res, status, data) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+function sendJson(res, status, data, extra = null) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...(extra ?? {}) });
   res.end(JSON.stringify(data));
 }
 
@@ -178,8 +183,20 @@ function openInBrowser(url) {
   }
 }
 
-export async function startUiServer({ home, port = 0, open = false, api }) {
+export async function startUiServer({ home, port = 0, open = false, api, host = '127.0.0.1', token = null, publicHosts = [] }) {
   let boundPort = port;
+  // 可选令牌鉴权：默认关闭，零影响。开启后所有路径（含 `/` 与 `/app.js`）都要凭证；
+  // 浏览器用 ?token= 换 HttpOnly cookie，脚本用 Authorization: Bearer。
+  // cookie 存 HMAC(sessionKey, token)，sessionKey 只在进程内，重启即失效。
+  const expectedToken = typeof token === 'string' && token ? token : null;
+  const tokenDigest = expectedToken ? digest(expectedToken) : null;
+  const sessionKey = crypto.randomBytes(32);
+  const cookieValue = expectedToken ? crypto.createHmac('sha256', sessionKey).update(expectedToken).digest('hex') : null;
+  const challenge = expectedToken ? { 'WWW-Authenticate': 'Bearer' } : null;
+  const publicHostList = [...new Set((publicHosts ?? []).map((h) => String(h).trim().toLowerCase()).filter(Boolean))];
+  // Host / Origin 白名单在 listen 后按实际端口生成（端口 0 时事前未知）。
+  let allowedHosts = new Set();
+  let allowedOrigins = new Set();
   // 首页静态内容缓存为 Buffer：每个轮询会话都会反复 GET /，读盘一次即可（#82-B4）；
   // 进程内缓存，更新 index.html 后重启 ui 生效。
   let indexHtmlCache = null;
@@ -448,11 +465,78 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
     });
   }
 
+  function cookieValueOf(req) {
+    for (const part of String(req.headers.cookie ?? '').split(';')) {
+      const i = part.indexOf('=');
+      if (i < 0) continue;
+      if (part.slice(0, i).trim() !== 'aam_ui') continue;
+      return part.slice(i + 1).trim();
+    }
+    return '';
+  }
+  function authorized(req) {
+    if (!expectedToken) return true;
+    if (cookieValueOf(req) === cookieValue) return true;
+    const m = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization ?? ''));
+    return Boolean(m && sameDigest(digest(m[1].trim()), tokenDigest));
+  }
+  function rejectUnauthorized(req, res, u, reason) {
+    // 只记录“带了错令牌”的尝试；缺凭证多为扫描/误访问，记了只会刷屏。
+    if (reason === 'bad') console.error(`[agent-app-manager ui] 令牌校验失败 ${new Date().toISOString()} ${req.socket.remoteAddress ?? '-'} ${u.pathname}`);
+    if (u.pathname.startsWith('/api/')) {
+      return sendJson(res, 401, errorPayload(fail(401, '未授权：请通过 ?token= 或 Authorization: Bearer 访问', 'UNAUTHORIZED'), '未授权'), challenge);
+    }
+    res.writeHead(401, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "frame-ancestors 'none'",
+      'Referrer-Policy': 'no-referrer',
+      ...(challenge ?? {}),
+    });
+    res.end('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>需要访问令牌</title>'
+      + '<body style="font:14px system-ui;padding:40px;background:#1e1e1e;color:#d4d4d4">'
+      + '<h1 style="font-size:16px;font-weight:600">需要访问令牌</h1>'
+      + '<p style="color:#a3a3a3">在地址后追加 <code>?token=&lt;令牌&gt;</code> 完成首次登录；登录后浏览器会保存会话 cookie。</p>');
+  }
+  function loginWithToken(req, res, u) {
+    u.searchParams.delete('token'); // 令牌不留在地址栏/历史/Referer 里
+    const qs = u.searchParams.toString();
+    const secure = /^https$/i.test(String(req.headers['x-forwarded-proto'] ?? '')) ? '; Secure' : '';
+    res.writeHead(302, {
+      Location: u.pathname + (qs ? `?${qs}` : ''),
+      'Set-Cookie': `aam_ui=${cookieValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200${secure}`,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    });
+    res.end();
+  }
+  function buildAllowlists() {
+    const hosts = new Set([`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`]);
+    const origins = new Set([`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`, `http://[::1]:${boundPort}`]);
+    // 显式绑定的网卡地址也要能用（局域网直连场景）；0.0.0.0/:: 不产生可用 Host。
+    if (host && host !== '0.0.0.0' && host !== '::') {
+      const h = host.includes(':') ? `[${host}]` : host;
+      hosts.add(`${h}:${boundPort}`);
+      origins.add(`http://${h}:${boundPort}`);
+    }
+    for (const h of publicHostList) {
+      hosts.add(h);
+      if (!/:\d+$/.test(h)) { hosts.add(`${h}:443`); hosts.add(`${h}:${boundPort}`); }
+      origins.add(`https://${h}`);
+      origins.add(`http://${h}`);
+    }
+    allowedHosts = hosts;
+    allowedOrigins = origins;
+  }
+
   function handle(req, res) {
     let u;
     try {
-      const host = String(req.headers.host ?? '');
-      if (host !== `127.0.0.1:${boundPort}` && host !== `localhost:${boundPort}`) {
+      const host = String(req.headers.host ?? '').toLowerCase();
+      if (!allowedHosts.has(host)) {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: 'Host 不允许访问' } });
       }
       u = new URL(req.url, `http://127.0.0.1:${boundPort}`);
@@ -461,6 +545,15 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
       const dest = String(req.headers['sec-fetch-dest'] ?? '').toLowerCase();
       if (dest === 'iframe' || dest === 'frame') {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '不允许在 iframe 中访问管理台' } });
+      }
+      // 鉴权放在方法守卫之前：未授权者连路由是否存在都探测不到。
+      if (expectedToken) {
+        const presented = u.searchParams.get('token');
+        if (presented !== null && req.method === 'GET') {
+          if (!sameDigest(digest(presented), tokenDigest)) return rejectUnauthorized(req, res, u, 'bad');
+          return loginWithToken(req, res, u);
+        }
+        if (!authorized(req)) return rejectUnauthorized(req, res, u, presented !== null ? 'bad' : 'missing');
       }
       if (req.method !== 'GET' && !(req.method === 'POST' && ['/api/lifecycle', '/api/workbench', '/api/import'].includes(u.pathname))) {
         return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '仅支持 GET 与 POST /api/lifecycle' } });
@@ -471,8 +564,7 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
         // Origin 存在时必须同源（curl/脚本不带这两个头，不受影响）。
         const site = String(req.headers['sec-fetch-site'] ?? '').toLowerCase();
         const origin = String(req.headers.origin ?? '');
-        const allowedOrigins = [`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`];
-        if (site === 'cross-site' || (origin && !allowedOrigins.includes(origin))) {
+        if (site === 'cross-site' || (origin && !allowedOrigins.has(origin))) {
           return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '跨站写操作被拒绝' } });
         }
       }
@@ -493,21 +585,28 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
   server.on('error', (e) => { if (e.code !== 'EADDRINUSE') console.error(`[agent-app-manager ui] ${e.message}`); });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       server.removeListener('error', reject);
       boundPort = server.address().port;
       resolve();
     });
   });
-  const uiUrl = `http://127.0.0.1:${boundPort}/`;
-  process.stdout.write([
-    '',
-    `[agent-app-manager] 运行管理台: ${uiUrl}`,
-    `  数据目录: ${home}`,
-    '  仅监听 127.0.0.1，供本机可信用户使用；页面可启停受管应用且日志可能含敏感信息，勿对外转发。',
-    '  Ctrl+C 退出（无常驻服务，退出即停止）。',
-    '',
-  ].join('\n') + '\n');
-  if (open) openInBrowser(uiUrl);
+  buildAllowlists();
+  const localHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : (host.includes(':') ? `[${host}]` : host);
+  const uiUrl = `http://${localHost}:${boundPort}/`;
+  const publicUrl = publicHostList[0] ? `https://${publicHostList[0]}/` : null;
+  const loginBase = publicUrl ?? uiUrl;
+  const lines = ['', `[agent-app-manager] 运行管理台: ${uiUrl}`];
+  if (publicUrl) lines.push(`  公网入口: ${publicUrl}`);
+  lines.push(`  数据目录: ${home}`);
+  if (expectedToken) {
+    lines.push(`  首次访问（含令牌，请勿转发/截图）: ${loginBase}?token=${encodeURIComponent(expectedToken)}`);
+    lines.push('  已启用令牌鉴权：令牌等同完全控制权（可启停/移除受管应用、读取项目文件）；泄露后重启换令牌。');
+  } else {
+    lines.push('  仅监听本机，供本机可信用户使用；页面可启停受管应用且日志可能含敏感信息，勿对外转发。');
+  }
+  lines.push('  Ctrl+C 退出（无常驻服务，退出即停止）。', '');
+  process.stdout.write(lines.join('\n') + '\n');
+  if (open) openInBrowser(loginBase + (expectedToken ? `?token=${encodeURIComponent(expectedToken)}` : ''));
   await new Promise(() => { /* 常驻直到进程被终止 */ });
 }

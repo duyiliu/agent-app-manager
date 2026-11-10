@@ -177,7 +177,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
    ![深色详情与资源曲线](docs/images/manager-detail-dark.png)
 
-4. **查看日志**：日志源下拉可选当前 / 历史受管批次、非受管线索和项目 `.tmp` 兼容日志。工具栏支持合并 stdout / stderr、正则过滤、只看错误、暂停 / 恢复跟随、清屏和下载；过滤激活时只下载命中行。首次加载时顶部可能出现「从文件起始读取」提示，跟随滚动后移出视口。
+4. **查看日志**：日志源下拉可选当前 / 历史受管批次、非受管线索和项目 `.tmp` 兼容日志。工具栏支持合并 stdout / stderr、正则过滤、只看错误、暂停 / 恢复跟随、清屏、复制和下载；点击错误行会**选中**整段堆栈（不直接写剪贴板，Shift+点击扩展选区），拖动可自由选中文本；复制按钮或日志区聚焦后 Ctrl+C 复制选中内容，未选中时按当前过滤条件复制命中行；过滤激活时只下载命中行。首次加载时顶部可能出现「从文件起始读取」提示，跟随滚动后移出视口。
 
 5. **只读文件浏览**：点顶部「文件」打开当前应用根目录，可逐层展开、过滤和分页预览文本文件。`.git`、`node_modules`、`.env*`、常见私钥与许可文件不会显示，路径穿越与符号链接会被拒绝。
 
@@ -239,9 +239,13 @@ examples/spring-boot-demo/         # 本地测试项目
 改动 `manager.mjs` / `manager-ui` / `lib` 后运行：
 
 ```bash
-npm test          # 完整冒烟
-npm run check     # 全部 .mjs 语法检查 + 脱敏 / 健康 / 环境 / 运行时冒烟
+npm run build     # 全部 .mjs 语法检查 + 版本一致性校验（改动后日常验证，秒级）
+node skills/agent-app-manager/scripts/test/<受影响>.mjs   # 只跑受影响冒烟
+npm test          # 完整冒烟：串行 ≈11 分钟，-j 4 ≈6 分钟
+npm run check     # build + test（= 一次全量）：提交前统一跑
 ```
+
+改动过程中只跑 `build` + 受影响单测；提交前统一跑 `npm run check`。各冒烟相互隔离（独立临时 home、OS 分配端口），单测全过即可信——全量只在提交前、发版、每周巡检或用户明确要求时跑，不要为"确认没破坏别处"中途随手跑。
 
 `npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 分三档：PR 上 `ubuntu-latest` 跑全量冒烟（约 3 分钟）、`windows-latest` 跑关键集冒烟（约 4.5 分钟，覆盖生命周期、env 脱敏、发现证据、锁、remove/prune）；`windows-latest` 全量冒烟拆为矩阵并行约 4-5 分钟，只在发版 tag、每周巡检、手动触发时运行（main push 与 PR 均不跑）；macOS 未纳入支持范围。
 

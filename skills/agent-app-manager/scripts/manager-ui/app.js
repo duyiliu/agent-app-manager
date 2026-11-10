@@ -581,6 +581,12 @@ function directoryParentLabel(info, roots) {
 function directoryDisplayLabel(info, roots) {
   return [directoryParentLabel(info, roots), info.name].filter(Boolean).join(' › ');
 }
+// 分组归属优先用服务端解析的 git 主仓库：worktree 与仓库子目录并入主仓库组；
+// 非 Git 目录（含已删除目录）退回按登记 root 分组。
+function appGroupInfo(app) {
+  const repo = typeof app.repoRoot === 'string' && app.repoRoot ? app.repoRoot : '';
+  return directoryInfo(repo || app.root);
+}
 let appView = 'flat';
 const collapsedDirectories = new Set();
 try {
@@ -608,13 +614,13 @@ function renderApps() {
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const rank = { RUNNING: 0, STARTING: 1, BACKOFF: 2, UNKNOWN: 3, DEAD: 4, STOPPED: 5 };
   const filtered = appsCache
-    .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state, ...(a.tags ?? []), ...actualPortsOf(a)].some(v => String(v ?? '').toLowerCase().includes(q)))
+    .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.repoRoot, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state, ...(a.tags ?? []), ...actualPortsOf(a)].some(v => String(v ?? '').toLowerCase().includes(q)))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
   $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
-  const directoryCount = new Set(filtered.map(a => directoryInfo(a.root).key)).size;
+  const directoryCount = new Set(filtered.map(a => appGroupInfo(a).key)).size;
   $('#directoryCount').textContent = `${directoryCount} 组`;
   $('#directoryCount').hidden = appView === 'flat';
-  const directoryRoots = [...new Map(appsCache.map(a => { const info = directoryInfo(a.root); return [info.key, info]; })).values()];
+  const directoryRoots = [...new Map(appsCache.map(a => { const info = appGroupInfo(a); return [info.key, info]; })).values()];
   const previousScroll = list.scrollTop;
   const existing = new Map([...list.querySelectorAll('.app-card')].map(card => [card.dataset.appId, card]));
   const existingGroups = new Map([...list.querySelectorAll('.directory-group')].map(group => [group.dataset.root, group]));
@@ -706,7 +712,7 @@ function renderApps() {
   else {
     const groups = new Map();
     filtered.forEach((app, i) => {
-      const info = directoryInfo(app.root);
+      const info = appGroupInfo(app);
       if (!groups.has(info.key)) groups.set(info.key, { ...info, apps: [], cards: [] });
       groups.get(info.key).apps.push(app);
       groups.get(info.key).cards.push(ordered[i]);
@@ -739,18 +745,20 @@ function renderApps() {
       }
       const toggle = group.querySelector('.directory-toggle');
       const expanded = !!q || !collapsedDirectories.has(g.key);
-      const all = appsCache.filter(a => directoryInfo(a.root).key === g.key);
+      const all = appsCache.filter(a => appGroupInfo(a).key === g.key);
       const count = q ? `${g.apps.length}/${all.length}` : String(all.length);
       group.classList.toggle('has-selection', g.apps.some(a => a.alias === selected));
       group.querySelector('.directory-name').textContent = g.name;
       group.querySelector('.directory-stats').textContent = `${count} 应用 · ${all.filter(a => a.status === 'RUNNING').length} 运行`;
       group.querySelector('.directory-chevron').textContent = expanded ? '▾' : '▸';
       const parentLabel = directoryParentLabel(g, directoryRoots);
+      // worktree 数量只作归属提示：卡片别名已区分实例，这里解释为什么多个目录进了同一组。
+      const worktreeCount = g.apps.filter(a => a.worktree === true).length;
       const pathLabel = group.querySelector('.directory-path');
-      pathLabel.textContent = parentLabel;
-      pathLabel.hidden = !parentLabel;
+      pathLabel.textContent = [parentLabel, worktreeCount ? `${worktreeCount} 个 worktree` : ''].filter(Boolean).join(' · ');
+      pathLabel.hidden = !pathLabel.textContent;
       pathLabel.title = g.path;
-      pathLabel.setAttribute('aria-label', `父目录：${parentLabel}`);
+      pathLabel.setAttribute('aria-label', [parentLabel ? `父目录：${parentLabel}` : '', worktreeCount ? `含 ${worktreeCount} 个 worktree` : ''].filter(Boolean).join('，'));
       toggle.setAttribute('aria-expanded', String(expanded));
       toggle.setAttribute('aria-label', `${g.name}，${g.path || '未记录目录'}，${count} 个应用`);
       toggle.title = q ? '搜索时自动展开匹配目录' : `${expanded ? '收起' : '展开'} ${g.path || '未记录目录'}`;
@@ -1561,7 +1569,7 @@ function selectApp(alias) {
   selected = alias;
   // URL 直达应用时展开所属目录，避免选中项藏在上次保存的折叠分组内。
   const target = appsCache.find(a => a.alias === alias);
-  if (target && collapsedDirectories.delete(directoryInfo(target.root).key)) saveDirectoryView();
+  if (target && collapsedDirectories.delete(appGroupInfo(target).key)) saveDirectoryView();
   workbenchEpoch++;
   workbench = null;
   loadWorkbench();
@@ -1623,6 +1631,60 @@ const newMergedTails = () => ({
 });
 const classify = t => isErrLine(t) ? 'err' : errorPattern.test(t) ? 'err' : t.includes('JRebel:') ? 'jr' : /\bWARN\b/.test(t) ? 'warn'
   : /Preparing:|Parameters:|<== *Total|==>|SqlSession|JDBC Connection/.test(t) ? 'sql' : '';
+// 错误块识别：错误日志常是多行堆栈（Java Caused by / Python Traceback / Node at 帧），
+// 点击错误行时整段选中。合并源注入的 [err] 前缀不参与缩进与续行判断，复制时剥离。
+const stripErrTag = (t) => (t.startsWith('[err] ') ? t.slice(6) : t);
+const ERR_CONT_RE = /^(?:\s|at\s|Caused by:|Suppressed:|\.\.\. \d+ more\b)/;
+const ERR_HEAD_RE = /^[\w.$]+(?:Exception|Error)(?::|\b)/;
+const TRACEBACK_RE = /^Traceback \(most recent call last\):/;
+const ERR_BLOCK_MAX = 200;
+const isErrCont = (t) => { const b = stripErrTag(t); return ERR_CONT_RE.test(b) || ERR_HEAD_RE.test(b); };
+const isBareErrHead = (t) => { const b = stripErrTag(t); return ERR_HEAD_RE.test(b) && !/^\s/.test(b); };
+const isErrHead = (t) => !isErrCont(t) && (classify(t) === 'err' || TRACEBACK_RE.test(stripErrTag(t)));
+// 裸异常头（java.lang.NPE 这类无缩进首行）自身紧跟堆栈时也是块首：
+// Spring GlobalExceptionHandler 等输出"ERROR 行→空行→裸 dump"格式，块与
+// 日志行被空行分开，dump 本身就是正确的复制单元。
+const isDumpHead = (i) => isBareErrHead(lines[i]?.text ?? '') && i + 1 < lines.length && isErrCont(lines[i + 1].text);
+function findErrHead(i) {
+  const t = lines[i]?.text;
+  if (t === undefined) return -1;
+  if (isErrHead(t)) return i;
+  if (isBareErrHead(t)) {
+    // 紧邻上一行的错误首行时归入该块（log.error(msg, ex) 不换行格式）；否则自成块首。
+    if (i > 0 && isErrHead(lines[i - 1].text)) return i - 1;
+    return isDumpHead(i) ? i : -1;
+  }
+  if (!isErrCont(t)) return -1;
+  // 缩进帧向上回溯：命中的裸 dump 头即块首（回溯路径上全是续行，其后必然有帧）；
+  // dump 头紧邻错误首行时一并向上一行归入日志块，与点击 dump 头语义一致。
+  for (let j = i - 1; j >= 0 && i - j < ERR_BLOCK_MAX; j--) {
+    const prev = lines[j].text;
+    if (isErrHead(prev)) return j;
+    if (isBareErrHead(prev)) return j > 0 && isErrHead(lines[j - 1].text) ? j - 1 : j;
+    if (!isErrCont(prev)) return -1;
+  }
+  return -1;
+}
+function errorBlockEnd(head) {
+  const traceback = TRACEBACK_RE.test(stripErrTag(lines[head].text));
+  let end = head + 1;
+  while (end < lines.length && end - head < ERR_BLOCK_MAX) {
+    const t = lines[end].text;
+    if (!isErrCont(t)) break;
+    // 无缩进异常头只在紧邻错误首行时并入；Python traceback 的末行异常除外。
+    if (isBareErrHead(t) && end > head + 1 && !traceback) break;
+    end++;
+  }
+  return end;
+}
+function errorBlockRange(i) {
+  const head = findErrHead(i);
+  return head < 0 ? null : [head, errorBlockEnd(head) - 1];
+}
+function errorBlockText(i) {
+  const r = errorBlockRange(i);
+  return r ? lines.slice(r[0], r[1] + 1).map((l) => stripErrTag(l.text)).join('\n') : null;
+}
 let logSrc = null, logSrcLabel = '', logSrcWasCurrent = false, offset = -1, pending = '', decoder = new TextDecoder('utf-8'), logEncoding = 'utf-8';
 let logMerged = false, mergedTails = newMergedTails();
 let srcDead = false; // 当前源 404 已失效：停止每秒轮询风暴，手动刷新或换源可恢复
@@ -1636,6 +1698,10 @@ let logFallbackLabel = '日志', renderedDomCount = 0;
 // compileFilter 置脏；renderMeta 仅在脏且过滤激活时重算，静默轮询不再每秒全扫
 // 8000 行。
 let hitCount = 0, hitCountStale = true;
+// 日志块选中态：单击错误行只“选中整段”，不写剪贴板（先选中、再复制）。
+// 用行 id 而不是 DOM 节点记录范围：轮询会增量追加/修剪节点，id 稳定。
+let blockSel = null; // { anchorId, fromId, toId }
+const rowSelected = (id) => !!blockSel && id >= blockSel.fromId && id <= blockSel.toId;
 
 function compileFilter() {
   const input = $('#logFilter');
@@ -1681,6 +1747,7 @@ function resetLog() {
   offset = -1; pending = ''; logEncoding = 'utf-8'; decoder = new TextDecoder('utf-8'); renderedId = 0;
   logMerged = isMergedSrc(logSrc); mergedTails = newMergedTails();
   lines = []; nextId = 1; boundary = ''; removed = 0; following = true; srcDead = false;
+  blockSel = null; // 换源/换应用后旧行号不再有效
   logFallbackLabel = '日志'; renderedDomCount = 0; hitCountStale = true;
   updateFollow();
   renderMeta();
@@ -1759,6 +1826,7 @@ function renderLines(force = false) {
     for (const l of lines) if (l.id > renderedId) {
       if (!lineVisible(l.text)) continue; // 增量新行同样按当前过滤条件入视图
       const row = el('div', 'line ' + classify(l.text)); row.dataset.id = l.id;
+      if (rowSelected(l.id)) row.classList.add('selected');
       row.appendChild(document.createTextNode(l.text || ' ')); frag.appendChild(row); appended++;
     }
     box.appendChild(frag);
@@ -1794,6 +1862,7 @@ function renderLines(force = false) {
     if (!lineVisible(l.text)) continue; // 增量新行也按当前条件入视图
     const row = el('div', 'line ' + classify(l.text));
     row.dataset.id = l.id;
+    if (rowSelected(l.id)) row.classList.add('selected');
     row.appendChild(document.createTextNode(l.text || ' '));
     frag.appendChild(row); built++;
   }
@@ -1972,6 +2041,7 @@ async function loadSources({ preferCurrent = false } = {}) {
     $('#logFilter').disabled = !has;
     $('#errorsBtn').disabled = !has;
     $('#dlBtn').disabled = !has;
+    $('#copyBtn').disabled = !has;
     if (!has) {
       const missingRunId = wantedHistoryRun;
       wantedHistoryRun = null;
@@ -2112,7 +2182,7 @@ $('#detailBar').addEventListener('click', () => {
   if (open) loadStatus({ sample: true });
 });
 $('#followBtn').addEventListener('click', () => { following = !following; updateFollow(); if (following) pollTail(); });
-$('#clearBtn').addEventListener('click', () => { lines = []; renderedId = 0; removed = 0; boundary = '显示已清空，后续读取继续'; renderLines(true); });
+$('#clearBtn').addEventListener('click', () => { lines = []; renderedId = 0; removed = 0; blockSel = null; boundary = '显示已清空，后续读取继续'; renderLines(true); });
 // 过滤输入 150ms 防抖（#212）：原实现每按键全量重建最多 8000 个行节点。
 // Escape 清空属于强取消语义，立即生效不走防抖。
 let filterTimer = 0;
@@ -2130,19 +2200,110 @@ $('#errorsBtn').addEventListener('click', () => {
   updateDlBtn();
   renderLines(true);
 });
+// ---------- 选中与复制 ----------
+let toastTimer = 0;
+function logToast(msg) {
+  const t = $('#logToast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+function applyBlockSel() {
+  for (const n of $('#log').querySelectorAll('.line')) {
+    n.classList.toggle('selected', rowSelected(Number(n.dataset.id)));
+  }
+}
+function clearBlockSel() {
+  if (!blockSel) return;
+  blockSel = null;
+  applyBlockSel();
+}
+// 用户拖选的原生选区：只认日志区内部的，避免把页面上其它选区当成日志内容。
+function logSelectionText() {
+  const sel = window.getSelection?.();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return '';
+  const anchor = sel.anchorNode;
+  if (anchor) {
+    let p = anchor;
+    while (p && p !== $('#log')) p = p.parentNode;
+    if (p !== $('#log')) return '';
+  }
+  return String(sel.toString?.() ?? '').replace(/\n+$/, '');
+}
 $('#log').addEventListener('click', (e) => {
   const row = e.target.closest('.line');
   if (!row) return;
-  copyText(row.textContent).then((ok) => { if (ok) { row.classList.add('copied'); setTimeout(() => row.classList.remove('copied'), 800); } });
+  $('#log').focus({ preventScroll: true }); // 让随后的 Ctrl+C 能作用于日志区
+  // 鼠标拖选也会触发 click：已有原生选区时不要用块选中覆盖用户的选择。
+  if (logSelectionText()) return;
+  const id = Number(row.dataset.id);
+  if (e.shiftKey && blockSel) {
+    // Shift+单击：从上次的锚点扩展到当前行。
+    const fromId = Math.min(blockSel.anchorId, id);
+    const toId = Math.max(blockSel.anchorId, id);
+    blockSel = { anchorId: blockSel.anchorId, fromId, toId };
+    applyBlockSel();
+    logToast(`已选中 ${toId - fromId + 1} 行 · Ctrl+C 复制`);
+    return;
+  }
+  const idx = lines.findIndex((l) => l.id === id);
+  const range = idx < 0 ? null : errorBlockRange(idx);
+  if (!range) { clearBlockSel(); return; } // 普通行只清空选中，复制走拖选或工具栏
+  blockSel = { anchorId: lines[range[0]].id, fromId: lines[range[0]].id, toId: lines[range[1]].id };
+  applyBlockSel();
+  logToast(`已选中 ${range[1] - range[0] + 1} 行 · Ctrl+C 复制`);
+});
+// 点击日志面板之外收起选中，避免“看着没选中，Ctrl+C 却复制了旧块”。
+document.addEventListener('click', (e) => {
+  if (!blockSel) return;
+  if (e.target?.closest?.('.log-panel')) return;
+  let p = e.target;
+  while (p && p !== $('#log')) p = p.parentNode;
+  if (p !== $('#log')) clearBlockSel();
 });
 // 下载按钮语义（#164）：未过滤→服务端 /api/download 下载源文件全量；
 // 过滤/只看错误激活→按所见导出命中行（标注部分导出），两种语义用 title 明示。
 function updateDlBtn() {
-  $('#dlBtn').title = (filterRe || errorsOnly)
+  const filtered = !!(filterRe || errorsOnly);
+  $('#dlBtn').title = filtered
     ? '下载当前过滤命中的行（部分导出）'
     : '下载当前日志源完整文件';
 }
 updateDlBtn();
+async function copyLog() {
+  // 优先级：块选中 → 手动拖选 → 当前可见行。
+  if (blockSel) {
+    const out = lines.filter((l) => l.id >= blockSel.fromId && l.id <= blockSel.toId);
+    if (!out.length) return;
+    if (await copyText(out.map((l) => stripErrTag(l.text)).join('\n'))) logToast(`已复制 ${out.length} 行`);
+    else logToast('复制失败');
+    return;
+  }
+  const manual = logSelectionText();
+  if (manual) {
+    if (await copyText(manual)) logToast(`已复制 ${manual.split('\n').length} 行`);
+    else logToast('复制失败');
+    return;
+  }
+  const out = lines.filter((l) => lineVisible(l.text));
+  if (!out.length) return;
+  if (await copyText(out.map((l) => l.text).join('\n'))) logToast(`已复制 ${out.length} 行`);
+  else logToast('复制失败');
+}
+$('#copyBtn').addEventListener('click', copyLog);
+// 日志区聚焦时：有原生选区交给浏览器；否则复制选中块（没有选中则复制可见行）。
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key?.toLowerCase() !== 'c') return;
+  if (document.activeElement !== $('#log')) return;
+  if (logSelectionText()) return;
+  e.preventDefault();
+  copyLog();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && blockSel) clearBlockSel();
+});
 $('#dlBtn').addEventListener('click', () => {
   const a = document.createElement('a');
   if (filterRe || errorsOnly) {

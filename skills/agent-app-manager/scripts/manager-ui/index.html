@@ -585,6 +585,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .prev-row.history-pick.selected { border-left-color:var(--accent); background:var(--selected); }
 
 .log-panel {
+  position:relative;
   flex:1;
   min-height:170px;
   display:flex;
@@ -660,10 +661,18 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   padding:1px 16px 1px 13px;
   border-left:3px solid transparent;
   line-height:1.62;
-  cursor:pointer;
+  cursor:text;
   color:var(--text)}
 .line:hover { background:var(--surface) }
-.line.copied { background:var(--accent-soft) }
+.line.err { cursor:pointer }
+#log .line.selected { background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent) }
+#logToast {
+  position:absolute; left:50%; bottom:16px; transform:translate(-50%,6px);
+  max-width:min(520px,90%); padding:7px 14px; border-radius:999px;
+  background:var(--panel-3); border:1px solid var(--line-strong); color:var(--text);
+  font:11.5px var(--ui-font); box-shadow:var(--shadow);
+  opacity:0; pointer-events:none; transition:opacity .16s ease, transform .16s ease; z-index:5}
+#logToast.show { opacity:1; transform:translate(-50%,0) }
 .doc-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:60 }
 .doc-card { width:min(760px,92vw); max-height:82vh; overflow:auto; background:var(--panel-2); border:1px solid var(--line-strong); border-radius:var(--radius); box-shadow:var(--shadow) }
 .doc-head { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line) }
@@ -878,10 +887,12 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
         <button id="pauseBtn" data-icon="pause" type="button" aria-pressed="false">暂停</button>
         <button id="followBtn" data-icon="follow" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" data-icon="clear" type="button" disabled>清屏</button>
+        <button id="copyBtn" data-icon="copy" type="button" disabled title="复制选中内容；未选中时按当前过滤条件复制可见行（日志区聚焦时 Ctrl+C）">复制</button>
         <button id="dlBtn" data-icon="download" type="button" disabled title="下载当前日志源完整文件">下载</button>
         <span id="logMeta"></span>
       </div>
-      <div id="log" tabindex="0" aria-label="日志内容" title="点击行复制该行"><div class="empty">选择左侧应用后查看日志。</div></div>
+      <div id="log" tabindex="0" aria-label="日志内容" title="点击错误行选中整段（不复制），Shift+点击扩展选区；拖动可自由选中文本；点「复制」或按 Ctrl+C 写入剪贴板"><div class="empty">选择左侧应用后查看日志。</div></div>
+      <div id="logToast" role="status" aria-live="polite"></div>
     </section>
   </section>
 </main>

@@ -135,18 +135,26 @@ function runManagerJson(home, args, { timeoutMs = 60000 } = {}) {
 }
 
 export async function cmdUi(ctx) {
-  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag' });
+  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag', '--host': 'value', '--token': 'value', '--public-host': 'multi' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   let port = 8199; // 固定端口契约；--port 0 使用随机端口
   if (opts.has('--port')) {
     port = Number.parseInt(opts.get('--port'), 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError('--port 需要 0-65535 的整数（0 为随机端口）');
   }
+  // --token/--host/--public-host 供隧道/局域网暴露场景使用：server.mjs 完成令牌鉴权与
+  // Host/Origin 白名单，令牌等同完全控制权，泄露后重启换令牌。默认仍仅本机无令牌。
+  const host = opts.get('--host') ?? '127.0.0.1';
+  const token = opts.get('--token') ?? null;
+  const publicHosts = opts.getAll('--public-host');
   const { startUiServer } = await import('../../manager-ui/server.mjs');
   try {
     await startUiServer({
       home: ctx.home,
       port,
+      host,
+      token,
+      publicHosts,
       open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         // 这三项是重采集（每次 3 次全量 pwsh 枚举，3-20s），必须走子进程，
