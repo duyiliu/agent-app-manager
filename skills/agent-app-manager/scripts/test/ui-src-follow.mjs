@@ -37,6 +37,7 @@ const gitWt = path.join(base, 'git-wt');
 fs.mkdirSync(path.join(gitRepo, '.git', 'worktrees', 'wt'), { recursive: true });
 fs.mkdirSync(gitWt, { recursive: true });
 w(path.join(gitRepo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+w(path.join(gitRepo, '.git', 'worktrees', 'wt', 'HEAD'), 'ref: refs/heads/feature-wt\n');
 w(path.join(gitWt, '.git'), `gitdir: ${path.join(gitRepo, '.git', 'worktrees', 'wt').replace(/\\/g, '/')}\n`);
 const wtRoot = fs.realpathSync(gitWt);
 // 幽灵目录：登记 root 指向不存在的目录（目录已删除/盘符不在），验证「目录不存在」标记。
@@ -255,7 +256,9 @@ try {
     const wt = apps.find((a) => a.alias === 'wt');
     assert.equal(wt.repoRoot, fs.realpathSync(gitRepo), 'worktree 应返回主仓库路径');
     assert.equal(wt.worktree, true, 'worktree 应带归属标记');
+    assert.equal(wt.branch, 'feature-wt', 'worktree 应返回各自分支');
     assert.equal(apps.find((a) => a.alias === 'his').repoRoot, undefined, '非 Git 目录不附加仓库归属');
+    assert.equal(apps.find((a) => a.alias === 'his').branch, undefined, '非 Git 目录不附加分支');
     run(`appView = 'directories'`);
     run('renderApps()');
     const groups = [...elFor('appList').querySelectorAll('.directory-group')];
@@ -263,7 +266,12 @@ try {
     assert.equal(groups.length, 3, `proj / 主仓库 / 幽灵目录应各成一组，实际：${[...byName.keys()].join(',')}`);
     const repoGroup = byName.get('git-main');
     assert(repoGroup, `缺少主仓库分组，实际：${[...byName.keys()].join(',')}`);
-    assert.deepEqual([...repoGroup.querySelector('.directory-apps').querySelectorAll('.app-card')].map((c) => c.dataset.appId), ['awt']);
+    const wtCard = repoGroup.querySelector('.directory-apps').querySelector('.app-card[data-app-id="awt"]');
+    assert(wtCard, 'worktree 卡片缺失');
+    const br = wtCard.querySelector('.m-branch');
+    assert(br, 'worktree 卡片应有分支标签');
+    assert.equal(br.textContent, 'feature-wt');
+    assert.equal(br.dataset.icon, 'branch');
     assert.equal(repoGroup.querySelector('.directory-path').textContent, '1 个 worktree');
     run(`appView = 'flat'`);
     run('renderApps()');
@@ -691,17 +699,36 @@ try {
     run(`workbench = null;`);
   });
   // #107：UI 必须优先展示/链接实际监听端口，expectedPort 只保留为启动前冲突检查与回退展示。
-  await check('端口链接优先使用实际端口（列表与详情）', () => {
+  // 列表卡片不再渲染端口链接（meta 只留状态信息）；端口入口在详情卡与卡片操作菜单。
+  await check('端口链接优先使用实际端口（详情与卡片菜单）', () => {
     const anchorHrefs = (root) => [...root.querySelectorAll('a.port-link')].map((a) => a.href);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:5173, actualPorts:[5174], portMismatch:true, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:4242, startedAt:null } })`);
     const detailHrefs = anchorHrefs(elFor('detail'));
     assert(detailHrefs.includes('http://127.0.0.1:5174/'), `详情缺少实际端口链接：${detailHrefs.join(',')}`);
     assert(!detailHrefs.includes('http://127.0.0.1:5173/'), `详情不应链接 expectedPort：${detailHrefs.join(',')}`);
     assert(elFor('detail').textContent.includes('5173'), '详情应保留 expectedPort 展示');
+    // 服务地址常驻详情上下文条：完整 URL 指向实际端口而非 expectedPort。
+    assert.equal(elFor('serviceUrl').textContent, 'http://127.0.0.1:5174/', '上下文条服务地址应展示实际端口完整 URL');
+    assert.equal(elFor('servicePart').hidden, false, 'RUNNING 且有端口时服务地址应可见');
     run(`appsCache = [{ alias:'portapp', appId:'aport', mode:'node', status:'RUNNING', pid:4242, expectedPort:5173, actualPorts:[5174], root:'/tmp/x' }]; renderApps();`);
-    const listHrefs = anchorHrefs(elFor('appList'));
-    assert(listHrefs.includes('http://127.0.0.1:5174/'), `列表缺少实际端口链接：${listHrefs.join(',')}`);
-    assert(!listHrefs.includes('http://127.0.0.1:5173/'), `列表不应链接 expectedPort：${listHrefs.join(',')}`);
+    assert(anchorHrefs(elFor('appList')).length === 0, '列表卡片不应渲染端口文字链接');
+    // 卡片行尾「打开」图标：一键直达实际端口，但不显示端口号。
+    const cardOpen = elFor('appList').querySelector('a.card-open');
+    assert(cardOpen, '运行中且有端口的卡片缺少一键打开图标');
+    assert.equal(cardOpen.href, 'http://127.0.0.1:5174/', '卡片打开图标应指向实际端口');
+    assert(!cardOpen.textContent.includes('517'), '打开图标不应显示端口号');
+    // 停止态卡片不渲染打开图标（地址已失效）。
+    run(`appsCache[0].status = 'STOPPED'; renderApps();`);
+    assert(!elFor('appList').querySelector('a.card-open'), '停止的卡片不应有打开图标');
+    run(`appsCache[0].status = 'RUNNING'; renderApps();`);
+    // 端口入口挪进卡片操作菜单：菜单项应指向实际监听端口而非 expectedPort。
+    run(`openCardMenu(appsCache[0], 10, 10);`);
+    const menu = documentStub.body.querySelector('.ctx-menu');
+    assert(menu, '卡片操作菜单未弹出');
+    assert(menu.textContent.includes('打开端口 :5174'), `菜单缺少实际端口入口：${menu.textContent}`);
+    assert(menu.textContent.includes('复制端口地址 :5174'), `菜单缺少端口复制项：${menu.textContent}`);
+    assert(!menu.textContent.includes(':5173'), `菜单不应出现 expectedPort：${menu.textContent}`);
+    run(`closeCardMenu();`);
   });
 
   await check('详情卡生命周期控件：tree 复选框 + grace 毫秒输入，值跨重绘保留', () => {
@@ -731,29 +758,33 @@ try {
       const u = new URL(urls[0]);
       assert.equal(u.searchParams.get('tree'), '1');
       assert.equal(u.searchParams.get('grace'), '3000');
-      const banner = elFor('fatalBanner').textContent;
+      const banner = elFor('toastStack').textContent;
       assert(banner.includes('treeKilled=1'), banner);
       assert(banner.includes('killedPids=[4321]'), banner);
-      // 成功横幅必须是绿色成功态：红是危险态，沿用会让「停止成功」看起来像报错。
-      const classes = elFor('fatalBanner').className;
-      assert(classes.includes('ok'), `成功横幅缺少 ok 类：${classes}`);
-      assert(!classes.includes('warn') && !classes.includes('error'), `成功横幅不应带警告/错误类：${classes}`);
+      // 成功提示必须是绿色成功态：红是危险态，沿用会让「停止成功」看起来像报错。
+      const classes = elFor('toastStack').querySelector('.toast')?.className ?? '';
+      assert(classes.includes('ok'), `成功提示缺少 ok 类：${classes}`);
+      assert(!classes.includes('warn') && !classes.includes('error'), `成功提示不应带警告/错误类：${classes}`);
     } finally {
       run(`fetch = __origFetch;`);
       run(`lifecycleTree = false; lifecycleGrace = '';`);
     }
   });
 
-  await check('横幅配色分级：失败红、成功绿且切换时清理旧类', () => {
+  await check('提示配色分级：失败红、成功绿且同类覆盖', () => {
     run(`showBanner('x 失败', 'error', 'op')`);
-    assert(elFor('fatalBanner').className.includes('ok') === false, '失败横幅不应带 ok 类');
+    let b = elFor('toastStack').querySelector('.toast');
+    assert(b && !b.className.includes('ok'), '失败提示不应带 ok 类');
     run(`showBanner('x 成功', 'ok', 'op')`);
-    const b = elFor('fatalBanner');
-    assert(b.className.includes('ok'), `成功横幅缺少 ok 类：${b.className}`);
+    b = elFor('toastStack').querySelector('.toast');
+    assert(b.className.includes('ok'), `成功提示缺少 ok 类：${b.className}`);
     assert(!b.className.includes('warn'), `切换后残留 warn 类：${b.className}`);
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 1, '同类新提示应覆盖旧提示');
     run(`showBanner('x 警告', 'warn', 'op')`);
-    assert(!elFor('fatalBanner').className.includes('ok'), '切到警告后应清掉 ok 类');
+    b = elFor('toastStack').querySelector('.toast');
+    assert(!b.className.includes('ok'), '切到警告后应清掉 ok 类');
     run(`hideBanner()`);
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 0, 'hideBanner 应移除当前类提示');
   });
 
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
@@ -768,11 +799,11 @@ try {
     await run('loadStatus()');
   });
 
-  await check('loadSources 成功加载时清除残留横幅', async () => {
+  await check('loadSources 成功加载时清除残留提示', async () => {
     run(`showBanner('残留横幅')`);
-    assert.equal(run(`$('#fatalBanner').hidden`), false, '前置横幅应可见');
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 1, '前置提示应可见');
     await run('loadSources()');
-    assert.equal(run(`$('#fatalBanner').hidden`), true, '成功加载后横幅应隐藏');
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 0, '成功加载后提示应清除');
   });
 
   await check('403 后各轮询入口均不再发请求', async () => {

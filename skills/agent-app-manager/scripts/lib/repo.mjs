@@ -28,6 +28,16 @@ async function readGitdirPointer(dotGit) {
   } catch { return null; }
 }
 
+// 读 git HEAD 取当前分支：`ref: refs/heads/<name>` → 分支名；
+// detached / 不可读 / 空指针一律 null（UI 不显示，不猜测）。
+async function readBranch(headDir) {
+  try {
+    const text = await fs.readFile(path.join(headDir, 'HEAD'), 'utf8');
+    const m = /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(text);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
 // 路径比较键：统一分隔符、去尾斜杠，Windows 盘符/UNC 路径大小写不敏感。
 function normalizeKey(p) {
   const raw = String(p ?? '').trim();
@@ -56,10 +66,11 @@ async function loadPaseoWorktrees(file) {
       if (!wt || !main) continue;
       // 同一 worktreeRoot 可能有多条历史记录：以 updatedAt 最新的一条为准。
       const at = Date.parse(row.updatedAt ?? '') || 0;
+      const branch = typeof row.branch === 'string' && row.branch.trim() ? row.branch.trim() : null;
       const prev = map.get(wt);
-      if (!prev || at >= prev.at) map.set(wt, { root: path.resolve(main), at });
+      if (!prev || at >= prev.at) map.set(wt, { root: path.resolve(main), branch, at });
     }
-    const value = new Map([...map].map(([k, v]) => [k, v.root]));
+    const value = new Map([...map].map(([k, v]) => [k, { root: v.root, branch: v.branch }]));
     paseoCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, map: value });
     return value;
   } catch { return null; }
@@ -76,15 +87,16 @@ function matchPaseoWorktree(root, map) {
     if (key !== wt && !key.startsWith(wt + '/')) continue;
     if (!best || wt.length > best.wt.length) best = { wt, main };
   }
-  return best ? { root: best.main, worktree: true } : null;
+  return best ? { root: best.main.root, worktree: true, branch: best.main.branch ?? null } : null;
 }
 
 /**
- * 解析 root 所属的 git 主仓库。
+ * 解析 root 所属的 git 主仓库与当前分支。
  * @param {string} root 应用登记的真实工作目录
  * @param {{paseoFile?: string}} [options] 测试/特殊部署可覆盖 Paseo 工作区记录路径
- * @returns {Promise<{root: string, worktree: boolean} | null>}
+ * @returns {Promise<{root: string, worktree: boolean, branch: string|null} | null>}
  *   普通仓库根返回自身；worktree 返回主仓库路径且 worktree=true；
+ *   branch 为当前检出分支（detached/不可读为 null）；
  *   submodule 等其它 gitdir 指针继续向上找超级仓库；找不到返回 null。
  */
 export async function resolveRepoRoot(root, { paseoFile = PASEO_WORKSPACES_FILE } = {}) {
@@ -94,11 +106,11 @@ export async function resolveRepoRoot(root, { paseoFile = PASEO_WORKSPACES_FILE 
   for (let depth = 0; depth <= MAX_DEPTH; depth++) {
     const dotGit = path.join(dir, '.git');
     const st = await statOrNull(dotGit);
-    if (st?.isDirectory()) return { root: dir, worktree: false };
+    if (st?.isDirectory()) return { root: dir, worktree: false, branch: await readBranch(dotGit) };
     if (st?.isFile()) {
       const gitdir = await readGitdirPointer(dotGit);
       const m = gitdir ? WORKTREE_GITDIR_RE.exec(gitdir) : null;
-      if (m) return { root: path.resolve(m[1]), worktree: true };
+      if (m) return { root: path.resolve(m[1]), worktree: true, branch: await readBranch(gitdir) };
       // 读不出指针或非 worktree（submodule / 稀疏检出等）：继续向上，找到的
       // 超级仓库才是归档单位；逐级向上自然终止于盘符根或仓库自身。
     }

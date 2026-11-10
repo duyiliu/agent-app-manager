@@ -404,23 +404,27 @@ async function api(path, signal, method = 'GET', body = undefined) {
 // 否则会落到默认红——红是危险态，不能用来表示操作成功。
 let bannerKind = 'data';
 let bannerFadeTimer = null;
+// 提示改为右上角浮层 toast：不占布局、不挤压页面。同类（kind）新提示覆盖旧的，
+// 与原单横幅语义一致；ok 级 12s 自动淡出，其余驻留到手动关闭或被覆盖。
 function showBanner(text, level = 'error', kind = 'data') {
-  const b = $('#fatalBanner');
-  b.hidden = false;
-  b.classList.remove('warn', 'ok');
-  if (level !== 'error') b.classList.add(level);
+  const stack = $('#toastStack');
+  for (const t of [...stack.querySelectorAll('.toast')]) if (t.dataset.kind === kind) t.remove();
+  const toast = el('div', 'toast' + (level !== 'error' ? ' ' + level : ''));
+  toast.dataset.kind = kind;
   bannerKind = kind;
-  const close = el('button', 'banner-close', null, 'close');
+  const close = el('button', 'toast-close', null, 'close');
   close.type = 'button';
   close.title = '关闭提示';
   close.setAttribute('aria-label', '关闭提示');
-  close.addEventListener('click', hideBanner);
-  b.replaceChildren(el('span', null, text), close);
+  close.addEventListener('click', () => toast.remove());
+  toast.append(el('span', null, text), close);
+  stack.appendChild(toast);
   if (bannerFadeTimer) { clearTimeout(bannerFadeTimer); bannerFadeTimer = null; }
-  if (level === 'ok') bannerFadeTimer = setTimeout(hideBanner, 12000);
+  if (level === 'ok') bannerFadeTimer = setTimeout(() => { toast.remove(); }, 12000);
 }
 function hideBanner() {
-  $('#fatalBanner').hidden = true;
+  const t = [...$('#toastStack').querySelectorAll('.toast')].find(x => x.dataset.kind === bannerKind);
+  t?.remove();
   if (bannerFadeTimer) { clearTimeout(bannerFadeTimer); bannerFadeTimer = null; }
 }
 function conn(text, bad = false) { const c = $('#connState'); c.textContent = text; c.classList.toggle('bad', bad); }
@@ -444,25 +448,29 @@ function notifyExit(runId, status, note) {
   notifiedRuns.add(dedupKey);
   try { sessionStorage.setItem('pr-ui-notified-runs', JSON.stringify([...notifiedRuns])); } catch {}
   startTitleFlash(`${status} · ${runId}`);
-  const banner = $('#exitBanner');
-  banner.hidden = false;
-  // #165：横幅驻留 + 显式关闭；#168：通知授权入口挪到横幅按钮（用户手势上下文内申请）。
+  // #165：提示驻留 + 显式关闭；#168：通知授权入口在提示按钮（用户手势上下文内申请）。
+  // 退出提醒走 toast 浮层（kind='exit'），与数据/操作提示同一栈，新提醒覆盖旧的。
+  const stack = $('#toastStack');
+  for (const t of [...stack.querySelectorAll('.toast')]) if (t.dataset.kind === 'exit') t.remove();
+  const toast = el('div', 'toast warn');
+  toast.dataset.kind = 'exit';
   const msg = el('span', null, `批次 ${runId} 状态变化：${status}${note ? ` · ${note}` : ''}`);
-  const btns = el('span', 'banner-actions');
+  const btns = el('span', 'toast-actions');
   if ('Notification' in window && Notification.permission === 'default') {
-    const ask = el('button', 'banner-btn', '开启通知');
+    const ask = el('button', 'toast-btn', '开启通知');
     ask.type = 'button';
     ask.title = '授权后运行状态变化同时推送系统通知（标签页切走时仍可见）';
     ask.addEventListener('click', async () => { try { await Notification.requestPermission(); } catch {} ask.remove(); });
     btns.appendChild(ask);
   }
-  const close = el('button', 'banner-close', null, 'close');
+  const close = el('button', 'toast-close', null, 'close');
   close.type = 'button';
   close.title = '关闭';
   close.setAttribute('aria-label', '关闭退出提醒');
-  close.addEventListener('click', () => { banner.hidden = true; });
+  close.addEventListener('click', () => toast.remove());
   btns.appendChild(close);
-  banner.replaceChildren(msg, btns);
+  toast.append(msg, btns);
+  stack.appendChild(toast);
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       const n = new Notification(`agent-app-manager · ${status}`, { body: `${runId}${note ? ` · ${note}` : ''}` });
@@ -607,16 +615,164 @@ function reconcileChildren(parent, children) {
   for (const child of [...parent.children]) if (!keep.has(child)) child.remove();
   children.forEach((child, i) => { if (parent.children[i] !== child) parent.insertBefore(child, parent.children[i] ?? null); });
 }
+
+// ---------- 列表视图偏好 ----------
+// pin/排序/过滤/列项/未读全是「视图状态」：写 localStorage 即可，不落 registry，
+// 也不随备份导出。展开限量组是会话内状态，不写存储（刷新回到限量视图）。
+let appSort = 'status';           // status | name | activity
+let statusFilter = 'all';         // all | active | attention | stopped
+const pinnedAliases = new Set();  // 置顶别名：任何排序下都排最前（按 alias 记，与选中同一引用粒度）
+const unreadAliases = new Set();  // 批次异常结束后的未读标记，选中即清除
+const expandedGroupLimits = new Set();
+let metaItems = { branch: true, exit: true, tags: true, ago: true };
+try {
+  const savedSort = localStorage.getItem('pr-ui-app-sort');
+  if (['status', 'name', 'activity'].includes(savedSort)) appSort = savedSort;
+  const savedFilter = localStorage.getItem('pr-ui-status-filter');
+  if (['all', 'active', 'attention', 'stopped'].includes(savedFilter)) statusFilter = savedFilter;
+  for (const k of JSON.parse(localStorage.getItem('pr-ui-pinned') || '[]')) if (typeof k === 'string') pinnedAliases.add(k);
+  for (const k of JSON.parse(localStorage.getItem('pr-ui-unread') || '[]')) if (typeof k === 'string') unreadAliases.add(k);
+  const savedMeta = JSON.parse(localStorage.getItem('pr-ui-meta-items') || 'null');
+  if (savedMeta && typeof savedMeta === 'object' && !Array.isArray(savedMeta)) {
+    for (const k of Object.keys(metaItems)) if (typeof savedMeta[k] === 'boolean') metaItems[k] = savedMeta[k];
+  }
+} catch { /* 存储不可用时使用默认值。 */ }
+function saveListPrefs() {
+  try {
+    localStorage.setItem('pr-ui-app-sort', appSort);
+    localStorage.setItem('pr-ui-status-filter', statusFilter);
+    localStorage.setItem('pr-ui-pinned', JSON.stringify([...pinnedAliases]));
+    localStorage.setItem('pr-ui-unread', JSON.stringify([...unreadAliases]));
+    localStorage.setItem('pr-ui-meta-items', JSON.stringify(metaItems));
+  } catch { /* 保留本次页面内的选择。 */ }
+}
+// 「需关注」：状态异常（BACKOFF/UNKNOWN/DEAD）、登记目录缺失、就绪未命中、
+// 上次退出非零、资源告警——与退出提醒同口径，一个 chip 把所有要看的行筛出来。
+const ALERT_STATUSES = new Set(['BACKOFF', 'UNKNOWN', 'DEAD']);
+// exit.source === 'manager-stop'：管理台/CLI 主动停止，是意图不是异常。
+function exitNeedsAttention(exit) { return !!exit && !exitOk(exit) && exit.source !== 'manager-stop'; }
+function attentionOf(a) {
+  // 非受管登记 status 恒为 UNKNOWN（不核验外部进程存活），属常态而非异常；
+  // 但目录缺失/退出异常/健康未就绪/资源告警仍可判定，保留检查。
+  if (a.managed !== false && ALERT_STATUSES.has(a.status)) return true;
+  if (a.dirExists === false) return true;
+  if (exitNeedsAttention(a.exit)) return true;
+  if (healthByAlias.get(a.appId)?.state === 'NOT_READY') return true;
+  return resWarnOf(a) != null;
+}
+function statusFilterMatch(a) {
+  if (statusFilter === 'active') return a.status === 'RUNNING' || a.status === 'STARTING';
+  if (statusFilter === 'attention') return attentionOf(a);
+  if (statusFilter === 'stopped') return a.status === 'STOPPED' || a.status === 'DEAD';
+  return true;
+}
+// 最近活动：当前批次的时间锚点。排序与行尾相对时间共用同一取值。
+function activityTs(a) { return a.endedAt ?? a.startedAt ?? a.intentAt ?? null; }
+const STATUS_RANK = { RUNNING: 0, STARTING: 1, BACKOFF: 2, UNKNOWN: 3, DEAD: 4, STOPPED: 5 };
+function compareApps(x, y) {
+  if (appSort === 'name') return String(x.alias).localeCompare(String(y.alias));
+  if (appSort === 'activity') {
+    const tx = activityTs(x) ?? '', ty = activityTs(y) ?? '';
+    if (tx !== ty) return tx < ty ? 1 : -1; // 新活动在前；无时间锚点沉底
+    return String(x.alias).localeCompare(String(y.alias));
+  }
+  return (STATUS_RANK[x.status] ?? 4) - (STATUS_RANK[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias));
+}
+// 行尾相对时间：按状态取当前批次的时间锚点，轮询重绘即刷新。
+function agoLabel(a) {
+  const ts = {
+    RUNNING: a.startedAt ?? a.intentAt,
+    STARTING: a.startedAt ?? a.intentAt,
+    BACKOFF: a.endedAt ?? a.startedAt,
+    STOPPED: a.endedAt,
+    DEAD: a.endedAt,
+    UNKNOWN: a.endedAt ?? a.startedAt,
+  }[a.status];
+  const ms = ts ? Date.now() - new Date(ts).getTime() : NaN;
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const name = { RUNNING: '运行', STARTING: '启动', BACKOFF: '退避', STOPPED: '已停', DEAD: '终止', UNKNOWN: '失联' }[a.status] ?? '';
+  const ago = ms < 60000 ? `${Math.floor(ms / 1000)}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m` : ms < 86400000 ? `${Math.floor(ms / 3600000)}h` : `${Math.floor(ms / 86400000)}d`;
+  return { text: `${name} ${ago}`, title: `${name}：${fmtTime(ts)}` };
+}
+function markUnread(alias) {
+  if (!alias || alias === selected || unreadAliases.has(alias)) return;
+  unreadAliases.add(alias);
+  saveListPrefs();
+}
+
+// ---------- 卡片右键菜单 ----------
+// 元素向上包含判断（DOM 桩没有 Node.contains，统一走 parentNode 链）。
+function inside(el, node) { for (let n = node; n; n = n.parentNode) if (n === el) return true; return false; }
+let ctxMenu = null;
+function closeCardMenu() { ctxMenu?.remove(); ctxMenu = null; }
+function openCardMenu(a, x, y) {
+  closeCardMenu();
+  const menu = el('div', 'ctx-menu');
+  menu.setAttribute('role', 'menu');
+  const add = (label, fn, { disabled = false, danger = false, icon = null } = {}) => {
+    const b = el('button', 'ctx-item' + (danger ? ' danger' : ''), label, icon);
+    b.type = 'button';
+    b.disabled = disabled;
+    b.addEventListener('click', () => { closeCardMenu(); fn(); });
+    menu.appendChild(b);
+    return b;
+  };
+  // 复制项不关菜单：原地回显「已复制 ✓」，与 copyButton 的反馈方式一致。
+  const copyItem = (label, text) => {
+    const b = el('button', 'ctx-item', label, 'copy');
+    b.type = 'button';
+    b.disabled = !text;
+    b.addEventListener('click', async () => {
+      const ok = await copyText(text);
+      b.textContent = ok ? '已复制 ✓' : '复制失败';
+      if (ok) setTimeout(closeCardMenu, 450);
+    });
+    menu.appendChild(b);
+  };
+  const sep = () => menu.appendChild(el('div', 'ctx-sep'));
+  copyItem('复制别名', a.alias);
+  copyItem('复制 appId', a.appId);
+  if (a.root) copyItem('复制工作目录', a.root);
+  if (a.branch) copyItem('复制分支名', a.branch);
+  const port = actualPortsOf(a)[0] ?? (a.status === 'RUNNING' ? a.expectedPort : null);
+  if (port != null) {
+    const url = `${portScheme(port, healthByAlias.get(a.appId))}://127.0.0.1:${port}/`;
+    copyItem(`复制端口地址 :${port}`, url);
+    add(`打开端口 :${port}`, () => { window.open?.(url, '_blank', 'noopener,noreferrer'); }, { icon: 'external' });
+  }
+  sep();
+  add(pinnedAliases.has(a.alias) ? '取消置顶' : '置顶', () => {
+    if (pinnedAliases.has(a.alias)) pinnedAliases.delete(a.alias); else pinnedAliases.add(a.alias);
+    saveListPrefs();
+    renderApps();
+  }, { icon: 'pin' });
+  sep();
+  add('移除登记', () => {
+    actionDialog(`确认移除 ${a.alias}`, `将从注册表移除 ${a.alias} 的登记（须无存活实例，历史证据保留；同 CLI remove）。`, () => doLifecycle(a.alias, 'remove'), '确认移除');
+  }, { disabled: !['STOPPED', 'DEAD'].includes(a.status), danger: true, icon: 'remove' });
+  document.body.appendChild(menu);
+  ctxMenu = menu;
+  // 视口夹取：贴右/下边沿弹出时翻回光标另一侧；菜单尺寸未布局时跳过修正。
+  const w = menu.offsetWidth ?? 0, h = menu.offsetHeight ?? 0;
+  const vw = window.innerWidth ?? 1e9, vh = window.innerHeight ?? 1e9;
+  menu.style.left = Math.max(4, Math.min(x, vw - w - 4)) + 'px';
+  menu.style.top = Math.max(4, Math.min(y, vh - h - 4)) + 'px';
+}
+
 function renderApps() {
   // 未选中应用时收起整块日志区（含工具栏），避免右侧同时出现两个空状态
   document.body.classList.toggle('no-selection', !selected);
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
-  const rank = { RUNNING: 0, STARTING: 1, BACKOFF: 2, UNKNOWN: 3, DEAD: 4, STOPPED: 5 };
+  // 资源告警先于过滤计算：「需关注」口径包含它，不能只在卡片循环里采。
+  for (const a of appsCache) trackCpuStreak(a);
   const filtered = appsCache
+    .filter(statusFilterMatch)
     .filter(a => !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.repoRoot, a.status, a.expectedPort, healthByAlias.get(a.appId)?.state, ...(a.tags ?? []), ...actualPortsOf(a)].some(v => String(v ?? '').toLowerCase().includes(q)))
-    .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
-  $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
+    // 置顶是独立一层：任何排序/分组下 pin 住的卡片都排在最前（组内同理）。
+    .sort((x, y) => Number(pinnedAliases.has(y.alias)) - Number(pinnedAliases.has(x.alias)) || compareApps(x, y));
+  const filtering = !!q || statusFilter !== 'all';
+  $('#appCount').textContent = filtering ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
   const directoryCount = new Set(filtered.map(a => appGroupInfo(a).key)).size;
   $('#directoryCount').textContent = `${directoryCount} 组`;
   $('#directoryCount').hidden = appView === 'flat';
@@ -638,6 +794,7 @@ function renderApps() {
     existing.delete(a.appId);
     card.className = 'app-card' + (a.alias === selected ? ' selected' : '');
     card.dataset.appId = a.appId;
+    card.hidden = false; // 组限高用 hidden 标记，视图切换/过滤变化后统一复位
     card.replaceChildren();
     card.setAttribute('role', 'button');
     card.tabIndex = 0;
@@ -664,7 +821,6 @@ function renderApps() {
     // 幽灵目录：登记 root 已不存在（目录删除/盘符不在），分组按记忆路径展示但如实标注。
     if (a.dirExists === false) head.appendChild(el('span', 'pill ghost', '目录不存在'));
     // 资源告警：内存超阈值或 CPU 连续高位。
-    trackCpuStreak(a);
     const resWarn = resWarnOf(a);
     if (resWarn) {
       const dot = el('span', 'res-warn');
@@ -673,39 +829,81 @@ function renderApps() {
       dot.setAttribute('aria-label', resWarn); // 色块是唯一视觉信号：读出告警原因（#167）
       head.appendChild(dot);
     }
-    card.appendChild(head);
-    const meta = el('div', 'app-meta');
-    meta.appendChild(el('span', 'm-mode', a.mode ?? '?'));
-    const actualPorts = actualPortsOf(a);
-    const shownPorts = actualPorts.length ? actualPorts : (a.expectedPort != null ? [a.expectedPort] : []);
-    if (shownPorts.length) {
-      // 端口固定占 meta 第二列：不同卡片端口号对齐，且不被 mode/tags/pid 挤掉。
-      const ports = el('span', 'm-ports');
-      if (a.status === 'RUNNING') {
-        for (const port of shownPorts) {
-          const title = actualPorts.length && a.expectedPort != null && a.expectedPort !== port
-            ? `实际监听端口 ${port}（配置 expectedPort=${a.expectedPort}）`
-            : '新标签页打开该应用端口';
-          const portInfo = el('span', 'app-port');
-          // 端口文字本身即链接：去掉右侧小图标，省下列表横向空间。
-          const link = portAnchor(port, title, portScheme(port, health));
-          link.setAttribute('aria-label', `在新标签页打开端口 ${port}`);
-          portInfo.appendChild(link);
-          ports.appendChild(portInfo);
-        }
-      } else ports.appendChild(el('span', 'app-port', ':' + (a.expectedPort ?? shownPorts[0])));
-      meta.appendChild(ports);
+    // 未读点：批次异常结束后的标记（applyAppsData 记，selectApp 清）。
+    if (unreadAliases.has(a.alias)) {
+      const dot = el('span', 'unread-dot');
+      dot.title = '有未查看的状态变化，点击查看详情';
+      head.appendChild(dot);
     }
-    if (a.pid != null) meta.appendChild(el('span', 'm-pid', 'pid ' + a.pid));
-    if (a.exit) meta.appendChild(el('span', 'm-exit v ' + exitClass(a.exit), exitLabel(a.exit)));
-    // 内存不再进列表（窄侧栏里只能显示成“内存 143.”）；详情卡仍展示 RSS。
-    if (a.tags?.length) meta.appendChild(el('span', 'm-tags', a.tags.map(t => '#' + t).join(' ')));
+    if (pinnedAliases.has(a.alias)) {
+      const pin = el('span', 'pin-ic', null, 'pin');
+      pin.title = '已置顶';
+      head.appendChild(pin);
+    }
+    // 头部右槽打包成 tail：ago 可关时 kebab 仍钉在最右，不会漂到中间。
+    const tail = el('div', 'head-tail');
+    // 行尾相对时间常驻右槽（「列」菜单可关）：与 Paseo 行尾槽同一手法，单信息源。
+    if (metaItems.ago) {
+      const ago = agoLabel(a);
+      if (ago) {
+        const s = el('span', 'm-ago', ago.text);
+        s.title = ago.title;
+        tail.appendChild(s);
+      }
+    }
+    // 运行中且有端口：行尾常驻「打开」图标，一键直达服务页，不用展开详情或菜单。
+    const listPort = actualPortsOf(a)[0] ?? (a.status === 'RUNNING' ? a.expectedPort : null);
+    if (a.status === 'RUNNING' && listPort != null) {
+      const open = el('a', 'card-open', null, 'external');
+      open.href = `${portScheme(listPort, health)}://127.0.0.1:${listPort}/`;
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      open.title = `新标签页打开 :${listPort}`;
+      open.setAttribute('aria-label', `新标签页打开 ${a.alias} 服务`);
+      open.addEventListener('click', (e) => e.stopPropagation());
+      tail.appendChild(open);
+    }
+    // hover kebab：右键菜单的可发现入口，同一份 openCardMenu。
+    const kebab = el('button', 'card-kebab', '⋯');
+    kebab.type = 'button';
+    kebab.title = '操作菜单（同卡片右键）';
+    kebab.setAttribute('aria-label', `${a.alias} 操作菜单`);
+    kebab.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = kebab.getBoundingClientRect?.() ?? { left: 0, bottom: 0 };
+      openCardMenu(a, r.left ?? 0, (r.bottom ?? 0) + 4);
+    });
+    tail.appendChild(kebab);
+    head.appendChild(tail);
+    card.appendChild(head);
+    // 列表卡片只放状态相关信息：分支/退出码/标签/错误（「列」菜单可分别关）。
+    // pid、端口、mode 这类标识信息详情卡与右键菜单都有，不进列表。
+    const meta = el('div', 'app-meta');
+    if (a.branch && metaItems.branch) {
+      const br = el('span', 'm-branch', a.branch, 'branch');
+      br.title = `git 分支：${a.branch}`;
+      meta.appendChild(br);
+    }
+    // 退出码染色分意图：manager-stop（主动停止）用默认色不标红——不是异常。
+    if (a.exit && metaItems.exit) {
+      const ex = el('span', 'm-exit v ' + (a.exit.source === 'manager-stop' ? '' : exitClass(a.exit)), exitLabel(a.exit));
+      if (a.exit.source === 'manager-stop') ex.title = '由管理台/CLI 主动停止';
+      meta.appendChild(ex);
+    }
+    if (a.tags?.length && metaItems.tags) meta.appendChild(el('span', 'm-tags', a.tags.map(t => '#' + t).join(' ')));
     if (a.error) meta.appendChild(el('span', 'm-err v bad', a.error));
-    card.appendChild(meta);
+    if (meta.children.length) card.appendChild(meta);
     card.title = a.error ? `${a.alias}：${a.error}` : [a.alias, a.displayName !== a.alias ? a.displayName : null, a.appId, health ? health.state : null].filter(Boolean).join(' · ');
     if (a.root) card.title += `\n工作目录：${a.root}`;
     card.onclick = () => selectApp(a.alias);
-    card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectApp(a.alias); } };
+    // Enter/Space 只对卡片本体生效：kebab、端口链接等内部交互元素有自己的键行为。
+    card.onkeydown = (e) => { if (e.target === card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); selectApp(a.alias); } };
+    card.oncontextmenu = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      // 键盘菜单键（Menu/Shift+F10）触发的 contextmenu 坐标为 (0,0)：回退到卡片位置。
+      const r = card.getBoundingClientRect?.() ?? {};
+      openCardMenu(a, e.clientX || ((r.left ?? 0) + 8), e.clientY || ((r.top ?? 0) + 8));
+    };
     ordered.push(card);
   }
   for (const stale of existing.values()) stale.remove();
@@ -743,6 +941,17 @@ function renderApps() {
           saveDirectoryView();
           renderApps();
         });
+        // 「还有 N 项」放在 body 内：随整组折叠一起隐藏，reconcile 时作末位子元素传入。
+        const more = el('button', 'group-more');
+        more.type = 'button';
+        more.hidden = true;
+        more.addEventListener('click', () => {
+          const key = more.dataset.key;
+          if (expandedGroupLimits.has(key)) expandedGroupLimits.delete(key);
+          else expandedGroupLimits.add(key);
+          renderApps();
+        });
+        body.appendChild(more);
         group.append(toggle, path, body);
       }
       const toggle = group.querySelector('.directory-toggle');
@@ -769,7 +978,25 @@ function renderApps() {
       toggle.disabled = !!q;
       const body = group.querySelector('.directory-apps');
       body.hidden = !expanded;
-      reconcileChildren(body, g.cards);
+      const more = body.querySelector('.group-more');
+      // 组限高：默认只画前 7 张，非 STOPPED 的活跃项与选中项不受限（同 Paseo 组可见性
+      // 策略：真正要盯的行永远在场，折叠的只有沉寂项）。超额卡片用 hidden 隐藏而非移除。
+      const LIMIT = 7;
+      const over = g.cards.length - LIMIT;
+      const unlimit = !!q || expandedGroupLimits.has(g.key);
+      let hiddenN = 0;
+      g.cards.forEach((c, i) => {
+        const app = g.apps[i];
+        c.hidden = !(unlimit || over <= 0 || i < LIMIT || app.status !== 'STOPPED' || app.alias === selected);
+        if (c.hidden) hiddenN++;
+      });
+      more.dataset.key = g.key;
+      // hiddenN=0 说明超额项全是活跃项（已豁免显示），按钮无意义不渲染；
+      // 展开态仍显示「收起」，因为点它能重新收起 over 个沉寂项。
+      const moreExpanded = expandedGroupLimits.has(g.key);
+      more.hidden = over <= 0 || !!q || (!moreExpanded && hiddenN === 0);
+      more.textContent = moreExpanded ? `收起多出的 ${over} 项` : `还有 ${hiddenN} 项 · 点击展开`;
+      reconcileChildren(body, [...g.cards, more]);
       return group;
     });
     reconcileChildren(list, sections);
@@ -820,12 +1047,15 @@ async function applyAppsData(d) {
       const old = previousStatuses.get(a.alias);
       const runId = a.lastRunId ?? null;
       if (old?.status === 'RUNNING' && ['STOPPED', 'UNKNOWN'].includes(a.status) && old.runId === runId) {
+        // 主动停止不算未读：用户自己（或 CLI）发起的动作不需要事后回看提醒
+        if (a.exit?.source !== 'manager-stop') markUnread(a.alias);
         try {
           const detail = await api('/api/status?app=' + encodeURIComponent(a.alias));
           notifyExit(runId, a.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || a.error || '退出说明不可用');
         } catch { notifyExit(runId, a.status, a.error || '退出说明不可用'); }
       } else if (old && old.status !== a.status && ['BACKOFF', 'DEAD'].includes(a.status)) {
         // #141：监督重启进入退避/死亡态主动提醒（同 runId 下与退出提醒按状态分别去重）
+        markUnread(a.alias);
         try {
           const detail = await api('/api/status?app=' + encodeURIComponent(a.alias));
           notifyExit(runId, a.status, detail.run?.lastError || detail.run?.exitNote || detail.note || (a.status === 'BACKOFF' ? '崩溃后将自动重试' : '重启预算已耗尽，需人工介入'));
@@ -838,6 +1068,9 @@ async function applyAppsData(d) {
     // 注册表里已消失的应用：清掉详情缓存，避免切回时渲染已经不存在的应用。
     const liveAliases = new Set(appsCache.map(a => a.alias));
     for (const k of [...detailCache.keys()]) if (!liveAliases.has(k)) detailCache.delete(k);
+    // 置顶/未读按别名记忆：应用被移除登记后同步清理，防止残留永远不消的点。
+    for (const al of [...unreadAliases]) if (!liveAliases.has(al)) unreadAliases.delete(al);
+    for (const al of [...pinnedAliases]) if (!liveAliases.has(al)) pinnedAliases.delete(al);
     if (selected && !appsCache.some(a => a.alias === selected)) {
       selected = null;
       detailPending = false;
@@ -1082,7 +1315,19 @@ function renderDetail(d) {
   currentDetail = d;
   const directoryContext = $('#directoryContext');
   const root = d?.root ?? '';
-  directoryContext.hidden = !root;
+  // 服务地址：RUNNING 且有端口时在上下文条常驻完整 URL，点即打开；比塞在操作栏右端更显眼。
+  const svcPort = d?.status === 'RUNNING' ? (actualPortsOf(d)[0] ?? d.expectedPort ?? null) : null;
+  const svcUrl = svcPort != null ? `${portScheme(svcPort, d ? healthByAlias.get(d.appId) : null)}://127.0.0.1:${svcPort}/` : null;
+  const svcLink = $('#serviceUrl');
+  if (svcUrl) {
+    svcLink.href = svcUrl;
+    svcLink.textContent = svcUrl;
+    svcLink.title = `新标签页打开 ${svcUrl}`;
+  }
+  $('#servicePart').hidden = !svcUrl;
+  $('#serviceUrlStatus').textContent = '';
+  $('#dirPart').hidden = !root;
+  directoryContext.hidden = !root && !svcUrl;
   if (directoryContext.dataset.root !== root) {
     directoryContext.dataset.root = root;
     $('#directoryFullPath').hidden = true;
@@ -1135,19 +1380,6 @@ function renderDetail(d) {
       };
       const cur = d.run;
       const unresolved = !d.preview && cur && cur.managed !== false && !['RUNNING', 'STOPPED', 'BACKOFF', 'DEAD'].includes(cur.phase);
-      // 运行中且有端口时，标题栏直接给端口号超链：点端口即打开，不必再找按钮。
-      const openPort = actualPortsOf(d)[0] ?? d.expectedPort ?? null;
-      if (st === 'RUNNING' && openPort != null) {
-        const healthRow = healthByAlias.get(d.appId);
-        const open = el('a', 'op-btn port-open', ':' + openPort, 'external');
-        open.href = `${portScheme(openPort, healthRow)}://127.0.0.1:${openPort}/`;
-        open.target = '_blank';
-        open.rel = 'noopener';
-        open.title = `新标签页打开服务端口 ${openPort}`;
-        open.setAttribute('aria-label', `新标签页打开服务端口 ${openPort}`);
-        open.addEventListener('click', (e) => e.stopPropagation());
-        ops.appendChild(open);
-      }
       mk('启动', 'start', st !== 'RUNNING' && st !== 'STARTING' && !unresolved, '复用已保存配置启动（同 CLI start）');
       mk('重启', 'restart', ['RUNNING', 'BACKOFF', 'DEAD'].includes(st), '确认旧实例退出后启动新实例（同 CLI restart）');
       mk('停止', 'stop', st === 'RUNNING' || st === 'BACKOFF', '有界强制终止（默认不杀进程树；勾选「同时终止子进程」等同 --tree）；BACKOFF 时取消排程的重启（同 CLI stop）');
@@ -1319,6 +1551,8 @@ function renderDetail(d) {
   kvRow(moreGrid, '应用 ID', d.appId, 'dim');
   // 静态配置与低频诊断放一起：仓库/入口只在确认对象时看一次，不必常驻。
   kvRow(moreGrid, '工作目录', d.root, 'dim');
+  kvRow(moreGrid, 'git 分支', d.branch, 'dim');
+  kvRow(moreGrid, '主仓库', d.repoRoot, 'dim');
   kvRow(moreGrid, '入口', d.entry, 'dim');
   kvRow(moreGrid, 'tags', d.tags?.length ? d.tags.join(', ') : null, 'dim');
   kvRow(moreGrid, '依赖', d.dependsOn?.length ? d.dependsOn.join(', ') : null, 'dim');
@@ -1571,6 +1805,8 @@ async function loadHealth() {
 function selectApp(alias) {
   if (selected === alias) return;
   selected = alias;
+  // 点开即视为已读：未读点与浏览器通知是同一事件的两种呈现，阅后同步清除。
+  if (unreadAliases.delete(alias)) saveListPrefs();
   // URL 直达应用时展开所属目录，避免选中项藏在上次保存的折叠分组内。
   const target = appsCache.find(a => a.alias === alias);
   if (target && collapsedDirectories.delete(appGroupInfo(target).key)) saveDirectoryView();
@@ -2129,6 +2365,98 @@ $('#appView').addEventListener('change', () => {
   appView = $('#appView').value;
   saveDirectoryView();
   renderApps();
+});
+// ---------- 列表工具行：排序 / 状态过滤 / 列显示 ----------
+$('#appSort').value = appSort;
+$('#appSort').addEventListener('change', () => {
+  appSort = $('#appSort').value;
+  saveListPrefs();
+  renderApps();
+});
+function syncFilterChips() {
+  $('#filterChips').querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.filter === statusFilter));
+}
+syncFilterChips();
+$('#filterChips').addEventListener('click', (e) => {
+  const btn = e.target?.closest?.('.chip');
+  if (!btn?.dataset?.filter) return;
+  statusFilter = btn.dataset.filter;
+  saveListPrefs();
+  syncFilterChips();
+  renderApps();
+});
+// meta 列偏好：details 原生开合，change 只负责写回偏好并重绘。
+{
+  const META_ITEM_LABELS = { branch: '分支', exit: '退出码', tags: '标签', ago: '时间' };
+  const metaBody = $('#metaMenuBody');
+  for (const [key, label] of Object.entries(META_ITEM_LABELS)) {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = metaItems[key];
+    input.dataset.meta = key;
+    const lab = el('label');
+    lab.append(input, el('span', null, label));
+    metaBody.appendChild(lab);
+  }
+  metaBody.addEventListener('change', (e) => {
+    const key = e.target?.dataset?.meta;
+    if (!key || !(key in metaItems)) return;
+    metaItems[key] = !!e.target.checked;
+    saveListPrefs();
+    renderApps();
+  });
+}
+// 点外部关闭卡片右键菜单与列偏好面板；列表滚动也收菜单（菜单位置不再指向卡片）。
+document.addEventListener('mousedown', (e) => {
+  if (ctxMenu && !inside(ctxMenu, e.target)) closeCardMenu();
+  const mm = $('#metaMenu');
+  if (mm.open && !inside(mm, e.target)) mm.open = false;
+});
+$('#appList').addEventListener('scroll', closeCardMenu);
+// 键盘导航：j/k 或 ↑/↓ 移动列表焦点，Enter 选中，/ 或 Ctrl+K 聚焦搜索框；
+// 焦点在输入控件内时不拦截（避免抢占正常编辑键）。
+document.addEventListener('keydown', (e) => {
+  // 菜单开着时 Esc 收菜单并吞掉本次按键；其他键只收菜单不吞（保留 F5/功能键）。
+  if (ctxMenu) { closeCardMenu(); if (e.key === 'Escape') { e.preventDefault(); return; } }
+  const tag = e.target?.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+  if (e.key === '/' || ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'k')) {
+    e.preventDefault();
+    $('#appSearch').focus();
+    return;
+  }
+  const nav = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 }[e.key];
+  if (!nav && e.key !== 'Enter') return;
+  const list = $('#appList');
+  // 可见性沿父链查 hidden：折叠组 / 组限高隐藏的卡片不参与焦点环。
+  const isShown = (c) => { for (let n = c; n && n !== list; n = n.parentNode) if (n.hidden) return false; return true; };
+  const cards = [...list.querySelectorAll('.app-card')].filter(isShown);
+  if (!cards.length) return;
+  e.preventDefault();
+  if (e.key === 'Enter') {
+    document.querySelector('.app-card.kb-focus')?.click?.();
+    return;
+  }
+  const cur = cards.findIndex(c => c.classList.contains('kb-focus'));
+  const base = cur >= 0 ? cur : cards.findIndex(c => c.classList.contains('selected'));
+  const from = base < 0 ? (nav > 0 ? -1 : 0) : base;
+  const next = cards[Math.max(0, Math.min(cards.length - 1, from + nav))];
+  cards.forEach(c => c.classList.toggle('kb-focus', c === next));
+  next.scrollIntoView?.({ block: 'nearest' });
+});
+// 搜索框内 Esc：清空并交还焦点（列表全局快捷键此时被输入态拦截，需要自己的出口）。
+$('#appSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  e.target.value = '';
+  e.target.blur?.();
+  renderApps();
+});
+$('#copyServiceUrlBtn').addEventListener('click', async () => {
+  const url = $('#serviceUrl').href;
+  if (!url) return;
+  const ok = await copyText(url);
+  $('#serviceUrlStatus').textContent = ok ? '已复制地址' : '复制失败';
+  setTimeout(() => { $('#serviceUrlStatus').textContent = ''; }, 1600);
 });
 $('#copyDirectoryBtn').addEventListener('click', async () => {
   if (!currentDetail?.root) return;

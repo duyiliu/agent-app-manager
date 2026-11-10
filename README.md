@@ -183,7 +183,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 6. **启动 / 停止 / 重启 / 移除**：详情卡按钮与 CLI 同一实现和安全边界，所有生命周期操作都要在 10 秒内再次点击「确认…」才执行；`--tree` 与优雅退出毫秒数在详情卡内设置，只作用于 stop / restart。非受管应用仅允许移除 STOPPED 登记；`STARTING` / `UNKNOWN` 未结记录需人工核验进程已退出后，点「ack 并启动」并再次确认。
 7. **端口诊断与自检**：预期端口旁的「诊断」只读查询占用信息（同 `manager port`），不接管外部进程；顶部「诊断」执行 `manager doctor` 并原样展示结果，不自动修复。
-8. **工作目录分组**：顶栏「分组」可在「不分组 / 工作目录」间切换。工作目录视图按 **git 主仓库**聚合：普通仓库根、仓库内子目录、标准 `git worktree`（含 submodule）归并到主仓库一组，组头显示 `N 个 worktree`；没有 `.git` 元数据的目录（如某些 Agent 复制的 worktree）按登记路径各自成组。登记目录已删除的应用卡片标注「目录不存在」，组头提示 `N 个目录缺失`，仍按记忆路径展示以便核对登记。
+8. **工作目录分组**：顶栏「分组」可在「不分组 / 工作目录」间切换。工作目录视图按 **git 主仓库**聚合：普通仓库根、仓库内子目录、标准 `git worktree`（含 submodule）归并到主仓库一组，组头显示 `N 个 worktree`。没有 `.git` 元数据的目录会先查 Paseo 工作区登记（`~/.paseo/projects/workspaces.json` 中 `isPaseoOwnedWorktree` 的 worktree 记录）归并到其主仓库，仍无匹配的才按登记路径各自成组。登记目录已删除的应用卡片标注「目录不存在」，组头提示 `N 个目录缺失`，仍按记忆路径展示以便核对登记。应用卡片 meta 区与详情卡展示当前 **git 分支**（读 `.git/HEAD`，worktree 读各自 gitdir 的 HEAD，Paseo 记录用其 `branch` 字段）；detached HEAD 或不可读时不显示。
 
 原单项目 Viewer 已移除，能力并入本台。管理台地址仅本机可达，**不要转发**；日志与文件预览可能含敏感信息，外发前先检查。
 

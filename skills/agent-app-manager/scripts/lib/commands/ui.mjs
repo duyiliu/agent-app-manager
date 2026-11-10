@@ -156,7 +156,7 @@ async function listWithRepo(home) {
   // 并发解析：每个 root 最多几次 stat，不经过 pwsh，不阻塞事件循环。
   const enriched = await Promise.all(apps.map(async (app) => {
     const repo = await repoInfoOf(app.root);
-    const out = repo ? { ...app, repoRoot: repo.root, worktree: repo.worktree } : { ...app };
+    const out = repo ? { ...app, repoRoot: repo.root, worktree: repo.worktree, branch: repo.branch } : { ...app };
     // 目录可及性：登记目录已删除/盘符不在时标记 false，UI 据此提示「目录不存在」，
     // 避免把「解析不到 git 归属」误读为分组异常。只把 ENOENT 视为缺失，
     // 权限等其它 stat 失败不误报。
