@@ -31,12 +31,24 @@ w(path.join(home, 'logs', 'ahis', 'rold1.stdout.log'), 'rold1 stdout\n');
 w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 const root = fs.realpathSync(proj);
+// git 主仓库 + 一个 worktree：验证「工作目录」分组按主仓库聚合（#210 后续）。
+const gitRepo = path.join(base, 'git-main');
+const gitWt = path.join(base, 'git-wt');
+fs.mkdirSync(path.join(gitRepo, '.git', 'worktrees', 'wt'), { recursive: true });
+fs.mkdirSync(gitWt, { recursive: true });
+w(path.join(gitRepo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+w(path.join(gitWt, '.git'), `gitdir: ${path.join(gitRepo, '.git', 'worktrees', 'wt').replace(/\\/g, '/')}\n`);
+const wtRoot = fs.realpathSync(gitWt);
+// 幽灵目录：登记 root 指向不存在的目录（目录已删除/盘符不在），验证「目录不存在」标记。
+const ghostRoot = path.join(base, 'ghost-removed');
 
 w(path.join(home, 'registry.json'), JSON.stringify({
   schemaVersion: 1,
   apps: {
     ahis: { appId: 'ahis', alias: 'his', displayName: 'HIS', root, entry: 'default', cwd: root, mode: 'java', exe: process.execPath, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
     arep: { appId: 'arep', alias: 'report', displayName: '报表', root, entry: 'default', cwd: root, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
+    awt: { appId: 'awt', alias: 'wt', displayName: 'worktree 实例', root: wtRoot, entry: 'default', cwd: wtRoot, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
+    aghost: { appId: 'aghost', alias: 'ghost', displayName: '幽灵应用', root: ghostRoot, entry: 'default', cwd: ghostRoot, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
   },
 }));
 // current=rtest1（STOPPED 受管）+ prev rold1；restart(n) 把 current 换成新 runId 并补日志文件
@@ -76,11 +88,19 @@ class El {
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(''); }
   set textContent(v) { this._text = String(v ?? ''); this.children = []; }
-  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  appendChild(c) { this.detachFromParent(c); c.parentNode = this; this.children.push(c); return c; }
   append(...cs) { for (const c of cs) this.appendChild(typeof c === 'string' ? new El('#text').withText(c) : c); }
-  prepend(...cs) { for (const c of cs.reverse()) { const n = typeof c === 'string' ? new El('#text').withText(c) : c; n.parentNode = this; this.children.unshift(n); } }
+  prepend(...cs) { for (const c of cs.reverse()) { const n = typeof c === 'string' ? new El('#text').withText(c) : c; this.detachFromParent(n); n.parentNode = this; this.children.unshift(n); } }
   replaceChildren(...cs) { this.children = []; this.append(...cs); }
-  insertBefore(c, ref) { c.parentNode = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
+  // 真实 DOM 的 appendChild/insertBefore 会把节点从旧父节点移走；不复现这一点，
+  // 分组渲染（同一张卡片先挂列表再挂分组）会被测试桩误删。
+  detachFromParent(c) {
+    const p = c.parentNode;
+    if (!p || p === this) return;
+    const i = p.children.indexOf(c);
+    if (i >= 0) p.children.splice(i, 1);
+  }
+  insertBefore(c, ref) { this.detachFromParent(c); c.parentNode = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   remove() { const p = this.parentNode; if (p) { const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); } this.parentNode = null; }
   withText(t) { this._text = t; return this; }
   addEventListener(t, fn) { (this.handlers[t] ??= []).push(fn); }
@@ -227,6 +247,47 @@ try {
     assert.deepEqual(searchApps('报表'), ['arep']);
     assert.deepEqual(searchApps('arep'), ['arep']);
     elFor('appSearch').value = '';
+    run('renderApps()');
+  });
+
+  await check('工作目录分组按 git 主仓库聚合 worktree', async () => {
+    const apps = JSON.parse((await get('/api/apps')).body).data.apps;
+    const wt = apps.find((a) => a.alias === 'wt');
+    assert.equal(wt.repoRoot, fs.realpathSync(gitRepo), 'worktree 应返回主仓库路径');
+    assert.equal(wt.worktree, true, 'worktree 应带归属标记');
+    assert.equal(apps.find((a) => a.alias === 'his').repoRoot, undefined, '非 Git 目录不附加仓库归属');
+    run(`appView = 'directories'`);
+    run('renderApps()');
+    const groups = [...elFor('appList').querySelectorAll('.directory-group')];
+    const byName = new Map(groups.map((g) => [g.querySelector('.directory-name').textContent, g]));
+    assert.equal(groups.length, 3, `proj / 主仓库 / 幽灵目录应各成一组，实际：${[...byName.keys()].join(',')}`);
+    const repoGroup = byName.get('git-main');
+    assert(repoGroup, `缺少主仓库分组，实际：${[...byName.keys()].join(',')}`);
+    assert.deepEqual([...repoGroup.querySelector('.directory-apps').querySelectorAll('.app-card')].map((c) => c.dataset.appId), ['awt']);
+    assert.equal(repoGroup.querySelector('.directory-path').textContent, '1 个 worktree');
+    run(`appView = 'flat'`);
+    run('renderApps()');
+  });
+
+  await check('幽灵目录应用标记「目录不存在」', async () => {
+    const apps = JSON.parse((await get('/api/apps')).body).data.apps;
+    const ghost = apps.find((a) => a.alias === 'ghost');
+    assert.equal(ghost.dirExists, false, '已删除目录应标记 dirExists=false');
+    assert.equal(ghost.repoRoot, undefined, '幽灵目录不附加仓库归属');
+    assert.equal(apps.find((a) => a.alias === 'his').dirExists, true, '正常目录 dirExists=true');
+    run(`appView = 'directories'`);
+    run('renderApps()');
+    const groups = [...elFor('appList').querySelectorAll('.directory-group')];
+    const byName = new Map(groups.map((g) => [g.querySelector('.directory-name').textContent, g]));
+    const ghostGroup = byName.get('ghost-removed');
+    assert(ghostGroup, `缺少幽灵目录分组，实际：${[...byName.keys()].join(',')}`);
+    const ghostCard = [...ghostGroup.querySelector('.directory-apps').querySelectorAll('.app-card')].find((c) => c.dataset.appId === 'aghost');
+    assert(ghostCard, '幽灵应用卡片缺失');
+    const ghostPill = [...ghostCard.querySelectorAll('.pill')].find((p) => p.className.includes('ghost'));
+    assert(ghostPill, '幽灵卡片应有「目录不存在」标记');
+    assert.equal(ghostPill.textContent, '目录不存在');
+    assert.equal(ghostGroup.querySelector('.directory-path').textContent, '1 个目录缺失');
+    run(`appView = 'flat'`);
     run('renderApps()');
   });
 

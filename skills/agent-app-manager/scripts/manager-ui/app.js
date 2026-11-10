@@ -661,6 +661,8 @@ function renderApps() {
       }
     }
     if (a.managed === false) head.appendChild(el('span', 'pill unmanaged', '非受管'));
+    // 幽灵目录：登记 root 已不存在（目录删除/盘符不在），分组按记忆路径展示但如实标注。
+    if (a.dirExists === false) head.appendChild(el('span', 'pill ghost', '目录不存在'));
     // 资源告警：内存超阈值或 CPU 连续高位。
     trackCpuStreak(a);
     const resWarn = resWarnOf(a);
@@ -754,8 +756,10 @@ function renderApps() {
       const parentLabel = directoryParentLabel(g, directoryRoots);
       // worktree 数量只作归属提示：卡片别名已区分实例，这里解释为什么多个目录进了同一组。
       const worktreeCount = g.apps.filter(a => a.worktree === true).length;
+      // 幽灵目录同样在组头提示，避免「整组目录都不在了」时无从解释。
+      const ghostCount = g.apps.filter(a => a.dirExists === false).length;
       const pathLabel = group.querySelector('.directory-path');
-      pathLabel.textContent = [parentLabel, worktreeCount ? `${worktreeCount} 个 worktree` : ''].filter(Boolean).join(' · ');
+      pathLabel.textContent = [parentLabel, worktreeCount ? `${worktreeCount} 个 worktree` : '', ghostCount ? `${ghostCount} 个目录缺失` : ''].filter(Boolean).join(' · ');
       pathLabel.hidden = !pathLabel.textContent;
       pathLabel.title = g.path;
       pathLabel.setAttribute('aria-label', [parentLabel ? `父目录：${parentLabel}` : '', worktreeCount ? `含 ${worktreeCount} 个 worktree` : ''].filter(Boolean).join('，'));
