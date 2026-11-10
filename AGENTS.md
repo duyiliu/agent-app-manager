@@ -15,10 +15,15 @@
 Node.js **>= 20**。
 
 ```bash
-npm run build     # 全部 .mjs/.js/.cjs 的 node --check 语法校验 + 版本一致性校验
-npm test          # scripts/test-all.mjs 发现式执行 skills/*/scripts/test/ 下全部冒烟
-npm run check     # build + test，提交前跑这个
+npm run build     # 全部 .mjs/.js/.cjs 的 node --check 语法校验 + 版本一致性校验（每次改动后跑，秒级）
+node skills/agent-app-manager/scripts/test/<受影响>.mjs   # 只跑受影响冒烟：改动过程中的日常验证
+npm test          # scripts/test-all.mjs 发现式执行全部冒烟：串行 ≈11 分钟，-j 4 ≈6 分钟
+npm run check     # build + test（= 一次全量）：提交前统一跑，改动过程中不要随手跑
 ```
+
+验证节奏：**改动过程中**只跑 `build` + 受影响单测；**提交前**统一跑 `npm run check`。
+各冒烟相互隔离（独立临时 home、OS 分配端口），单测全过即可信——不要为"确认没
+破坏别处"中途跑全量。全量只在提交前、发版、每周巡检或用户明确要求时跑。
 
 `build` 除了语法校验还有一道**版本漂移闸**：`package.json` 的 `version` 必须与
 `skills/agent-app-manager/scripts/lib/constants.mjs` 里的 `MANAGER_VERSION` 完全相等，发版漏改任一处会直接 fail。

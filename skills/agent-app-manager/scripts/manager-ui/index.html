@@ -191,32 +191,46 @@ a.op-btn:hover { color:var(--accent-text); border-color:var(--line-strong); back
 .conn { flex:none; font:10.5px/1.4 var(--mono-font); color:var(--text-faint) }
 .conn.bad { color:var(--danger-text) }
 
-.banner {
-  flex:none;
+/* 提示浮层：右上角堆叠，不占布局、不挤压页面结构（取代原顶部横幅）。 */
+.toast-stack {
+  position:fixed;
+  z-index:70;
+  top:12px;
+  right:12px;
   display:flex;
-  align-items:center;
-  gap:10px;
-  padding:9px 14px;
+  flex-direction:column;
+  gap:8px;
+  width:min(420px, calc(100vw - 24px));
+  pointer-events:none}
+.toast {
+  pointer-events:auto;
+  display:flex;
+  align-items:flex-start;
+  gap:8px;
+  padding:9px 10px;
   font-size:12px;
   line-height:1.6;
   color:var(--danger-text);
-  background:var(--danger-soft);
-  border-bottom:1px solid rgba(255,92,92,.30);
-  overflow-wrap:anywhere}
-.banner > span:first-child { flex:1; min-width:0 }
-.banner.warn { color:var(--warn-text); background:var(--warn-soft); border-bottom-color:rgba(255,138,48,.30) }
+  background:var(--panel-2);
+  border:1px solid rgba(255,92,92,.45);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--shadow);
+  overflow-wrap:anywhere;
+  animation:toast-in .15s ease}
+.toast > span:first-child { flex:1; min-width:0 }
+.toast.warn { color:var(--warn-text); border-color:rgba(255,138,48,.5) }
 /* 操作成功用绿色：默认红是危险态，成功不能沿用（否则 stop 成功也显示红）。 */
-.banner.ok { color:var(--ok-text); background:var(--ok-soft); border-bottom-color:rgba(70,191,114,.30) }
-.banner.info { padding:5px 14px; color:var(--text-faint); background:var(--bg); border-bottom-color:var(--line-soft); font-size:11px }
-.banner-actions { flex:none; display:inline-flex; align-items:center; gap:6px }
-.banner-btn { height:22px; padding:0 8px; font-size:11px }
-.banner-close { flex:none; width:22px; height:22px; padding:0; font-size:11px }
+.toast.ok { color:var(--ok-text); border-color:rgba(70,191,114,.5) }
+.toast-actions { flex:none; display:inline-flex; align-items:center; gap:6px }
+.toast-btn { height:22px; padding:0 8px; font-size:11px }
+.toast-close { flex:none; width:22px; height:22px; padding:0; font-size:11px }
+@keyframes toast-in { from { opacity:0; transform:translateY(-6px) } }
 
 .layout {
   flex:1;
   min-height:0;
   display:grid;
-  grid-template-columns:var(--sidebar-width, 292px) minmax(0,1fr)}
+  grid-template-columns:var(--sidebar-width, 340px) minmax(0,1fr)}
  .layout > aside { position:relative; min-width:0 }
 .sidebar-resize { position:absolute; z-index:2; top:0; right:-4px; bottom:0; width:8px; cursor:col-resize; touch-action:none }
 .sidebar-resize:hover, .sidebar-resize:focus-visible { background:var(--line-strong); outline:none }
@@ -243,11 +257,6 @@ aside {
 .app-search input:focus { border-color:var(--line-strong) }
 .port-link { color:var(--accent); text-decoration:none }
 .port-link:hover { text-decoration:underline }
-/* 列表里的端口是主信息：保持灰色，悬停变亮即可点，不额外占图标位。 */
-.app-meta .port-link { color:inherit }
-.app-meta .port-link:hover { color:var(--text); text-decoration:underline }
-.app-port { display:inline-flex; align-items:center; gap:3px; flex:0 0 auto }
-.app-port > span { flex:0 0 auto }
 .app-card {
   display:block;
   width:100%;
@@ -277,23 +286,22 @@ aside {
   color:var(--text)}
 .app-meta {
   display:grid;
-  grid-template-columns:44px max-content max-content max-content max-content minmax(0,1fr);
+  grid-template-columns:max-content max-content minmax(0,max-content) minmax(0,1fr);
   align-items:center;
   gap:8px;
   margin-top:5px;
-  min-height:16px;
   font:10.5px/1.5 var(--mono-font);
   color:var(--text-faint);
   overflow:hidden;
   white-space:nowrap}
-/* 端口固定第二列：不同卡片的端口号对齐，且不被 mode/pid 挤掉；标签放最后，宽度不足时省略。 */
+/* 卡片 meta 只放状态相关信息（分支/退出码/标签/错误）；pid、端口、mode 这类
+   标识信息在详情卡与右键菜单里，不进列表。错误文案走末尾弹性列，宽度不足省略。 */
 .app-meta > * { min-width:0; overflow:hidden; text-overflow:ellipsis }
-.m-mode { grid-column:1 }
-.m-ports { grid-column:2; display:flex; align-items:center; gap:4px; overflow:visible }
-.m-pid { grid-column:3 }
-.m-exit { grid-column:4 }
-.m-tags { grid-column:5 }
-.m-err { grid-column:6 }
+.m-branch { grid-column:1; color:var(--text-dim); max-width:140px; display:inline-flex; align-items:center; gap:4px }
+.m-branch::before { flex:none; width:11px; height:11px }
+.m-exit { grid-column:2 }
+.m-tags { grid-column:3 }
+.m-err { grid-column:4 }
 .pill {
   flex:none;
   display:inline-flex;
@@ -321,6 +329,9 @@ aside {
 .pill.st-DEAD::before { background:var(--danger) }
 .pill.unmanaged { color:var(--text-dim); border-color:var(--line-strong); background:var(--surface) }
 .pill.unmanaged::before { display:none }
+/* 幽灵目录：登记 root 已不存在，danger 风格但去掉圆点，与「异常退出」等实心状态区分。 */
+.pill.ghost { color:var(--danger-text); border-color:rgba(255,92,92,.35); background:var(--danger-soft) }
+.pill.ghost::before { display:none }
 .pill.mode { color:var(--text-faint); font-weight:500 }
 .pill.mode::before { display:none }
 /* 预览态：详情卡先用列表/上次结果渲染，完整 status 仍在请求中，如实标注而非留空白占位。 */
@@ -585,6 +596,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .prev-row.history-pick.selected { border-left-color:var(--accent); background:var(--selected); }
 
 .log-panel {
+  position:relative;
   flex:1;
   min-height:170px;
   display:flex;
@@ -660,10 +672,18 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   padding:1px 16px 1px 13px;
   border-left:3px solid transparent;
   line-height:1.62;
-  cursor:pointer;
+  cursor:text;
   color:var(--text)}
 .line:hover { background:var(--surface) }
-.line.copied { background:var(--accent-soft) }
+.line.err { cursor:pointer }
+#log .line.selected { background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent) }
+#logToast {
+  position:absolute; left:50%; bottom:16px; transform:translate(-50%,6px);
+  max-width:min(520px,90%); padding:7px 14px; border-radius:999px;
+  background:var(--panel-3); border:1px solid var(--line-strong); color:var(--text);
+  font:11.5px var(--ui-font); box-shadow:var(--shadow);
+  opacity:0; pointer-events:none; transition:opacity .16s ease, transform .16s ease; z-index:5}
+#logToast.show { opacity:1; transform:translate(-50%,0) }
 .doc-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:60 }
 .doc-card { width:min(760px,92vw); max-height:82vh; overflow:auto; background:var(--panel-2); border:1px solid var(--line-strong); border-radius:var(--radius); box-shadow:var(--shadow) }
 .doc-head { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line) }
@@ -738,6 +758,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 [data-icon="diagnose"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M3%2012h4l3-8%204%2016%203-8h4%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="archive"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%223%22%20y%3D%224%22%20width%3D%2218%22%20height%3D%224%22%20rx%3D%221%22%2F%3E%3Cpath%20d%3D%22M5%208v12h14V8M10%2012h4%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="folder"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M3%207V5a1%201%200%200%201%201-1h5l2%203h9a1%201%200%200%201%201%201v11H3Z%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="branch"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%226%22%20cy%3D%225%22%20r%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%226%22%20cy%3D%2219%22%20r%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%2218%22%20cy%3D%227%22%20r%3D%222.5%22%2F%3E%3Cpath%20d%3D%22M6%207.5v9%22%2F%3E%3Cpath%20d%3D%22M18%209.5c0%204-5%205-9%206%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="file"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M14%203H5v18h14V8ZM14%203v5h5M8%2012h8M8%2016h6%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="refresh"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M20%207v5h-5M4%2017v-5h5M6%206a8%208%200%200%201%2014%206M4%2012a8%208%200%200%200%2014%206%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="search"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%2210.5%22%20cy%3D%2210.5%22%20r%3D%226.5%22%2F%3E%3Cpath%20d%3D%22m16%2016%205%205%22%2F%3E%3C%2Fsvg%3E") }
@@ -761,6 +782,8 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 [data-icon="check"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m5%2012%204%204L19%206%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="prev"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m14%206-6%206%206%206%22%2F%3E%3C%2Fsvg%3E") }
 [data-icon="next"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m10%206%206%206-6%206%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="pin"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%2017v5%22%2F%3E%3Cpath%20d%3D%22M9%2010.76a2%202%200%200%201-1.11%201.79l-1.78.9A2%202%200%200%200%205%2015.24V16a1%201%200%200%200%201%201h12a1%201%200%200%200%201-1v-.76a2%202%200%200%200-1.11-1.79l-1.78-.9A2%202%200%200%201%2015%2010.76V6h1a2%202%200%200%200%200-4H8a2%202%200%200%200%200%204h1z%22%2F%3E%3C%2Fsvg%3E") }
+[data-icon="columns"] { --icon:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M4%205v14M10%205v14M16%205v14M20%205v14M2%205h20M2%2019h20%22%2F%3E%3C%2Fsvg%3E") }
 
 .brand-mark { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); position:relative; color:var(--text) }
 .brand-mark svg { width:22px; height:22px; display:block }
@@ -779,7 +802,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .app-search input { height:34px; padding:6px 9px 6px 32px; font:12px var(--ui-font) }
 .app-search input:focus-visible { outline:2px solid var(--accent); outline-offset:1px }
 #appList { padding:4px 8px 8px }
-.app-view { display:flex; align-items:center; gap:8px; padding:0 12px 8px }
+.app-view { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:0 12px 8px }
 .app-view label { flex:none; color:var(--text-faint); font-size:11px }
 .app-view select { min-width:0; max-width:55%; height:26px; padding-left:8px; font-size:11px; background-color:transparent }
 #directoryCount { color:var(--text-faint); font-size:10px; white-space:nowrap }
@@ -794,7 +817,15 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 .directory-apps { margin-left:8px; padding-left:4px; border-left:1px solid var(--line) }
 .directory-group.has-selection > .directory-toggle { background:var(--surface) }
 .directory-context { flex:none; display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--surface); color:var(--text-dim); font-size:11px }
-.directory-context > span:first-child { flex:none; color:var(--text-faint) }
+.ctx-label { flex:none; color:var(--text-faint) }
+.ctx-group { display:inline-flex; align-items:center; gap:8px; min-width:0 }
+.ctx-group[hidden] { display:none }
+#dirPart { flex:1; min-width:0 }
+/* 服务地址：完整 URL 常驻上下文条，左对齐一眼可见，替代原详情操作栏右端 :端口 小链。 */
+.ctx-url { flex:none; color:var(--accent); font:11px var(--mono-font); text-decoration:none }
+.ctx-url:hover { color:var(--accent-text); text-decoration:underline }
+#serviceUrlStatus { color:var(--ok-text); font-size:10px }
+#serviceUrlStatus:empty { display:none }
 #directoryPath { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:11px var(--mono-font) }
 .directory-context button { flex:none; height:25px; padding:0 7px; font-size:10px }
 #directoryFullPath { flex:0 0 100%; min-width:0; padding:8px; border:1px solid var(--line); border-radius:var(--radius-sm); color:var(--text-dim); font:11px/1.6 var(--mono-font); white-space:pre-wrap; overflow-wrap:anywhere }
@@ -810,6 +841,49 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
 #logMeta { margin-left:auto }
 .fd-item[data-icon]::before { vertical-align:-3px; margin-right:7px }
 .workbench-title[data-icon], a[data-icon] { display:inline-flex; align-items:center; gap:6px }
+
+/* 状态过滤 chips：与全文搜索互补，按运行状态/异常维度收敛列表。 */
+.app-chips { display:flex; flex-wrap:wrap; gap:4px; padding:0 12px 8px }
+.chip { height:22px; padding:0 9px; font-size:11px; font-weight:500; border-radius:99px; color:var(--text-faint); white-space:nowrap }
+.chip:hover { color:var(--text-dim) }
+.chip.on { color:var(--text); border-color:var(--line-strong); background:var(--selected) }
+/* 卡片头右槽：ago+kebab 打包钉在最右，ago 关闭时 kebab 也不移位。 */
+.head-tail { margin-left:auto; flex:none; display:flex; align-items:center; gap:6px }
+.m-ago { flex:none; align-self:center; font-size:10px; color:var(--text-faint); white-space:nowrap }
+/* 未读点：批次异常结束后标记，点开详情即清除；accent 色与状态 pill 区分。 */
+.unread-dot { flex:none; align-self:center; width:7px; height:7px; border-radius:50%; background:var(--accent) }
+.pin-ic { flex:none; align-self:center; color:var(--text-faint) }
+.pin-ic::before { width:11px; height:11px }
+/* 卡片一键打开：运行中服务的主要动作，常驻淡色图标，不显示端口号。 */
+.card-open { flex:none; align-self:center; display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:4px; color:var(--text-faint); text-decoration:none }
+.card-open::before { width:12px; height:12px }
+.card-open:hover { color:var(--accent); background:var(--surface-hover) }
+/* hover kebab：右键菜单的可发现入口，平时隐去不占视觉，聚焦/悬停出现。 */
+.card-kebab { flex:none; align-self:center; width:20px; height:20px; padding:0; border:0; border-radius:4px; background:none; color:var(--text-faint); font-size:13px; line-height:1; opacity:0; transition:opacity .12s }
+.app-card:hover .card-kebab, .card-kebab:focus-visible, .app-card:focus-within .card-kebab { opacity:1 }
+.card-kebab:hover { color:var(--text); background:var(--surface-hover) }
+/* 键盘导航焦点：与 selected 左边界方案区分，只用描边+底色。 */
+.app-card.kb-focus { border-color:var(--line-strong); background:var(--surface) }
+/* 卡片右键菜单：fixed 定位，JS 负责开关与视口夹取。 */
+.ctx-menu { position:fixed; z-index:60; min-width:160px; padding:4px; background:var(--panel-2); border:1px solid var(--line-strong); border-radius:var(--radius-sm); box-shadow:var(--shadow) }
+.ctx-item { display:flex; align-items:center; gap:8px; width:100%; height:28px; padding:0 10px; border:0; border-radius:4px; background:none; font-size:12px; color:var(--text); text-align:left; justify-content:flex-start }
+.ctx-item:hover { background:var(--surface-hover) }
+.ctx-item:disabled { color:var(--text-faint); background:none }
+.ctx-item.danger { color:var(--danger-text) }
+.ctx-sep { height:1px; margin:4px 6px; background:var(--line) }
+/* 组限高后的展开/收起入口。 */
+.group-more { display:block; width:100%; height:26px; padding:0 10px; border:0; background:none; color:var(--text-faint); font-size:11px; text-align:left; justify-content:flex-start }
+.group-more:hover { color:var(--text); background:var(--surface) }
+/* meta 列显示偏好：details 原生开合，点外部由 JS 关闭。 */
+.meta-menu { position:relative; margin-left:auto }
+.meta-menu > summary { list-style:none; cursor:pointer; height:26px; display:inline-flex; align-items:center; padding:0 8px; border:1px solid var(--line); border-radius:var(--radius-sm); font-size:11px; color:var(--text-faint); user-select:none }
+.meta-menu > summary::-webkit-details-marker { display:none }
+.meta-menu > summary:hover { color:var(--text) }
+.meta-menu[open] > summary { color:var(--text); background:var(--selected) }
+.meta-menu-body { position:absolute; right:0; top:30px; z-index:55; min-width:120px; padding:6px; background:var(--panel-2); border:1px solid var(--line-strong); border-radius:var(--radius-sm); box-shadow:var(--shadow) }
+.meta-menu-body label { display:flex; align-items:center; gap:7px; padding:4px 6px; font-size:12px; color:var(--text); cursor:pointer; border-radius:4px; white-space:nowrap }
+.meta-menu-body label:hover { background:var(--surface) }
+.meta-menu-body input { accent-color:var(--accent); margin:0 }
 @media(max-width:600px) {
   .topbar { gap:6px; padding:10px 12px }
   .brand { flex:1 0 100%; margin-right:0 }
@@ -836,16 +910,14 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
   <button id="backupBtn" data-icon="archive" type="button" title="导出/导入登记备份（同 manager export/import）">备份</button>
   <button id="filesBtn" data-icon="folder" type="button" disabled>文件</button>
   <button id="themeBtn" data-icon="monitor" type="button" title="主题：跟随系统（点击在 跟随系统/浅色/深色 间循环）" aria-label="切换主题，当前跟随系统">跟随系统</button>
-  <span class="badge ro" id="verBadge">本地</span>
+  <span class="badge ro" id="verBadge" title="仅 127.0.0.1，无令牌；受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记。启停操作会先弹出确认框，停止和重启参数可在应用详情中设置。">本地</span>
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner info" id="roBanner" title="仅 127.0.0.1，无令牌；受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记。">仅本机访问 · 启停操作会先弹出确认框，停止和重启参数可在应用详情中设置。</div>
-<div class="banner" id="fatalBanner" hidden role="alert"></div>
-<div class="banner warn" id="exitBanner" hidden role="alert"></div>
+<div id="toastStack" class="toast-stack" aria-live="polite"></div>
 <main class="layout">
   <aside aria-label="应用列表">
-    <div id="sidebarResize" class="sidebar-resize" role="separator" tabindex="0" aria-label="调整应用列表宽度" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="600" aria-valuenow="292"></div>
+    <div id="sidebarResize" class="sidebar-resize" role="separator" tabindex="0" aria-label="调整应用列表宽度" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="600" aria-valuenow="340"></div>
     <div class="panel-title">
       <div class="panel-heading" data-icon="apps"><strong>应用</strong></div>
       <span class="badge" id="appCount">0</span>
@@ -856,6 +928,15 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
       <label for="appView">分组</label>
       <select id="appView" aria-label="应用分组"><option value="flat">不分组</option><option value="directories">工作目录</option></select>
       <span id="directoryCount" hidden>0 组</span>
+      <label for="appSort">排序</label>
+      <select id="appSort" aria-label="列表排序"><option value="status">状态</option><option value="name">名称</option><option value="activity">最近活动</option></select>
+      <details class="meta-menu" id="metaMenu"><summary aria-label="列表列显示偏好">列</summary><div class="meta-menu-body" id="metaMenuBody"></div></details>
+    </div>
+    <div class="app-chips" id="filterChips" role="group" aria-label="状态过滤">
+      <button type="button" class="chip" data-filter="all">全部</button>
+      <button type="button" class="chip" data-filter="active">运行中</button>
+      <button type="button" class="chip" data-filter="attention">需关注</button>
+      <button type="button" class="chip" data-filter="stopped">已停止</button>
     </div>
     <div id="appList"></div>
   </aside>
@@ -868,7 +949,7 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
     </button>
     <span id="detailOps" class="op-group detail-ops" hidden></span>
     </div>
-    <div id="directoryContext" class="directory-context" hidden><span>工作目录</span><code id="directoryPath"></code><span id="directoryCopyStatus" role="status"></span><button id="directoryPathToggle" type="button" aria-expanded="false" aria-controls="directoryFullPath">完整路径</button><button id="copyDirectoryBtn" type="button" title="复制当前应用的完整工作目录">复制路径</button><code id="directoryFullPath" hidden></code></div>
+    <div id="directoryContext" class="directory-context" hidden><span id="servicePart" class="ctx-group" hidden><span class="ctx-label">服务</span><a id="serviceUrl" class="ctx-url" target="_blank" rel="noopener noreferrer"></a><button id="copyServiceUrlBtn" type="button" title="复制服务地址">复制</button><span id="serviceUrlStatus" role="status"></span></span><span id="dirPart" class="ctx-group"><span class="ctx-label">工作目录</span><code id="directoryPath"></code><span id="directoryCopyStatus" role="status"></span><button id="directoryPathToggle" type="button" aria-expanded="false" aria-controls="directoryFullPath">完整路径</button><button id="copyDirectoryBtn" type="button" title="复制当前应用的完整工作目录">复制路径</button></span><code id="directoryFullPath" hidden></code></div>
     <div id="detail"><div class="empty">正在加载注册表…<br>这里展示由本 Skill 启动并登记的应用；IDEA / 手工启动的进程不会出现。</div></div>
     <section class="log-panel" aria-label="运行日志">
       <div class="log-toolbar">
@@ -878,10 +959,12 @@ body.no-selection #detail { flex:1 1 auto; max-height:none; display:flex; align-
         <button id="pauseBtn" data-icon="pause" type="button" aria-pressed="false">暂停</button>
         <button id="followBtn" data-icon="follow" type="button" aria-pressed="true" disabled>跟随中</button>
         <button id="clearBtn" data-icon="clear" type="button" disabled>清屏</button>
+        <button id="copyBtn" data-icon="copy" type="button" disabled title="复制选中内容；未选中时按当前过滤条件复制可见行（日志区聚焦时 Ctrl+C）">复制</button>
         <button id="dlBtn" data-icon="download" type="button" disabled title="下载当前日志源完整文件">下载</button>
         <span id="logMeta"></span>
       </div>
-      <div id="log" tabindex="0" aria-label="日志内容" title="点击行复制该行"><div class="empty">选择左侧应用后查看日志。</div></div>
+      <div id="log" tabindex="0" aria-label="日志内容" title="点击错误行选中整段（不复制），Shift+点击扩展选区；拖动可自由选中文本；点「复制」或按 Ctrl+C 写入剪贴板"><div class="empty">选择左侧应用后查看日志。</div></div>
+      <div id="logToast" role="status" aria-live="polite"></div>
     </section>
   </section>
 </main>

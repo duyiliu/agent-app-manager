@@ -261,6 +261,10 @@ export function cmdList(ctx) {
       exit: runExit, exitSummary: exitSummary(current),
       exitWatchError: current?.exitWatchError ?? null,
       exitNote: st.note ?? current?.exitNote ?? null,
+      // 当前批次时间锚点：UI 行尾相对时间与「最近活动」排序用；未运行过的应用全为 null。
+      intentAt: current?.intentAt ?? null,
+      startedAt: current?.startedAt ?? null,
+      endedAt: current?.endedAt ?? null,
       log: current?.logPaths?.stdout ?? null, root: app.root,
       // 单点采样（无趋势）：RUNNING 受管应用带 RSS；采样失败/未运行时保持 null。
       memoryBytes: null,

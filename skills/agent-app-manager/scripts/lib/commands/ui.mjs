@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { usageError, conflictError } from '../errors.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile } from '../log-sources.mjs';
+import { resolveRepoRoot } from '../repo.mjs';
 import { parseNamed } from './common.mjs';
 import { parseGraceMsValue } from './lifecycle.mjs';
 
@@ -134,24 +135,67 @@ function runManagerJson(home, args, { timeoutMs = 60000 } = {}) {
   });
 }
 
+// 列表附带 git 仓库归属（管理台「工作目录」分组）：worktree 与仓库子目录归并到
+// 主仓库。解析结果短缓存，避免快照轮询反复读盘；失败不缓存，目录之后变成仓库
+// 时能自动恢复。
+const REPO_TTL_MS = 60_000;
+const repoCache = new Map();
+async function repoInfoOf(root) {
+  const key = String(root ?? '');
+  if (!key) return null;
+  const hit = repoCache.get(key);
+  if (hit && Date.now() - hit.at < REPO_TTL_MS) return hit.value;
+  const value = await resolveRepoRoot(key);
+  if (value) repoCache.set(key, { at: Date.now(), value });
+  else repoCache.delete(key);
+  return value;
+}
+async function listWithRepo(home) {
+  const data = await runManagerJson(home, ['list']);
+  const apps = Array.isArray(data.apps) ? data.apps : [];
+  // 并发解析：每个 root 最多几次 stat，不经过 pwsh，不阻塞事件循环。
+  const enriched = await Promise.all(apps.map(async (app) => {
+    const repo = await repoInfoOf(app.root);
+    const out = repo ? { ...app, repoRoot: repo.root, worktree: repo.worktree, branch: repo.branch } : { ...app };
+    // 目录可及性：登记目录已删除/盘符不在时标记 false，UI 据此提示「目录不存在」，
+    // 避免把「解析不到 git 归属」误读为分组异常。只把 ENOENT 视为缺失，
+    // 权限等其它 stat 失败不误报。
+    let dirExists = true;
+    const rootText = String(app.root ?? '');
+    if (rootText) {
+      try { await fs.promises.stat(rootText); } catch (e) { if (e?.code === 'ENOENT') dirExists = false; }
+    }
+    return { ...out, dirExists };
+  }));
+  return { ...data, apps: enriched };
+}
+
 export async function cmdUi(ctx) {
-  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag' });
+  const opts = parseNamed(ctx.rest, { '--port': 'value', '--open': 'flag', '--host': 'value', '--token': 'value', '--public-host': 'multi' });
   if (opts.positional.length) throw usageError(`无法识别的参数：${opts.positional[0]}`);
   let port = 8199; // 固定端口契约；--port 0 使用随机端口
   if (opts.has('--port')) {
     port = Number.parseInt(opts.get('--port'), 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError('--port 需要 0-65535 的整数（0 为随机端口）');
   }
+  // --token/--host/--public-host 供隧道/局域网暴露场景使用：server.mjs 完成令牌鉴权与
+  // Host/Origin 白名单，令牌等同完全控制权，泄露后重启换令牌。默认仍仅本机无令牌。
+  const host = opts.get('--host') ?? '127.0.0.1';
+  const token = opts.get('--token') ?? null;
+  const publicHosts = opts.getAll('--public-host');
   const { startUiServer } = await import('../../manager-ui/server.mjs');
   try {
     await startUiServer({
       home: ctx.home,
       port,
+      host,
+      token,
+      publicHosts,
       open: opts.has('--open'), // 默认不开浏览器：Agent 前台拉起场景不期望弹窗
       api: {
         // 这三项是重采集（每次 3 次全量 pwsh 枚举，3-20s），必须走子进程，
         // 否则同步执行会阻塞 ui 事件循环（实测 /api/meta 也从 1ms 退化到 3-8s）。
-        list: () => runManagerJson(ctx.home, ['list']),
+        list: () => listWithRepo(ctx.home),
         // UI 需要 actualPorts，CLI 侧对应 --probe（会顺带做 expectedPort 的 TCP 探测）。
         // sample=true 时追加 --resources：只在用户展开详情时做一次有界 RSS/CPU 采样，
         // 4s 轮询不带，避免把按需采样变成常驻轮询。

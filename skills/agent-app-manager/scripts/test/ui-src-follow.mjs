@@ -31,12 +31,25 @@ w(path.join(home, 'logs', 'ahis', 'rold1.stdout.log'), 'rold1 stdout\n');
 w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 const root = fs.realpathSync(proj);
+// git 主仓库 + 一个 worktree：验证「工作目录」分组按主仓库聚合（#210 后续）。
+const gitRepo = path.join(base, 'git-main');
+const gitWt = path.join(base, 'git-wt');
+fs.mkdirSync(path.join(gitRepo, '.git', 'worktrees', 'wt'), { recursive: true });
+fs.mkdirSync(gitWt, { recursive: true });
+w(path.join(gitRepo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+w(path.join(gitRepo, '.git', 'worktrees', 'wt', 'HEAD'), 'ref: refs/heads/feature-wt\n');
+w(path.join(gitWt, '.git'), `gitdir: ${path.join(gitRepo, '.git', 'worktrees', 'wt').replace(/\\/g, '/')}\n`);
+const wtRoot = fs.realpathSync(gitWt);
+// 幽灵目录：登记 root 指向不存在的目录（目录已删除/盘符不在），验证「目录不存在」标记。
+const ghostRoot = path.join(base, 'ghost-removed');
 
 w(path.join(home, 'registry.json'), JSON.stringify({
   schemaVersion: 1,
   apps: {
     ahis: { appId: 'ahis', alias: 'his', displayName: 'HIS', root, entry: 'default', cwd: root, mode: 'java', exe: process.execPath, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
     arep: { appId: 'arep', alias: 'report', displayName: '报表', root, entry: 'default', cwd: root, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
+    awt: { appId: 'awt', alias: 'wt', displayName: 'worktree 实例', root: wtRoot, entry: 'default', cwd: wtRoot, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
+    aghost: { appId: 'aghost', alias: 'ghost', displayName: '幽灵应用', root: ghostRoot, entry: 'default', cwd: ghostRoot, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now },
   },
 }));
 // current=rtest1（STOPPED 受管）+ prev rold1；restart(n) 把 current 换成新 runId 并补日志文件
@@ -76,11 +89,19 @@ class El {
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(''); }
   set textContent(v) { this._text = String(v ?? ''); this.children = []; }
-  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  appendChild(c) { this.detachFromParent(c); c.parentNode = this; this.children.push(c); return c; }
   append(...cs) { for (const c of cs) this.appendChild(typeof c === 'string' ? new El('#text').withText(c) : c); }
-  prepend(...cs) { for (const c of cs.reverse()) { const n = typeof c === 'string' ? new El('#text').withText(c) : c; n.parentNode = this; this.children.unshift(n); } }
+  prepend(...cs) { for (const c of cs.reverse()) { const n = typeof c === 'string' ? new El('#text').withText(c) : c; this.detachFromParent(n); n.parentNode = this; this.children.unshift(n); } }
   replaceChildren(...cs) { this.children = []; this.append(...cs); }
-  insertBefore(c, ref) { c.parentNode = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
+  // 真实 DOM 的 appendChild/insertBefore 会把节点从旧父节点移走；不复现这一点，
+  // 分组渲染（同一张卡片先挂列表再挂分组）会被测试桩误删。
+  detachFromParent(c) {
+    const p = c.parentNode;
+    if (!p || p === this) return;
+    const i = p.children.indexOf(c);
+    if (i >= 0) p.children.splice(i, 1);
+  }
+  insertBefore(c, ref) { this.detachFromParent(c); c.parentNode = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   remove() { const p = this.parentNode; if (p) { const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); } this.parentNode = null; }
   withText(t) { this._text = t; return this; }
   addEventListener(t, fn) { (this.handlers[t] ??= []).push(fn); }
@@ -128,15 +149,19 @@ const documentStub = {
   visibilityState: 'visible',
   documentElement: new El('html'),
   body: new El('body'),
+  activeElement: null,
+  handlers: {},
   createElement: (t) => { const e = new El(t); allEls.push(e); return e; },
   createElementNS: (_ns, t) => { const e = new El(t); allEls.push(e); return e; },
   createDocumentFragment: () => new Frag(),
+  createTextNode: (t) => new El('#text').withText(t),
   querySelector: (sel) => sel.startsWith('#') ? elFor(sel.slice(1)) : (allEls.find((e) => matchEl(e, sel)) ?? null),
   querySelectorAll: (sel) => {
     if (sel.startsWith('#')) { const e = byId.get(sel.slice(1)); return e ? [e] : []; }
     return allEls.filter((e) => matchEl(e, sel));
   },
-  addEventListener: () => {},
+  addEventListener(t, fn) { (this.handlers[t] ??= []).push(fn); },
+  dispatch(t, ev) { for (const f of this.handlers[t] ?? []) f(ev); },
   execCommand: () => false,
 };
 // 页面通过 $('#id') 取元素：预挂到 body 下，保证 querySelectorAll 子树搜索与 closest 可用
@@ -223,6 +248,54 @@ try {
     assert.deepEqual(searchApps('报表'), ['arep']);
     assert.deepEqual(searchApps('arep'), ['arep']);
     elFor('appSearch').value = '';
+    run('renderApps()');
+  });
+
+  await check('工作目录分组按 git 主仓库聚合 worktree', async () => {
+    const apps = JSON.parse((await get('/api/apps')).body).data.apps;
+    const wt = apps.find((a) => a.alias === 'wt');
+    assert.equal(wt.repoRoot, fs.realpathSync(gitRepo), 'worktree 应返回主仓库路径');
+    assert.equal(wt.worktree, true, 'worktree 应带归属标记');
+    assert.equal(wt.branch, 'feature-wt', 'worktree 应返回各自分支');
+    assert.equal(apps.find((a) => a.alias === 'his').repoRoot, undefined, '非 Git 目录不附加仓库归属');
+    assert.equal(apps.find((a) => a.alias === 'his').branch, undefined, '非 Git 目录不附加分支');
+    run(`appView = 'directories'`);
+    run('renderApps()');
+    const groups = [...elFor('appList').querySelectorAll('.directory-group')];
+    const byName = new Map(groups.map((g) => [g.querySelector('.directory-name').textContent, g]));
+    assert.equal(groups.length, 3, `proj / 主仓库 / 幽灵目录应各成一组，实际：${[...byName.keys()].join(',')}`);
+    const repoGroup = byName.get('git-main');
+    assert(repoGroup, `缺少主仓库分组，实际：${[...byName.keys()].join(',')}`);
+    const wtCard = repoGroup.querySelector('.directory-apps').querySelector('.app-card[data-app-id="awt"]');
+    assert(wtCard, 'worktree 卡片缺失');
+    const br = wtCard.querySelector('.m-branch');
+    assert(br, 'worktree 卡片应有分支标签');
+    assert.equal(br.textContent, 'feature-wt');
+    assert.equal(br.dataset.icon, 'branch');
+    assert.equal(repoGroup.querySelector('.directory-path').textContent, '1 个 worktree');
+    run(`appView = 'flat'`);
+    run('renderApps()');
+  });
+
+  await check('幽灵目录应用标记「目录不存在」', async () => {
+    const apps = JSON.parse((await get('/api/apps')).body).data.apps;
+    const ghost = apps.find((a) => a.alias === 'ghost');
+    assert.equal(ghost.dirExists, false, '已删除目录应标记 dirExists=false');
+    assert.equal(ghost.repoRoot, undefined, '幽灵目录不附加仓库归属');
+    assert.equal(apps.find((a) => a.alias === 'his').dirExists, true, '正常目录 dirExists=true');
+    run(`appView = 'directories'`);
+    run('renderApps()');
+    const groups = [...elFor('appList').querySelectorAll('.directory-group')];
+    const byName = new Map(groups.map((g) => [g.querySelector('.directory-name').textContent, g]));
+    const ghostGroup = byName.get('ghost-removed');
+    assert(ghostGroup, `缺少幽灵目录分组，实际：${[...byName.keys()].join(',')}`);
+    const ghostCard = [...ghostGroup.querySelector('.directory-apps').querySelectorAll('.app-card')].find((c) => c.dataset.appId === 'aghost');
+    assert(ghostCard, '幽灵应用卡片缺失');
+    const ghostPill = [...ghostCard.querySelectorAll('.pill')].find((p) => p.className.includes('ghost'));
+    assert(ghostPill, '幽灵卡片应有「目录不存在」标记');
+    assert.equal(ghostPill.textContent, '目录不存在');
+    assert.equal(ghostGroup.querySelector('.directory-path').textContent, '1 个目录缺失');
+    run(`appView = 'flat'`);
     run('renderApps()');
   });
 
@@ -402,6 +475,165 @@ try {
     run('filterRe = null');
   });
 
+  await check('错误块复制：Java 堆栈整段聚合，普通行不聚合', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 10:00:00 ERROR 启动失败' },
+      { id: 2, text: 'java.lang.IllegalStateException: bad' },
+      { id: 3, text: '\\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 4, text: 'Caused by: java.io.IOException: io' },
+      { id: 5, text: '\\tat com.foo.Baz.run(Baz.java:2)' },
+      { id: 6, text: '2026-01-01 10:00:01 INFO 后续正常' }
+    ]`);
+    const block = run('errorBlockText(0)');
+    assert.equal(block.split('\n').length, 5);
+    assert(block.includes('Caused by: java.io.IOException: io'));
+    assert(!block.includes('后续正常'));
+    assert.equal(run('errorBlockText(1)'), block, '异常头紧邻错误首行应归入同一块');
+    assert.equal(run('errorBlockText(2)'), block, '堆栈帧应回溯归属所在 dump 块');
+    assert.equal(run('errorBlockText(5)'), null, '普通行不走错误块');
+    run('lines = __savedLines');
+  });
+
+  await check('错误块复制：空行分隔的裸异常 dump 自成块首', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 10:00:00 ERROR 请求地址:/api/x 处理失败' },
+      { id: 2, text: '' },
+      { id: 3, text: 'java.lang.RuntimeException: 读取记录失败' },
+      { id: 4, text: '\\tat com.foo.Service.run(Service.java:42)' },
+      { id: 5, text: '\\tat com.foo.Main.main(Main.java:9)' },
+      { id: 6, text: '2026-01-01 10:00:01 INFO 后续正常' }
+    ]`);
+    const dump = run('errorBlockText(2)');
+    assert.equal(dump.split('\n').length, 3, '空行分隔的异常头应自成块首');
+    assert(dump.startsWith('java.lang.RuntimeException'), '块首应是异常头而非日志行');
+    assert.equal(run('errorBlockText(3)'), dump, '堆栈帧应回溯到 dump 头');
+    assert.equal(run('errorBlockText(0)').split('\n').length, 1, '空行前的日志行不吞并 dump');
+    run(`lines = [
+      { id: 1, text: 'java.lang.IllegalStateException: lone' },
+      { id: 2, text: '2026-01-01 INFO next' }
+    ]`);
+    assert.equal(run('errorBlockText(0)'), null, '无堆栈跟随的孤立异常头不成块');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 INFO 普通' },
+      { id: 2, text: '\\tat com.foo.Bar.baz(Bar.java:1)' }
+    ]`);
+    assert.equal(run('errorBlockText(1)'), null, '无首行的孤立帧不猜父块');
+    run('lines = __savedLines');
+  });
+
+  await check('错误块复制：Python Traceback 含末行异常', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: 'Traceback (most recent call last):' },
+      { id: 2, text: '  File "app.py", line 1, in <module>' },
+      { id: 3, text: '    foo()' },
+      { id: 4, text: 'ValueError: bad' }
+    ]`);
+    const block = run('errorBlockText(0)');
+    assert.equal(block.split('\n').length, 4);
+    assert(block.endsWith('ValueError: bad'));
+    run('lines = __savedLines');
+  });
+
+  await check('错误块复制：剥离合并源的 [err] 前缀', () => {
+    run('globalThis.__savedLines = lines');
+    run(`lines = [
+      { id: 1, text: '[err] 2026-01-01 ERROR 失败' },
+      { id: 2, text: '[err] java.lang.NullPointerException: npe' },
+      { id: 3, text: '[err] \\tat com.foo.Bar.baz(Bar.java:10)' }
+    ]`);
+    const block = run('errorBlockText(0)');
+    assert.equal(block.split('\n').length, 3);
+    assert(!block.includes('[err]'), '整段复制不应带 UI 注入前缀');
+    assert(block.includes('at com.foo.Bar.baz(Bar.java:10)'));
+    run('lines = __savedLines');
+  });
+
+  await check('点击错误行只选中整段（不写剪贴板），Shift+点击扩展', async () => {
+    run('globalThis.__savedLines = lines; globalThis.__origCopyText = copyText; globalThis.__copyTexts = []');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 ERROR 失败' },
+      { id: 2, text: 'java.lang.IllegalStateException: bad' },
+      { id: 3, text: '\\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 4, text: '2026-01-01 INFO ok' }
+    ]`);
+    run('blockSel = null; renderLines(true)');
+    run('copyText = async (t) => { __copyTexts.push(t); return true; }');
+    const box = elFor('log');
+    let rows = box.querySelectorAll('.line');
+    assert.equal(rows.length, 4, '日志区应渲染 4 行');
+    box.dispatch('click', { target: rows[0], shiftKey: false });
+    await wait(0);
+    assert.equal(run('__copyTexts.length'), 0, '单击不应写剪贴板');
+    assert.equal(run('blockSel && blockSel.fromId'), 1, '错误首行应作为选中起点');
+    assert.equal(run('blockSel && blockSel.toId'), 3, '整段堆栈应被选中');
+    assert(rows[0].classList.contains('selected'), '错误首行应高亮');
+    assert(rows[2].classList.contains('selected'), '堆栈末行应高亮');
+    assert(!rows[3].classList.contains('selected'), '后续普通行不应高亮');
+    box.dispatch('click', { target: rows[3], shiftKey: true });
+    await wait(0);
+    assert.equal(run('blockSel && blockSel.toId'), 4, 'Shift+点击应扩展选区');
+    assert(rows[3].classList.contains('selected'), '扩展到的行应高亮');
+    run('blockSel = null; renderLines(true)');
+    rows = box.querySelectorAll('.line');
+    box.dispatch('click', { target: rows[3], shiftKey: false });
+    assert.equal(run('blockSel'), null, '普通行不建立块选中');
+    run('copyText = __origCopyText; lines = __savedLines; blockSel = null; renderLines(true)');
+  });
+
+  await check('Ctrl+C：块选中优先复制整段并剥离 [err]，无选中复制可见行，原生选区放行', async () => {
+    run('globalThis.__savedLines = lines; globalThis.__origCopyText = copyText; globalThis.__copyTexts = []');
+    run(`lines = [
+      { id: 1, text: '[err] 2026-01-01 ERROR 失败' },
+      { id: 2, text: '[err] \\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 3, text: '2026-01-01 INFO ok' }
+    ]`);
+    run('blockSel = { anchorId: 1, fromId: 1, toId: 2 }; renderLines(true)');
+    run('copyText = async (t) => { __copyTexts.push(t); return true; }');
+    documentStub.activeElement = elFor('log');
+    const ev1 = { ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'c', preventDefault() { this.prevented = true; } };
+    documentStub.dispatch('keydown', ev1);
+    await wait(0);
+    assert.equal(run('__copyTexts.length'), 1, '块选中应触发复制');
+    assert.equal(run('__copyTexts[0]').split('\n').length, 2, '应复制选中的 2 行');
+    assert(!run('__copyTexts[0]').includes('[err]'), '复制选中块不应带 UI 注入前缀');
+    assert.equal(ev1.prevented, true, '应阻止浏览器默认复制');
+    run('blockSel = null; renderLines(true)');
+    const ev2 = { ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'c', preventDefault() { this.prevented = true; } };
+    documentStub.dispatch('keydown', ev2);
+    await wait(0);
+    assert.equal(run('__copyTexts[1]').split('\n').length, 3, '无选区应复制全部可见行');
+    run('window.getSelection = () => ({ isCollapsed: false, rangeCount: 1, anchorNode: document.querySelector("#log"), toString: () => "manual pick" })');
+    const ev3 = { ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'c', preventDefault() { this.prevented = true; } };
+    documentStub.dispatch('keydown', ev3);
+    await wait(0);
+    assert.equal(run('__copyTexts.length'), 2, '原生选区不应劫持复制');
+    assert.equal(ev3.prevented, undefined, '原生选区不应阻止默认行为');
+    run('delete window.getSelection; copyText = __origCopyText; lines = __savedLines; blockSel = null; renderLines(true)');
+    documentStub.activeElement = null;
+  });
+
+  await check('复制按钮：有选中复制选中块，无选中复制可见行', async () => {
+    run('globalThis.__savedLines = lines; globalThis.__origCopyText = copyText; globalThis.__copyTexts = []');
+    run(`lines = [
+      { id: 1, text: '2026-01-01 ERROR 失败' },
+      { id: 2, text: '\\tat com.foo.Bar.baz(Bar.java:10)' },
+      { id: 3, text: '2026-01-01 INFO ok' }
+    ]`);
+    run('copyText = async (t) => { __copyTexts.push(t); return true; }');
+    run('blockSel = { anchorId: 1, fromId: 1, toId: 2 }; renderLines(true)');
+    elFor('copyBtn').dispatch('click', {});
+    await wait(0);
+    assert.equal(run('__copyTexts[0]').split('\n').length, 2, '有选中时应只复制选中块');
+    run('blockSel = null; renderLines(true)');
+    elFor('copyBtn').dispatch('click', {});
+    await wait(0);
+    assert.equal(run('__copyTexts[1]').split('\n').length, 3, '无选中时应复制可见行');
+    run('copyText = __origCopyText; lines = __savedLines; blockSel = null; renderLines(true)');
+  });
+
   await restartAndSync('rtest9');
   await check('合并源跟随新当前批次（保留 both 流偏好）', () => assert.equal(run('logSrc'), 'merge:rtest9'));
   await run('pollTail()');
@@ -467,17 +699,36 @@ try {
     run(`workbench = null;`);
   });
   // #107：UI 必须优先展示/链接实际监听端口，expectedPort 只保留为启动前冲突检查与回退展示。
-  await check('端口链接优先使用实际端口（列表与详情）', () => {
+  // 列表卡片不再渲染端口链接（meta 只留状态信息）；端口入口在详情卡与卡片操作菜单。
+  await check('端口链接优先使用实际端口（详情与卡片菜单）', () => {
     const anchorHrefs = (root) => [...root.querySelectorAll('a.port-link')].map((a) => a.href);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'RUNNING', managed:true, mode:'java', expectedPort:5173, actualPorts:[5174], portMismatch:true, run:{ runId:'rtest8', phase:'RUNNING', managed:true, pid:4242, startedAt:null } })`);
     const detailHrefs = anchorHrefs(elFor('detail'));
     assert(detailHrefs.includes('http://127.0.0.1:5174/'), `详情缺少实际端口链接：${detailHrefs.join(',')}`);
     assert(!detailHrefs.includes('http://127.0.0.1:5173/'), `详情不应链接 expectedPort：${detailHrefs.join(',')}`);
     assert(elFor('detail').textContent.includes('5173'), '详情应保留 expectedPort 展示');
+    // 服务地址常驻详情上下文条：完整 URL 指向实际端口而非 expectedPort。
+    assert.equal(elFor('serviceUrl').textContent, 'http://127.0.0.1:5174/', '上下文条服务地址应展示实际端口完整 URL');
+    assert.equal(elFor('servicePart').hidden, false, 'RUNNING 且有端口时服务地址应可见');
     run(`appsCache = [{ alias:'portapp', appId:'aport', mode:'node', status:'RUNNING', pid:4242, expectedPort:5173, actualPorts:[5174], root:'/tmp/x' }]; renderApps();`);
-    const listHrefs = anchorHrefs(elFor('appList'));
-    assert(listHrefs.includes('http://127.0.0.1:5174/'), `列表缺少实际端口链接：${listHrefs.join(',')}`);
-    assert(!listHrefs.includes('http://127.0.0.1:5173/'), `列表不应链接 expectedPort：${listHrefs.join(',')}`);
+    assert(anchorHrefs(elFor('appList')).length === 0, '列表卡片不应渲染端口文字链接');
+    // 卡片行尾「打开」图标：一键直达实际端口，但不显示端口号。
+    const cardOpen = elFor('appList').querySelector('a.card-open');
+    assert(cardOpen, '运行中且有端口的卡片缺少一键打开图标');
+    assert.equal(cardOpen.href, 'http://127.0.0.1:5174/', '卡片打开图标应指向实际端口');
+    assert(!cardOpen.textContent.includes('517'), '打开图标不应显示端口号');
+    // 停止态卡片不渲染打开图标（地址已失效）。
+    run(`appsCache[0].status = 'STOPPED'; renderApps();`);
+    assert(!elFor('appList').querySelector('a.card-open'), '停止的卡片不应有打开图标');
+    run(`appsCache[0].status = 'RUNNING'; renderApps();`);
+    // 端口入口挪进卡片操作菜单：菜单项应指向实际监听端口而非 expectedPort。
+    run(`openCardMenu(appsCache[0], 10, 10);`);
+    const menu = documentStub.body.querySelector('.ctx-menu');
+    assert(menu, '卡片操作菜单未弹出');
+    assert(menu.textContent.includes('打开端口 :5174'), `菜单缺少实际端口入口：${menu.textContent}`);
+    assert(menu.textContent.includes('复制端口地址 :5174'), `菜单缺少端口复制项：${menu.textContent}`);
+    assert(!menu.textContent.includes(':5173'), `菜单不应出现 expectedPort：${menu.textContent}`);
+    run(`closeCardMenu();`);
   });
 
   await check('详情卡生命周期控件：tree 复选框 + grace 毫秒输入，值跨重绘保留', () => {
@@ -507,29 +758,33 @@ try {
       const u = new URL(urls[0]);
       assert.equal(u.searchParams.get('tree'), '1');
       assert.equal(u.searchParams.get('grace'), '3000');
-      const banner = elFor('fatalBanner').textContent;
+      const banner = elFor('toastStack').textContent;
       assert(banner.includes('treeKilled=1'), banner);
       assert(banner.includes('killedPids=[4321]'), banner);
-      // 成功横幅必须是绿色成功态：红是危险态，沿用会让「停止成功」看起来像报错。
-      const classes = elFor('fatalBanner').className;
-      assert(classes.includes('ok'), `成功横幅缺少 ok 类：${classes}`);
-      assert(!classes.includes('warn') && !classes.includes('error'), `成功横幅不应带警告/错误类：${classes}`);
+      // 成功提示必须是绿色成功态：红是危险态，沿用会让「停止成功」看起来像报错。
+      const classes = elFor('toastStack').querySelector('.toast')?.className ?? '';
+      assert(classes.includes('ok'), `成功提示缺少 ok 类：${classes}`);
+      assert(!classes.includes('warn') && !classes.includes('error'), `成功提示不应带警告/错误类：${classes}`);
     } finally {
       run(`fetch = __origFetch;`);
       run(`lifecycleTree = false; lifecycleGrace = '';`);
     }
   });
 
-  await check('横幅配色分级：失败红、成功绿且切换时清理旧类', () => {
+  await check('提示配色分级：失败红、成功绿且同类覆盖', () => {
     run(`showBanner('x 失败', 'error', 'op')`);
-    assert(elFor('fatalBanner').className.includes('ok') === false, '失败横幅不应带 ok 类');
+    let b = elFor('toastStack').querySelector('.toast');
+    assert(b && !b.className.includes('ok'), '失败提示不应带 ok 类');
     run(`showBanner('x 成功', 'ok', 'op')`);
-    const b = elFor('fatalBanner');
-    assert(b.className.includes('ok'), `成功横幅缺少 ok 类：${b.className}`);
+    b = elFor('toastStack').querySelector('.toast');
+    assert(b.className.includes('ok'), `成功提示缺少 ok 类：${b.className}`);
     assert(!b.className.includes('warn'), `切换后残留 warn 类：${b.className}`);
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 1, '同类新提示应覆盖旧提示');
     run(`showBanner('x 警告', 'warn', 'op')`);
-    assert(!elFor('fatalBanner').className.includes('ok'), '切到警告后应清掉 ok 类');
+    b = elFor('toastStack').querySelector('.toast');
+    assert(!b.className.includes('ok'), '切到警告后应清掉 ok 类');
     run(`hideBanner()`);
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 0, 'hideBanner 应移除当前类提示');
   });
 
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
@@ -544,11 +799,11 @@ try {
     await run('loadStatus()');
   });
 
-  await check('loadSources 成功加载时清除残留横幅', async () => {
+  await check('loadSources 成功加载时清除残留提示', async () => {
     run(`showBanner('残留横幅')`);
-    assert.equal(run(`$('#fatalBanner').hidden`), false, '前置横幅应可见');
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 1, '前置提示应可见');
     await run('loadSources()');
-    assert.equal(run(`$('#fatalBanner').hidden`), true, '成功加载后横幅应隐藏');
+    assert.equal(elFor('toastStack').querySelectorAll('.toast').length, 0, '成功加载后提示应清除');
   });
 
   await check('403 后各轮询入口均不再发请求', async () => {

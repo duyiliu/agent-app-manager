@@ -177,12 +177,13 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
    ![深色详情与资源曲线](docs/images/manager-detail-dark.png)
 
-4. **查看日志**：日志源下拉可选当前 / 历史受管批次、非受管线索和项目 `.tmp` 兼容日志。工具栏支持合并 stdout / stderr、正则过滤、只看错误、暂停 / 恢复跟随、清屏和下载；过滤激活时只下载命中行。首次加载时顶部可能出现「从文件起始读取」提示，跟随滚动后移出视口。
+4. **查看日志**：日志源下拉可选当前 / 历史受管批次、非受管线索和项目 `.tmp` 兼容日志。工具栏支持合并 stdout / stderr、正则过滤、只看错误、暂停 / 恢复跟随、清屏、复制和下载；点击错误行会**选中**整段堆栈（不直接写剪贴板，Shift+点击扩展选区），拖动可自由选中文本；复制按钮或日志区聚焦后 Ctrl+C 复制选中内容，未选中时按当前过滤条件复制命中行；过滤激活时只下载命中行。首次加载时顶部可能出现「从文件起始读取」提示，跟随滚动后移出视口。
 
 5. **只读文件浏览**：点顶部「文件」打开当前应用根目录，可逐层展开、过滤和分页预览文本文件。`.git`、`node_modules`、`.env*`、常见私钥与许可文件不会显示，路径穿越与符号链接会被拒绝。
 
 6. **启动 / 停止 / 重启 / 移除**：详情卡按钮与 CLI 同一实现和安全边界，所有生命周期操作都要在 10 秒内再次点击「确认…」才执行；`--tree` 与优雅退出毫秒数在详情卡内设置，只作用于 stop / restart。非受管应用仅允许移除 STOPPED 登记；`STARTING` / `UNKNOWN` 未结记录需人工核验进程已退出后，点「ack 并启动」并再次确认。
 7. **端口诊断与自检**：预期端口旁的「诊断」只读查询占用信息（同 `manager port`），不接管外部进程；顶部「诊断」执行 `manager doctor` 并原样展示结果，不自动修复。
+8. **工作目录分组**：顶栏「分组」可在「不分组 / 工作目录」间切换。工作目录视图按 **git 主仓库**聚合：普通仓库根、仓库内子目录、标准 `git worktree`（含 submodule）归并到主仓库一组，组头显示 `N 个 worktree`。没有 `.git` 元数据的目录会先查 Paseo 工作区登记（`~/.paseo/projects/workspaces.json` 中 `isPaseoOwnedWorktree` 的 worktree 记录）归并到其主仓库，仍无匹配的才按登记路径各自成组。登记目录已删除的应用卡片标注「目录不存在」，组头提示 `N 个目录缺失`，仍按记忆路径展示以便核对登记。应用卡片 meta 区与详情卡展示当前 **git 分支**（读 `.git/HEAD`，worktree 读各自 gitdir 的 HEAD，Paseo 记录用其 `branch` 字段）；detached HEAD 或不可读时不显示。
 
 原单项目 Viewer 已移除，能力并入本台。管理台地址仅本机可达，**不要转发**；日志与文件预览可能含敏感信息，外发前先检查。
 
@@ -239,9 +240,13 @@ examples/spring-boot-demo/         # 本地测试项目
 改动 `manager.mjs` / `manager-ui` / `lib` 后运行：
 
 ```bash
-npm test          # 完整冒烟
-npm run check     # 全部 .mjs 语法检查 + 脱敏 / 健康 / 环境 / 运行时冒烟
+npm run build     # 全部 .mjs 语法检查 + 版本一致性校验（改动后日常验证，秒级）
+node skills/agent-app-manager/scripts/test/<受影响>.mjs   # 只跑受影响冒烟
+npm test          # 完整冒烟：串行 ≈11 分钟，-j 4 ≈6 分钟
+npm run check     # build + test（= 一次全量）：提交前统一跑
 ```
+
+改动过程中只跑 `build` + 受影响单测；提交前统一跑 `npm run check`。各冒烟相互隔离（独立临时 home、OS 分配端口），单测全过即可信——全量只在提交前、发版、每周巡检或用户明确要求时跑，不要为"确认没破坏别处"中途随手跑。
 
 `npm test` / `npm run check` 由 `scripts/test-all.mjs` 发现式执行 `test/` 下全部冒烟：日志轮转、管理台、健康总览、生命周期与未结记录、env / envFile、`--wait-ready`、remove / prune / 统一日志源、日志过滤、管理台日志源跟随、真实进程生命周期等。CI 分三档：PR 上 `ubuntu-latest` 跑全量冒烟（约 3 分钟）、`windows-latest` 跑关键集冒烟（约 4.5 分钟，覆盖生命周期、env 脱敏、发现证据、锁、remove/prune）；`windows-latest` 全量冒烟拆为矩阵并行约 4-5 分钟，只在发版 tag、每周巡检、手动触发时运行（main push 与 PR 均不跑）；macOS 未纳入支持范围。
 
