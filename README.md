@@ -9,13 +9,13 @@
 **官方安装：**
 
 ```bash
-npx skills add duyiliu/agent-app-manager#v0.15.0 --skill agent-app-manager -g
+npx skills add duyiliu/agent-app-manager#v0.16.0 --skill agent-app-manager -g
 ```
 
 **国内加速安装（第三方 skills-cn）：**
 
 ```bash
-npx skills-cn@latest add duyiliu/agent-app-manager#v0.15.0 --skill agent-app-manager -g -y
+npx skills-cn@latest add duyiliu/agent-app-manager#v0.16.0 --skill agent-app-manager -g -y
 ```
 
 安装命令默认固定版本；换成其他版本时修改 `#vX.Y.Z` 即可，版本列表见 [GitHub Releases](https://github.com/duyiliu/agent-app-manager/releases)；国内加速命令同样支持指定版本。省略 `#vX.Y.Z` 则安装最新主线。`-g` 表示全局安装，`-y` 表示跳过交互确认；`skills-cn` 为第三方 CLI。安装后根据 Agent 实际加载的 Skill 目录定位脚本，已安装版本可通过 `manager.mjs version` 查看。
