@@ -1,4 +1,4 @@
-. "$PSScriptRoot/../ps/process-tree.ps1"
+﻿. "$PSScriptRoot/../ps/process-tree.ps1"
 function Row($id, $parent, $seconds) {
   [pscustomobject]@{ ProcessId = $id; ParentProcessId = $parent; CreationDate = if ($null -eq $seconds) { $null } else { [datetime]'2026-01-01T00:00:00Z' + [timespan]::FromSeconds($seconds) } }
 }

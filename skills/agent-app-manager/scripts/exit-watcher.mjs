@@ -50,8 +50,9 @@ function runHelper(file, args) {
 async function waitForTargetExit() {
   if (process.platform === 'win32') {
     // WindowsApps 别名可能 EPERM：与 probe.mjs 同口径回退常见安装路径。
+    // -ExecutionPolicy Bypass：避免用户/企业执行策略（Restricted）拒绝运行本地脚本。
     const args = [
-      '-NoProfile', '-NonInteractive', '-File', PS_PROC,
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PS_PROC,
       '-Action', 'wait-exit', '-Id', String(targetPid), '-CreationFileTime', String(creationFileTime),
       '-ReadyFile', readyFile,
     ];

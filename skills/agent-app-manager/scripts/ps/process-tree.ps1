@@ -1,4 +1,4 @@
-# 按同一快照中的创建时间验证父子关系；旧进程不能成为复用 PID 后的新进程的后代。
+﻿# 按同一快照中的创建时间验证父子关系；旧进程不能成为复用 PID 后的新进程的后代。
 function Get-ProcessTreeRows($rows, [long]$rootPid) {
   $byId = @{}
   foreach ($row in $rows) { $byId[[long]$row.ProcessId] = $row }
