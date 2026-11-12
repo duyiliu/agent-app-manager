@@ -1,4 +1,4 @@
-param([string]$Mode, [int]$RootId, [int]$SentinelId, [string]$RootTime, [string]$RootImage)
+﻿param([string]$Mode, [int]$RootId, [int]$SentinelId, [string]$RootTime, [string]$RootImage)
 # 只在测试进程中替换 CIM 快照：把真实的旧哨兵挂到新根 PID，模拟父 PID 复用。
 function Get-CimInstance {
   [CmdletBinding()]
