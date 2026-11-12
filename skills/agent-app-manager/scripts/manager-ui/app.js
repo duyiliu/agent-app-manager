@@ -624,7 +624,7 @@ let statusFilter = 'all';         // all | active | attention | stopped
 const pinnedAliases = new Set();  // 置顶别名：任何排序下都排最前（按 alias 记，与选中同一引用粒度）
 const unreadAliases = new Set();  // 批次异常结束后的未读标记，选中即清除
 const expandedGroupLimits = new Set();
-let metaItems = { branch: true, exit: true, tags: true, ago: true };
+let metaItems = { branch: true, tags: true, ago: true };
 try {
   const savedSort = localStorage.getItem('pr-ui-app-sort');
   if (['status', 'name', 'activity'].includes(savedSort)) appSort = savedSort;
@@ -876,19 +876,15 @@ function renderApps() {
     tail.appendChild(kebab);
     head.appendChild(tail);
     card.appendChild(head);
-    // 列表卡片只放状态相关信息：分支/退出码/标签/错误（「列」菜单可分别关）。
+    // 列表卡片只放状态相关信息：分支/标签/错误（「列」菜单可分别关）。
     // pid、端口、mode 这类标识信息详情卡与右键菜单都有，不进列表。
+    // 退出码不进列表（#219）：状态 chip 与「需关注」已覆盖异常判断，具体
+    // 退出码去详情卡与运行记录看，信息不丢失。
     const meta = el('div', 'app-meta');
     if (a.branch && metaItems.branch) {
       const br = el('span', 'm-branch', a.branch, 'branch');
       br.title = `git 分支：${a.branch}`;
       meta.appendChild(br);
-    }
-    // 退出码染色分意图：manager-stop（主动停止）用默认色不标红——不是异常。
-    if (a.exit && metaItems.exit) {
-      const ex = el('span', 'm-exit v ' + (a.exit.source === 'manager-stop' ? '' : exitClass(a.exit)), exitLabel(a.exit));
-      if (a.exit.source === 'manager-stop') ex.title = '由管理台/CLI 主动停止';
-      meta.appendChild(ex);
     }
     if (a.tags?.length && metaItems.tags) meta.appendChild(el('span', 'm-tags', a.tags.map(t => '#' + t).join(' ')));
     if (a.error) meta.appendChild(el('span', 'm-err v bad', a.error));
@@ -2387,7 +2383,7 @@ $('#filterChips').addEventListener('click', (e) => {
 });
 // meta 列偏好：details 原生开合，change 只负责写回偏好并重绘。
 {
-  const META_ITEM_LABELS = { branch: '分支', exit: '退出码', tags: '标签', ago: '时间' };
+  const META_ITEM_LABELS = { branch: '分支', tags: '标签', ago: '时间' };
   const metaBody = $('#metaMenuBody');
   for (const [key, label] of Object.entries(META_ITEM_LABELS)) {
     const input = document.createElement('input');
