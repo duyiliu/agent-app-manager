@@ -145,7 +145,7 @@ node "<skill-dir>/scripts/manager.mjs" ui
 
 | 平台 | 支持情况 |
 | --- | --- |
-| Windows 11 + PowerShell 7 | 支持；身份核验 / 终止 / 端口诊断走 `ps/proc.ps1` |
+| Windows 11 | 支持；用系统自带 PowerShell 5.1（pwsh 7 兜底），身份核验 / 终止 / 端口诊断走 `ps/proc.ps1` |
 | Linux | 支持；走 `/proc`，不依赖 pwsh |
 | macOS | 不支持（无 `/proc`），命令以 `PLATFORM_UNSUPPORTED` 拒绝 |
 

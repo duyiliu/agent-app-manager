@@ -42,7 +42,7 @@ Agent App Manager：统一管理由 AI Coding Agent 启动并登记的本地应�
 - **启动即登记**：不要求用户预先 `register`；首次由 Skill 在获得启动授权后提交经过确认的启动描述。
 - **管理范围最小化**：仅记录本 Skill 发起的启动；IDEA Run/Debug、手工 Maven/Gradle、手工 `java -jar`、Docker 启动均不纳入注册表或生命周期管理。外部进程只可用于端口冲突诊断，绝不被自动接管/停止。
 - **零项目侵入**：默认不改 `pom.xml`、`build.gradle`、`rebel.xml`、源码或项目启动脚本；构建、配置变更与初始化依 PR #5 的独立授权规则处理。
-- **简单部署**：Windows 11 + PowerShell 7，或 Linux（`/proc`，不依赖 pwsh）；Node.js 22。Linux 安全停止还需要随 Skill 分发的 Python 3.9+ pidfd helper 与内核 pidfd 支持；缺少时拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`。尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地管理台：默认只读展示，启停/移除仅限本机且须页面显式二次确认；按需启动、非常驻、仅绑定 127.0.0.1 且无令牌（本机可信用户，见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发；Linux 路径不调用 PowerShell。macOS 暂不支持（无 `/proc`）。
+- **简单部署**：Windows 11（系统自带 PowerShell 5.1，pwsh 7 兜底），或 Linux（`/proc`，不依赖 pwsh）；Node.js 22。Linux 安全停止还需要随 Skill 分发的 Python 3.9+ pidfd helper 与内核 pidfd 支持；缺少时拒绝终止，不回退到有 PID 复用竞态的 `kill(pid)`。尽量仅使用 Node 内置模块；不新增 npm 包、服务、Daemon 或数据库。唯一的 Web 界面是 `manager ui` 本地管理台：默认只读展示，启停/移除仅限本机且须页面显式二次确认；按需启动、非常驻、仅绑定 127.0.0.1 且无令牌（本机可信用户，见 §2.2）。任何需要的 PowerShell 适配脚本随 Skill 分发；Linux 路径不调用 PowerShell。macOS 暂不支持（无 `/proc`）。
 - **保持原能力**：PR #5 现有单项目启动规程、热加载验证、`.tmp` 日志与只读日志查看能力不被替换（v2.2 起并入 `manager ui`，原单项目 Viewer 移除）。
 
 非目标：项目全盘扫描、通用进程盘点、IDEA 进程关联与接管、无差别批量启停（all/通配符/隐式编排；用户显式声明的 `tags` + `--tag` 分组批量例外，见 §4）、自动构建、跨机器管理、Docker 编排、JVM 监控、远程管理、对外网开放或常驻的 Web 控制台、多实例托管（本地 Web 管理台的边界见 §2.2）。

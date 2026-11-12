@@ -28,32 +28,41 @@ function ensureSupported() {
 
 // Windows 应用执行别名（AppData\Local\Microsoft\WindowsApps\pwsh.exe）是 reparse point：
 // 未安装或商店别名被禁用时 spawnSync('pwsh') 返回 EPERM 而非 ENOENT；别名也可能在 PATH
-// 中排在真实安装（Program Files\PowerShell\7）之前。启动失败码一律回退常见安装路径，
-// 全部失败才按缺失上报（调用方 ENOENT → PWSH_MISSING）。
+// 中排在真实安装（Program Files\PowerShell\7）之前。powershell.exe（5.1）为 Windows 自带
+// 固定路径，无此问题。启动失败码一律回退其余候选，全部失败才按缺失上报（ENOENT → PWSH_MISSING）。
 export const PWSH_LAUNCH_FAIL = new Set(['ENOENT', 'EPERM', 'EACCES', 'EINVAL']);
 let pwshExeCache = null;
 
 export function pwshCandidates() {
-  const list = ['pwsh'];
-  if (IS_WIN) {
-    const e = process.env;
-    for (const p of [
-      e.ProgramFiles && path.join(e.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'),
-      e['ProgramFiles(x86)'] && path.join(e['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'),
-      e.LOCALAPPDATA && path.join(e.LOCALAPPDATA, 'Microsoft', 'PowerShell', 'pwsh.exe'),
-      e.USERPROFILE && path.join(e.USERPROFILE, '.dotnet', 'tools', 'pwsh.exe'),
-    ]) if (p && !list.includes(p)) list.push(p);
-  }
+  // Windows：优先系统自带 powershell.exe（PowerShell 5.1，零额外依赖），pwsh 7 兜底——
+  // 已装的用户在 5.1 异常时自动回退，不再硬依赖安装 pwsh。其他平台保持原 pwsh 探测。
+  if (!IS_WIN) return ['pwsh'];
+  const e = process.env;
+  const sysRoot = e.SystemRoot || e.windir || 'C:\\Windows';
+  const list = [
+    'powershell.exe',
+    path.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    'pwsh',
+  ];
+  for (const p of [
+    e.ProgramFiles && path.join(e.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'),
+    e['ProgramFiles(x86)'] && path.join(e['ProgramFiles(x86)'], 'PowerShell', '7', 'pwsh.exe'),
+    e.LOCALAPPDATA && path.join(e.LOCALAPPDATA, 'Microsoft', 'PowerShell', 'pwsh.exe'),
+    e.USERPROFILE && path.join(e.USERPROFILE, '.dotnet', 'tools', 'pwsh.exe'),
+  ]) if (p && !list.includes(p)) list.push(p);
   return list;
 }
 
 export function spawnPwsh(args, opts) {
+  // -ExecutionPolicy Bypass：避免用户/企业执行策略（Restricted）拒绝运行本地脚本；
+  // 在此统一注入，所有经 spawnPwsh 的调用点共享。
+  const finalArgs = ['-ExecutionPolicy', 'Bypass', ...args];
   const candidates = pwshExeCache
     ? [pwshExeCache, ...pwshCandidates().filter((c) => c !== pwshExeCache)]
     : pwshCandidates();
   let last = null;
   for (const exe of candidates) {
-    const r = spawnSync(exe, args, opts);
+    const r = spawnSync(exe, finalArgs, opts);
     if (!r.error || !PWSH_LAUNCH_FAIL.has(r.error.code)) {
       pwshExeCache = exe;
       return r;
@@ -61,7 +70,7 @@ export function spawnPwsh(args, opts) {
     last = r;
   }
   pwshExeCache = null;
-  last.error = Object.assign(new Error(`spawnSync pwsh ENOENT（含安装路径回退：${candidates.slice(1).join(', ') || '无'}）`), { code: 'ENOENT' });
+  last.error = Object.assign(new Error(`spawnSync PowerShell ENOENT（候选：${candidates.join(', ')}）`), { code: 'ENOENT' });
   return last;
 }
 
@@ -80,8 +89,8 @@ function psProcOnce(action, params) {
     : action === 'resources' || action === 'probe' ? (params.intervalMs ?? 200) + 15000 : 30000;
   const r = spawnPwsh(args, { encoding: 'utf8', timeout, windowsHide: true });
   if (r.error) {
-    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
-    throw dependencyError(`pwsh 调用失败：${r.error.message}`);
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到可用的 PowerShell（powershell.exe/pwsh），受管启停依赖它');
+    throw dependencyError(`PowerShell 调用失败：${r.error.message}`);
   }
   if (r.status !== 0) {
     const e = dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
@@ -125,7 +134,7 @@ export function portOccupants(port) {
 function portOccupantsOnce(port) {
   const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'port', '-Id', String(port)], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
-    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口诊断依赖它');
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到可用的 PowerShell（powershell.exe/pwsh），端口诊断依赖它');
     const e = dependencyError(`端口诊断调用失败：${r.error.message}`);
     e.psTransient = true;
     throw e;
@@ -174,7 +183,7 @@ function listeningPortsOnce(pid) {
 
 function parseListeningOutput(r) {
   if (r.error) {
-    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），端口探测依赖它');
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到可用的 PowerShell（powershell.exe/pwsh），端口探测依赖它');
     const e = dependencyError(`端口探测调用失败：${r.error.message}`);
     e.psTransient = true;
     throw e;
@@ -241,8 +250,8 @@ export function listDescendants(pid, expected = null) {
   const r = spawnPwsh(args,
     { encoding: 'utf8', timeout: 30000, windowsHide: true });
   if (r.error) {
-    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
-    throw dependencyError(`pwsh 调用失败：${r.error.message}`);
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到可用的 PowerShell（powershell.exe/pwsh），受管启停依赖它');
+    throw dependencyError(`PowerShell 调用失败：${r.error.message}`);
   }
   if (r.status !== 0) throw dependencyError(`proc.ps1 退出码 ${r.status}：${(r.stderr || '').trim()}`);
   const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
@@ -273,7 +282,7 @@ function verifyRunsOnce(norm, count) {
   const r = spawnPwsh(['-NoProfile', '-NonInteractive', '-File', PS_PROC, '-Action', 'verify-batch', '-Json', payload],
     { encoding: 'utf8', timeout: 30000 + count * 500, windowsHide: true });
   if (r.error) {
-    if (r.error.code === 'ENOENT') throw dependencyError('未找到 pwsh（PowerShell 7），受管启停依赖它');
+    if (r.error.code === 'ENOENT') throw dependencyError('未找到可用的 PowerShell（powershell.exe/pwsh），受管启停依赖它');
     const e = dependencyError(`pwsh 调用失败：${r.error.message}`);
     e.psTransient = true;
     throw e;

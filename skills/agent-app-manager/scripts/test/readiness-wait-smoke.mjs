@@ -35,7 +35,7 @@ const check = async (name, fn) => {
   }
 };
 const psMissing = (r) => r.code === 4
-  && (r.json?.error?.code === 'PWSH_MISSING' || r.text.includes('PWSH_MISSING') || r.text.includes('spawnSync pwsh'));
+  && (r.json?.error?.code === 'PWSH_MISSING' || r.text.includes('PWSH_MISSING') || r.text.includes('spawnSync PowerShell'));
 const descFile = (d) => {
   const file = path.join(base, `desc-${d.alias}.json`);
   fs.writeFileSync(file, JSON.stringify({ root, cwd: root, entry: 'default', mode: 'node', exe: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], ...d }), 'utf8');

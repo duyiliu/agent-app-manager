@@ -1,4 +1,4 @@
-# agent-app-manager 进程身份核验与终止适配（PowerShell 7）。
+﻿# agent-app-manager 进程身份核验与终止适配（PowerShell 5.1+/7）。
 # 设计基线：docs/design.md v2 —— 身份核验与终止必须针对同一进程句柄，防止"先查 PID 再按 PID 杀"的复用竞态。
 # 输出：单行 JSON。result ∈ ok | mismatch | exited | notfound | terminated | terminateTimeout | error。
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
@@ -377,8 +377,17 @@ public static class ProcUtil {
 # 命中直接加载，省掉每次 0.5-1s 的 Roslyn 编译（冒烟场景每用例数十次探针调用）。
 # 并发编译各写独立临时文件再原子移动，重复写出的产物字节相同，无竞态窗口。
 $cacheDir = Join-Path ([IO.Path]::GetTempPath()) 'aam-proc-cache'
-$srcHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($typeSrc))).Replace('-', '').Substring(0, 16)
-$dll = Join-Path $cacheDir "proc-$srcHash.dll"
+# SHA256.HashData 是 .NET 5+ 静态方法，PowerShell 5.1（.NET Framework）没有；
+# 用 Create()+ComputeHash 实例写法同时兼容 5.1 与 7，哈希值不变。
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+  $srcHash = [BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($typeSrc))).Replace('-', '').Substring(0, 16)
+} finally {
+  $sha256.Dispose()
+}
+# 5.1 编译 .NET Framework 程序集、7 编译 .NET Core，同名 DLL 会互相顶替，按运行时区分文件名。
+$psRt = if ($PSVersionTable.PSVersion.Major -ge 7) { 'pwsh' } else { 'ps51' }
+$dll = Join-Path $cacheDir "proc-$psRt-$srcHash.dll"
 $loaded = $false
 if (Test-Path $dll) {
   try { Add-Type -Path $dll; $loaded = $true } catch { $loaded = $false }
@@ -386,7 +395,7 @@ if (Test-Path $dll) {
 if (-not $loaded) {
   try {
     New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
-    $tmp = Join-Path $cacheDir "proc-$srcHash.$PID.dll"
+    $tmp = Join-Path $cacheDir "proc-$psRt-$srcHash.$PID.dll"
     Add-Type -TypeDefinition $typeSrc -Language CSharp -OutputAssembly $tmp
     Move-Item -Force $tmp $dll
     Add-Type -Path $dll # -OutputAssembly 只写文件不加载，需显式导入
@@ -433,7 +442,9 @@ if ($Action -eq 'verify-batch') {
   $items = @()
   try {
     $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
-    $items = @($jsonText | ConvertFrom-Json)
+    # 5.1 的 ConvertFrom-Json 管道输出不枚举数组，@() 会收到嵌套数组；先赋值再展开，与 7 行为一致。
+    $parsed = $jsonText | ConvertFrom-Json
+    $items = @($parsed)
   } catch {
     [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
     exit 0
@@ -531,7 +542,8 @@ if ($Action -eq 'resources') {
   $items = @()
   try {
     $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
-    $items = @($jsonText | ConvertFrom-Json)
+    $parsed = $jsonText | ConvertFrom-Json
+    $items = @($parsed)
   } catch {
     [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
     exit 0
@@ -710,7 +722,8 @@ if ($Action -eq 'listening-batch') {
   $pids = @()
   try {
     $jsonText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Json))
-    $pids = @($jsonText | ConvertFrom-Json)
+    $parsed = $jsonText | ConvertFrom-Json
+    $pids = @($parsed)
   } catch {
     [pscustomobject]@{ result = 'error'; code = 'badJson'; message = $_.Exception.Message } | ConvertTo-Json -Compress
     exit 0
