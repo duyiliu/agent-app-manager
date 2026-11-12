@@ -286,7 +286,7 @@ aside {
   color:var(--text)}
 .app-meta {
   display:grid;
-  grid-template-columns:max-content max-content minmax(0,max-content) minmax(0,1fr);
+  grid-template-columns:max-content minmax(0,max-content) minmax(0,1fr);
   align-items:center;
   gap:8px;
   margin-top:5px;
@@ -294,14 +294,14 @@ aside {
   color:var(--text-faint);
   overflow:hidden;
   white-space:nowrap}
-/* 卡片 meta 只放状态相关信息（分支/退出码/标签/错误）；pid、端口、mode 这类
-   标识信息在详情卡与右键菜单里，不进列表。错误文案走末尾弹性列，宽度不足省略。 */
+/* 卡片 meta 只放状态相关信息（分支/标签/错误）；pid、端口、mode 这类
+   标识信息在详情卡与右键菜单里，不进列表。错误文案走末尾弹性列，宽度不足省略。
+   退出码不进列表（#219）：异常判断走状态 chip 与「需关注」，具体值在详情与运行记录。 */
 .app-meta > * { min-width:0; overflow:hidden; text-overflow:ellipsis }
 .m-branch { grid-column:1; color:var(--text-dim); max-width:140px; display:inline-flex; align-items:center; gap:4px }
 .m-branch::before { flex:none; width:11px; height:11px }
-.m-exit { grid-column:2 }
-.m-tags { grid-column:3 }
-.m-err { grid-column:4 }
+.m-tags { grid-column:2 }
+.m-err { grid-column:3 }
 .pill {
   flex:none;
   display:inline-flex;
