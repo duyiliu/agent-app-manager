@@ -5,6 +5,10 @@ const send = (res, status, data) => {
   res.end(JSON.stringify(data));
 };
 
+const ping = (res) => {
+  return send(res, 200, { pong: true, token: 'node-demo-ping-2026' });
+};
+
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -12,6 +16,9 @@ http.createServer((req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/api/hello') {
     return send(res, 200, { message: `Hello, ${url.searchParams.get('name') ?? 'Agent App Manager'}!`, version: 'v1' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/ping') {
+    return ping(res);
   }
   if (req.method === 'POST' && url.pathname === '/api/logs') {
     const level = url.searchParams.get('level') ?? 'INFO';
