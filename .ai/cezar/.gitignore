@@ -33,3 +33,6 @@ automation-poll.lock
 automation-poll.lock.guard/
 automation-mutation.lock.guard/
 automation-mutation.lock
+auto-merge-verdict.json
+auto-merge-verdict.md
+ui-state.json
