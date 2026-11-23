@@ -1,0 +1,182 @@
+name: unattended-validate
+description: 无人值守开发验证：实现→自测→提交→草稿 PR→等 CI→失败自修→独立审查→回修→PR 评论→确定性门禁；通过即自动合并并结束，阻止则转人工。
+version: 2
+nodes:
+  - id: start
+    type: start
+  - id: implement
+    type: agent
+    name: Implement
+    runner: codex
+    prompt: |
+      {{task}}
+
+      约束：
+      - 严格遵守任务原文里的标识符：函数名、文件名、导出名、参数名与顺序必须逐字一致，
+        不得改写、缩写、纠正拼写或「优化」命名。任务写什么就实现什么。
+      - 只改本任务需要的文件；不得修改 README.md 或 docs/ 下的规则文档。
+      - 不得合并、不得部署、不得修改 Linear。
+      - 上一轮独立审查意见（如有）：{{nodes.review.summary}}
+
+      完成后说明改动与验证结果，并以 CEZ:VERDICT finish 结束；任务有误或缺少关键信息时以 CEZ:VERDICT blocked 结束。
+    verdicts: [finish, blocked]
+  - id: test
+    type: check
+    name: npm test
+    command: "npm test"
+  - id: commit
+    type: git.commit
+    message: "cezar: implement task"
+  - id: pr
+    type: github.draft-pr
+  - id: push
+    type: git.push
+  - id: wait-ci
+    type: github.wait-ci
+    timeoutMs: 1800000
+    pollMs: 30000
+  - id: fix
+    type: agent
+    name: Fix from failing tests or CI
+    runner: codex
+    prompt: |
+      测试或 CI 失败。读取失败信息，做最小改动修复，不改变任务范围；不得修改 README.md 或 docs/ 下的规则文档，不得合并、不得部署。
+      修好后运行 npm test 确认，并以 CEZ:VERDICT fixed 结束；无法定位根因时以 CEZ:VERDICT stuck 结束。
+    verdicts: [fixed, stuck]
+  - id: review
+    type: agent
+    name: Independent review
+    runner: claude
+    prompt: |
+      独立审查当前任务分支相对 base 的全部改动。只评审，不实现，不修改文件。
+
+      任务原文：
+      {{task}}
+
+      第一步必须做「需求逐项对照」：把任务原文里出现的每一个具体标识符——函数名、类名、
+      文件名、模块路径、导出名、参数名与参数顺序、返回值形状、常量和字符串字面量——
+      抄成一张清单，逐条到 diff 里核对是否存在且拼写完全一致。
+      任何一条不一致（哪怕只差一个字母、大小写、下划线、参数顺序）都属于需求未完成，
+      必须判 changes 并在正文里指出「任务要求 X，实际是 Y」。
+      严禁用「实现与题意一致」「语义等价」这类说法跳过逐字核对；
+      提示词写错字时，正确做法是判 changes 并要求按任务原文改名，而不是替它解释。
+
+      第二步再看：测试是否覆盖关键行为、是否有明显回归或越界改动、
+      是否改了 README.md 或 docs/ 下的规则文档、是否有未提交文件。
+
+      正文先写 3 行以内的审查结论，随后列出逐项对照表（任务要求 / 实际 / 结论）。
+      通过：CEZ:VERDICT approve；需回修：CEZ:VERDICT changes。
+    verdicts: [approve, changes]
+  - id: pr-comment
+    type: github.pr-comment
+    body: "独立审查：{{nodes.review.verdict}}\n\n{{nodes.review.summary}}"
+  - id: merge-gate
+    type: check
+    name: Auto-merge gate
+    command: "node scripts/auto-merge-gate.mjs --base main --merge > /dev/null 2>&1"
+  - id: merge-gate-report
+    type: agent
+    name: Read gate verdict
+    runner: codex
+    prompt: |
+      自动合并门禁已经运行完毕，结果写在当前工作目录的 .ai/cezar/auto-merge-verdict.md。
+
+      请读取该文件全文，并在你的最终消息里把全文贴出来。不要改写、不要总结、不要增删任何行。
+      只做这一件事，不修改任何文件。你的最终消息的第一行必须是该文件的第一个字符；
+      不要写任何开场白、解释或过渡句。
+
+      最后一行以 CEZ:VERDICT posted 结束。
+    verdicts: [posted]
+  - id: merge-gate-comment
+    type: github.pr-comment
+    body: "{{nodes.merge-gate-report.summary}}"
+  - id: blocked
+    type: gate.human
+    message: "实现阶段报告受阻，需要人工判断。批准或拒绝都只结束本次任务，不会合并或部署。"
+  - id: end
+    type: end
+  - id: end-failed
+    type: end
+    status: failed
+  - id: test-loop
+    type: loop
+    max: 2
+  - id: ci-loop
+    type: loop
+    max: 2
+  - id: review-loop
+    type: loop
+    max: 2
+edges:
+  - from: start
+    to: implement
+  - from: implement.finish
+    to: test
+  - from: implement.blocked
+    to: blocked
+  - from: test.pass
+    to: commit
+  - from: test.fail
+    to: test-loop
+  - from: test-loop.repeat
+    to: fix
+  - from: test-loop.exhausted
+    to: blocked
+  - from: commit.done
+    to: pr
+  - from: commit.nothing
+    to: pr
+  - from: commit.failed
+    to: blocked
+  - from: pr.created
+    to: push
+  - from: pr.failed
+    to: blocked
+  - from: push.done
+    to: wait-ci
+  - from: push.failed
+    to: blocked
+  - from: wait-ci.green
+    to: review
+  - from: wait-ci.red
+    to: ci-loop
+  - from: ci-loop.repeat
+    to: fix
+  - from: ci-loop.exhausted
+    to: blocked
+  - from: wait-ci.timeout
+    to: blocked
+  - from: wait-ci.failed
+    to: blocked
+  - from: fix.fixed
+    to: test
+  - from: fix.stuck
+    to: blocked
+  - from: review.approve
+    to: pr-comment
+  - from: review.changes
+    to: review-loop
+  - from: review-loop.repeat
+    to: implement
+  - from: review-loop.exhausted
+    to: blocked
+  - from: pr-comment.done
+    to: merge-gate
+  - from: pr-comment.failed
+    to: merge-gate
+  - from: merge-gate.pass
+    to: merge-gate-report
+  - from: merge-gate.fail
+    to: blocked
+  - from: merge-gate-report.posted
+    to: merge-gate-comment
+  - from: merge-gate-report.failed
+    to: merge-gate-comment
+  - from: merge-gate-comment.done
+    to: end
+  - from: merge-gate-comment.failed
+    to: end
+  - from: blocked.approve
+    to: end-failed
+  - from: blocked.reject
+    to: end-failed
